@@ -95,10 +95,7 @@ td.n, th.n { text-align: right; }
 tr:last-child td { border-bottom: 0; }
 .warnline { color: var(--warn); }
 .empty { color: var(--ink-3); padding: 16px; text-align: center; }
-.keybox { max-width: 360px; margin: 18vh auto 0; }
-.keybox input { width: 100%; font: inherit; color: var(--ink); background: var(--input-bg); border: 1px solid var(--line-strong); border-radius: var(--radius-control); padding: 8px 10px; margin-top: 10px; }
-.keybox button, .link { font: inherit; font-size: 12px; color: var(--ink); background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--radius-control); padding: 6px 12px; margin-top: 10px; cursor: pointer; }
-.link { background: transparent; border: 0; color: var(--ink-3); padding: 0; margin: 0; }
+.link { font: inherit; font-size: 12px; background: transparent; border: 0; color: var(--ink-3); padding: 0; margin: 0; }
 .err { color: var(--danger); font-size: 12px; margin-top: 8px; }
 @media (max-width: 760px) {
   .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
@@ -193,7 +190,11 @@ function limitsFor(entry) {
 function stateFor(entry) {
   if (entry.disabled) return { cls: "off", text: "Off" };
   const retry = entry.next_retry_after ? Date.parse(entry.next_retry_after) : 0;
-  if (retry && retry > Date.now()) return { cls: "cool", text: "Cooling, back in " + until(retry), until: retry };
+  if (retry && retry > Date.now()) {
+    const week = limitsFor(entry).week;
+    const why = week && week.pct >= 100 ? "Weekly limit reached" : "Rate limited";
+    return { cls: "cool", text: why + ", back in " + until(retry), until: retry };
+  }
   if (entry.unavailable) return { cls: "cool", text: "Unavailable" };
   const st = String(entry.status || "").toLowerCase();
   if (st === "error") return { cls: "err", text: entry.status_message ? "Error: " + entry.status_message : "Error" };
@@ -280,8 +281,8 @@ function hitRate(c) {
   return total ? Math.round((read / total) * 100) + "%" : "–";
 }
 
-function render(creds, summary, routing) {
-  const files = (creds.files || []).filter((f) => ["claude", "codex"].includes(String(f.provider || f.type).toLowerCase()));
+function render(accounts, summary, routing) {
+  const files = (accounts || []).filter((f) => ["claude", "codex"].includes(String(f.provider || f.type).toLowerCase()));
   const byProvider = { claude: [], codex: [] };
   for (const f of files) byProvider[String(f.provider || f.type).toLowerCase()].push(f);
   const names = {};
@@ -291,7 +292,8 @@ function render(creds, summary, routing) {
   const sessions = summary.sessions || [];
   const switched = sessions.filter((s) => (s.auth_ids || []).length > 1).length;
   const recent = sessions.filter((s) => Date.now() - Date.parse(s.last_seen) < 864e5).length;
-  const strategy = routing.strategy || "";
+  const strategyNames = { "soonest-reset": "soonest reset first", "fill-first": "fill first", "round-robin": "round robin", "weighted-round-robin": "weighted round robin" };
+  const strategy = strategyNames[routing.strategy] || routing.strategy || "";
   const affinity = routing.session_affinity;
 
   let html = `<header>
@@ -302,7 +304,7 @@ function render(creds, summary, routing) {
         <span class="chip"><b>${byProvider.claude.length}</b> Claude · <b>${byProvider.codex.length}</b> Codex</span>
       </div>
     </div>
-    <div class="meta">Updated ${new Date(summary.generated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} · <button class="link" id="forget">Forget key</button></div>
+    <div class="meta">Updated ${new Date(summary.generated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}${key ? ` · <button class="link" id="forget">Forget key</button>` : ""}</div>
   </header>
   <div class="stats">
     <div class="stat"><div class="label">Requests today</div><div class="value">${fmt(today.requests)}</div><div class="sub">${fmt(week.requests)} in 7 days${today.failed ? ` · <span class="warnline">${fmt(today.failed)} failed</span>` : ""}</div></div>
@@ -332,7 +334,8 @@ function render(creds, summary, routing) {
   }
   html += `</div>`;
   app.innerHTML = html;
-  document.getElementById("forget").onclick = () => { try { localStorage.removeItem(KEY_STORE); } catch (e) {} key = ""; showKey(); };
+  const forget = document.getElementById("forget");
+  if (forget) forget.onclick = () => { try { localStorage.removeItem(KEY_STORE); } catch (e) {} key = ""; load(); };
   app.querySelectorAll(".seg button").forEach((b) => b.onclick = () => setMode(b));
 }
 
@@ -345,45 +348,37 @@ async function api(path, opts = {}) {
 
 async function setMode(button) {
   if (busy) return;
+  if (!key) {
+    const entered = (window.prompt("Management key, needed once to change accounts") || "").trim();
+    if (!entered) return;
+    key = entered;
+    try { localStorage.setItem(KEY_STORE, key); } catch (e) {}
+  }
   busy = true;
   app.querySelectorAll(".seg button").forEach((b) => b.disabled = true);
   const name = button.dataset.name, want = button.dataset.mode;
   try {
     await api("/credentials/status", { method: "PATCH", body: JSON.stringify({ name, disabled: want === "off" }) });
     if (want !== "off") await api("/credentials/fields", { method: "PATCH", body: JSON.stringify({ name, priority: want === "reserve" ? -1 : 0 }) });
-  } catch (e) { alert("Could not change account: " + e.message); }
+  } catch (e) {
+    if (e.auth) { try { localStorage.removeItem(KEY_STORE); } catch (x) {} key = ""; }
+    alert("Could not change account: " + e.message);
+  }
   busy = false;
   load();
 }
 
 async function load() {
-  if (!key) return showKey();
   try {
-    const [creds, usage] = await Promise.all([
-      api("/credentials"),
-      api("/observability/usage/summary?sessions=100"),
-    ]);
-    if (!busy) render(creds, usage.summary || {}, usage.routing || {});
+    const res = await fetch("/dashboard/data", { cache: "no-store" });
+    if (!res.ok) throw new Error("dashboard data returned " + res.status);
+    const data = await res.json();
+    if (!busy) render(data.accounts || [], data.summary || {}, data.routing || {});
   } catch (e) {
-    if (e.auth) { try { localStorage.removeItem(KEY_STORE); } catch (x) {} key = ""; return showKey("That key was rejected."); }
     const note = document.getElementById("loaderr") || Object.assign(document.createElement("div"), { id: "loaderr", className: "err" });
     note.textContent = "Refresh failed: " + e.message;
     app.prepend(note);
   }
-}
-
-function showKey(message) {
-  clearInterval(timer);
-  app.innerHTML = `<div class="keybox card"><h1>Account pool</h1>
-    <div class="meta">Paste the management key once. It stays in this browser only.</div>
-    <form id="kf"><input id="k" type="password" autocomplete="off" placeholder="Management key"><button>Open dashboard</button></form>
-    ${message ? `<div class="err">${esc(message)}</div>` : ""}</div>`;
-  document.getElementById("kf").onsubmit = (ev) => {
-    ev.preventDefault();
-    key = document.getElementById("k").value.trim();
-    try { localStorage.setItem(KEY_STORE, key); } catch (e) {}
-    start();
-  };
 }
 
 function start() {

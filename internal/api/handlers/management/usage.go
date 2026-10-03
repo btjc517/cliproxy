@@ -74,3 +74,42 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"routing": routing, "summary": usagestats.Default().Summary(limit)})
 }
+
+// dashboardAccountFields are the credential fields the read-only dashboard
+// exposes. Tokens, id_token claims and cooldown internals are left out.
+var dashboardAccountFields = []string{
+	"id", "name", "provider", "label", "email", "status", "status_message",
+	"disabled", "unavailable", "next_retry_after", "priority", "quota",
+}
+
+// GetDashboardData returns what the /dashboard page renders: routing settings,
+// each credential's state and quota snapshot, and the usage summary. The
+// caller is responsible for restricting who may reach it.
+func (h *Handler) GetDashboardData(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	accounts := make([]gin.H, 0)
+	if h.authManager != nil {
+		for _, auth := range h.authManager.List() {
+			entry := h.buildAuthFileEntry(auth)
+			if entry == nil {
+				continue
+			}
+			account := gin.H{}
+			for _, field := range dashboardAccountFields {
+				if value, ok := entry[field]; ok {
+					account[field] = value
+				}
+			}
+			accounts = append(accounts, account)
+		}
+	}
+	routing := gin.H{}
+	if h.cfg != nil {
+		strategy, _ := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
+		routing = gin.H{"strategy": strategy, "session_affinity": h.cfg.Routing.SessionAffinity}
+	}
+	c.JSON(http.StatusOK, gin.H{"routing": routing, "accounts": accounts, "summary": usagestats.Default().Summary(100)})
+}
