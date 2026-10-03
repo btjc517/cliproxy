@@ -223,7 +223,7 @@ function nextUp(entries) {
 }
 
 function bar(item, label) {
-  if (!item) return `<div class="limit"><div class="top"><span>${label}</span><span>No data yet</span></div><div class="bar"><i style="width:0"></i></div></div>`;
+  if (!item) return `<div class="limit"><div class="top"><span>${label}</span><span>No reading yet</span></div><div class="bar"><i style="width:0"></i></div></div>`;
   const pct = Math.max(0, Math.min(100, Number.isFinite(item.pct) ? item.pct : 0));
   const cls = pct >= 90 ? "high" : pct >= 70 ? "mid" : "";
   const reset = item.reset ? "resets in " + until(item.reset) : "";
@@ -250,6 +250,7 @@ function card(entry, usage, isNext) {
   const m = mode(entry);
   const today = usage?.today || {};
   const label = entry.email || entry.label || entry.account || entry.name || entry.id;
+  const provider = String(entry.provider || entry.type || "").toLowerCase();
   const tags = [
     isNext ? `<span class="tag next">Next up</span>` : "",
     m === "reserve" ? `<span class="tag reserve">Reserve</span>` : "",
@@ -264,7 +265,7 @@ function card(entry, usage, isNext) {
       <div class="seg">${segs}</div>
     </div>
     <div class="status">${esc(st.text)}${entry.quota?.observed_at ? " · limits seen " + ago(entry.quota.observed_at) : ""}</div>
-    <div class="limits">${bar(lim.week, "Week")}${bar(lim.short, lim.short?.label || "Short window")}</div>
+    <div class="limits">${bar(lim.week, "Week")}${lim.short || provider === "claude" ? bar(lim.short, lim.short?.label || "5 hour") : ""}</div>
     <div class="nums">
       <div><div class="k">Requests today</div><div class="v">${fmt(today.requests)}</div></div>
       <div><div class="k">Tokens in / out</div><div class="v">${fmt((today.input_tokens || 0) + (today.cache_read_tokens || 0) + (today.cache_write_tokens || 0))} / ${fmt(today.output_tokens)}</div></div>
@@ -328,7 +329,8 @@ function render(accounts, summary, routing) {
     html += sessions.slice(0, 30).map((s) => {
       const ids = s.auth_ids || [];
       const acct = ids.map((id) => esc(names[id] || id)).join(" → ");
-      return `<tr><td class="mono" title="${esc(s.id)}">${esc(String(s.id).slice(0, 8))}</td><td class="${ids.length > 1 ? "warnline" : ""}">${acct}</td><td class="n">${fmt(s.requests)}</td><td class="n">${fmt(s.cache_read_tokens)}</td><td class="n">${fmt(s.cache_write_tokens)}</td><td class="n">${ago(s.last_seen)}</td></tr>`;
+      const shortID = String(s.id).replace(/^[a-z]+:/, "").slice(0, 8);
+      return `<tr><td class="mono" title="${esc(s.id)}">${esc(shortID)}</td><td class="${ids.length > 1 ? "warnline" : ""}">${acct}</td><td class="n">${fmt(s.requests)}</td><td class="n">${fmt(s.cache_read_tokens)}</td><td class="n">${fmt(s.cache_write_tokens)}</td><td class="n">${ago(s.last_seen)}</td></tr>`;
     }).join("");
     html += `</tbody></table>`;
   }
