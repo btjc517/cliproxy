@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Account pool</title>
+<style>
+/* Tokens copied from symphony app/renderer/src/index.css so the pool matches the fleet app. */
+:root {
+  --bg: #0b0e14; --surface: #10141c; --raised: #171c26;
+  --ink: #f2f5f9; --ink-2: #9aa4b2; --ink-3: #8b95a4;
+  --line: rgba(255,255,255,0.07); --line-strong: rgba(255,255,255,0.13);
+  --brass: #c6bdff; --brass-soft: rgba(198,189,255,0.16); --brass-ink: #e0dbff;
+  --ok: #30d158; --ok-soft: rgba(48,209,88,0.13);
+  --info: #35c5e8; --info-soft: rgba(53,197,232,0.13);
+  --warn: #ff8b28; --warn-soft: rgba(255,139,40,0.13);
+  --danger: #ff453a; --danger-soft: rgba(255,69,58,0.13);
+  --input-bg: rgba(255,255,255,0.055);
+  --elev-1: 0 1px 0 rgba(255,255,255,0.03) inset, 0 1px 2px rgba(0,0,0,0.28);
+  --radius-control: 6px; --radius-card: 10px;
+  --track: rgba(255,255,255,0.08);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f1f0ec; --surface: #fbfbf9; --raised: #ffffff;
+    --ink: #16181d; --ink-2: #5c636e; --ink-3: #656d79;
+    --line: rgba(15,18,24,0.09); --line-strong: rgba(15,18,24,0.16);
+    --brass: #5b4bd6; --brass-soft: rgba(91,75,214,0.11); --brass-ink: #4a3ab8;
+    --ok: #1f8a41; --ok-soft: rgba(52,199,89,0.13);
+    --info: #0779a8; --info-soft: rgba(23,162,210,0.12);
+    --warn: #b04a00; --warn-soft: rgba(232,98,12,0.13);
+    --danger: #d70015; --danger-soft: rgba(255,59,48,0.09);
+    --input-bg: rgba(15,18,24,0.04);
+    --elev-1: 0 1px 2px rgba(15,18,24,0.06);
+    --track: rgba(15,18,24,0.08);
+    color-scheme: light;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); }
+body {
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased; font-feature-settings: "tnum";
+}
+.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 18px; line-height: 1.3; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 28px 0 10px; text-transform: none; }
+.meta { color: var(--ink-3); font-size: 12px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.chip { font-size: 11px; color: var(--ink-2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+.chip b { color: var(--ink); font-weight: 500; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin-top: 20px; }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-card); padding: 12px 14px; box-shadow: var(--elev-1); }
+.stat .label { font-size: 11px; color: var(--ink-3); }
+.stat .value { font-size: 22px; line-height: 1.2; font-weight: 600; margin-top: 4px; letter-spacing: -0.01em; }
+.stat .sub { font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-card); padding: 14px; box-shadow: var(--elev-1); min-width: 0; }
+.card.next { border-color: var(--brass-soft); box-shadow: 0 0 0 1px var(--brass-soft), var(--elev-1); }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.who { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--ok); }
+.dot.cool { background: var(--warn); } .dot.off { background: var(--ink-3); } .dot.err { background: var(--danger); }
+.name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag { font-size: 10px; line-height: 1.35; padding: 1px 6px; border-radius: 4px; flex: none; }
+.tag.next { background: var(--brass-soft); color: var(--brass-ink); }
+.tag.reserve { background: var(--info-soft); color: var(--info); }
+.tag.cool { background: var(--warn-soft); color: var(--warn); }
+.tag.off { background: var(--input-bg); color: var(--ink-3); }
+.status { font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+.limits { margin-top: 12px; display: grid; gap: 8px; }
+.limit .top { display: flex; justify-content: space-between; font-size: 11px; color: var(--ink-3); }
+.limit .top span:first-child { color: var(--ink-2); }
+.bar { height: 4px; background: var(--track); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--ink-2); border-radius: 2px; }
+.bar i.mid { background: var(--warn); } .bar i.high { background: var(--danger); }
+.nums { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.nums div { min-width: 0; } .nums .k { font-size: 10px; color: var(--ink-3); } .nums .v { font-size: 13px; font-weight: 500; }
+.spark { display: flex; align-items: flex-end; gap: 1px; height: 24px; margin-top: 10px; }
+.spark i { flex: 1; background: var(--line-strong); border-radius: 1px; min-height: 1px; }
+.spark i.on { background: var(--brass); opacity: .75; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-control); overflow: hidden; flex: none; }
+.seg button { font: inherit; font-size: 11px; color: var(--ink-3); background: transparent; border: 0; padding: 3px 8px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--input-bg); color: var(--ink); }
+.seg button:disabled { cursor: progress; }
+table { width: 100%; border-collapse: collapse; }
+.tablecard { padding: 0; overflow-x: auto; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-size: 11px; font-weight: 500; color: var(--ink-3); }
+td.n, th.n { text-align: right; }
+tr:last-child td { border-bottom: 0; }
+.warnline { color: var(--warn); }
+.empty { color: var(--ink-3); padding: 16px; text-align: center; }
+.keybox { max-width: 360px; margin: 18vh auto 0; }
+.keybox input { width: 100%; font: inherit; color: var(--ink); background: var(--input-bg); border: 1px solid var(--line-strong); border-radius: var(--radius-control); padding: 8px 10px; margin-top: 10px; }
+.keybox button, .link { font: inherit; font-size: 12px; color: var(--ink); background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--radius-control); padding: 6px 12px; margin-top: 10px; cursor: pointer; }
+.link { background: transparent; border: 0; color: var(--ink-3); padding: 0; margin: 0; }
+.err { color: var(--danger); font-size: 12px; margin-top: 8px; }
+@media (max-width: 760px) {
+  .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+const KEY_STORE = "cliproxy-dashboard-key";
+const app = document.getElementById("app");
+let key = "";
+try { key = localStorage.getItem(KEY_STORE) || ""; } catch (e) {}
+let busy = false;
+let timer = null;
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmt = (n) => {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e4) return Math.round(n / 1e3) + "k";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+};
+const until = (t) => {
+  if (!t) return "";
+  let s = Math.max(0, Math.round((t - Date.now()) / 1000));
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60);
+  if (d) return d + "d " + h + "h";
+  if (h) return h + "h " + m + "m";
+  return m + "m";
+};
+const ago = (iso) => {
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+};
+const sig = (signals, name) => {
+  if (!signals) return "";
+  const want = name.toLowerCase();
+  for (const k in signals) if (k.toLowerCase() === want) return String(signals[k]).trim();
+  return "";
+};
+const resetTime = (raw, observedAt, afterSeconds) => {
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n * 1000;
+    const t = Date.parse(raw);
+    if (Number.isFinite(t)) return t;
+  }
+  if (afterSeconds && observedAt) return Date.parse(observedAt) + Number(afterSeconds) * 1000;
+  return 0;
+};
+// Roll a past reset forward by whole windows, as the soonest-reset selector does.
+const rollForward = (t, windowMs) => {
+  if (!t || !windowMs) return t;
+  while (t <= Date.now()) t += windowMs;
+  return t;
+};
+
+function limitsFor(entry) {
+  const q = entry.quota || {};
+  const s = q.signals || {};
+  const provider = (entry.provider || entry.type || "").toLowerCase();
+  const out = { week: null, short: null };
+  if (provider === "claude") {
+    const w = sig(s, "Anthropic-Ratelimit-Unified-7d-Utilization");
+    const wr = resetTime(sig(s, "Anthropic-Ratelimit-Unified-7d-Reset"));
+    if (w || wr) out.week = { pct: Number(w) * 100, reset: rollForward(wr, 7 * 864e5) };
+    const f = sig(s, "Anthropic-Ratelimit-Unified-5h-Utilization");
+    const fr = resetTime(sig(s, "Anthropic-Ratelimit-Unified-5h-Reset"));
+    if (f || fr) out.short = { pct: Number(f) * 100, reset: fr > Date.now() ? fr : 0, label: "5 hour" };
+  } else if (provider === "codex") {
+    for (const p of ["X-Codex-Primary-", "X-Codex-Secondary-"]) {
+      const minutes = Number(sig(s, p + "Window-Minutes"));
+      if (!minutes) continue;
+      const reset = resetTime(sig(s, p + "Reset-At"), q.observed_at, sig(s, p + "Reset-After-Seconds"));
+      const item = { pct: Number(sig(s, p + "Used-Percent")), reset };
+      if (minutes >= 6 * 24 * 60) { item.reset = rollForward(reset, minutes * 6e4); out.week = item; }
+      else { item.label = minutes >= 60 ? Math.round(minutes / 60) + " hour" : minutes + " min"; item.reset = reset > Date.now() ? reset : 0; out.short = item; }
+    }
+  }
+  return out;
+}
+
+function stateFor(entry) {
+  if (entry.disabled) return { cls: "off", text: "Off" };
+  const retry = entry.next_retry_after ? Date.parse(entry.next_retry_after) : 0;
+  if (retry && retry > Date.now()) return { cls: "cool", text: "Cooling, back in " + until(retry), until: retry };
+  if (entry.unavailable) return { cls: "cool", text: "Unavailable" };
+  const st = String(entry.status || "").toLowerCase();
+  if (st === "error") return { cls: "err", text: entry.status_message ? "Error: " + entry.status_message : "Error" };
+  return { cls: "", text: "Ready" };
+}
+
+function priorityOf(entry) {
+  const n = Number(entry.priority);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Mirror the soonest-reset selector: highest priority tier among ready accounts,
+// unobserved accounts first, then the earliest weekly reset.
+function nextUp(entries) {
+  const ready = entries.filter((e) => stateFor(e).cls === "");
+  if (!ready.length) return null;
+  const top = Math.max(...ready.map(priorityOf));
+  const tier = ready.filter((e) => priorityOf(e) === top);
+  tier.sort((a, b) => {
+    const ra = limitsFor(a).week?.reset || 0, rb = limitsFor(b).week?.reset || 0;
+    if (!ra !== !rb) return ra ? 1 : -1;
+    if (ra !== rb) return ra - rb;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  return tier[0].id;
+}
+
+function bar(item, label) {
+  if (!item) return `<div class="limit"><div class="top"><span>${label}</span><span>No data yet</span></div><div class="bar"><i style="width:0"></i></div></div>`;
+  const pct = Math.max(0, Math.min(100, Number.isFinite(item.pct) ? item.pct : 0));
+  const cls = pct >= 90 ? "high" : pct >= 70 ? "mid" : "";
+  const reset = item.reset ? "resets in " + until(item.reset) : "";
+  return `<div class="limit"><div class="top"><span>${label} · ${Math.round(pct)}% used</span><span>${reset}</span></div><div class="bar"><i class="${cls}" style="width:${pct}%"></i></div></div>`;
+}
+
+function spark(hourly) {
+  if (!hourly || !hourly.length) return "";
+  const max = Math.max(1, ...hourly.map((h) => h.requests || 0));
+  return `<div class="spark" title="Requests per hour, last 48 hours">${hourly.map((h) => {
+    const v = h.requests || 0;
+    return `<i class="${v ? "on" : ""}" style="height:${v ? Math.max(8, Math.round((v / max) * 100)) : 4}%"></i>`;
+  }).join("")}</div>`;
+}
+
+function mode(entry) {
+  if (entry.disabled) return "off";
+  return priorityOf(entry) < 0 ? "reserve" : "rotation";
+}
+
+function card(entry, usage, isNext) {
+  const st = stateFor(entry);
+  const lim = limitsFor(entry);
+  const m = mode(entry);
+  const today = usage?.today || {};
+  const label = entry.email || entry.label || entry.account || entry.name || entry.id;
+  const tags = [
+    isNext ? `<span class="tag next">Next up</span>` : "",
+    m === "reserve" ? `<span class="tag reserve">Reserve</span>` : "",
+    st.cls === "cool" ? `<span class="tag cool">Cooling</span>` : "",
+    m === "off" ? `<span class="tag off">Off</span>` : "",
+  ].join("");
+  const segs = [["rotation", "Rotation"], ["reserve", "Reserve"], ["off", "Off"]]
+    .map(([v, t]) => `<button data-id="${esc(entry.id)}" data-name="${esc(entry.name || entry.id)}" data-mode="${v}" class="${m === v ? "on" : ""}">${t}</button>`).join("");
+  return `<div class="card ${isNext ? "next" : ""}">
+    <div class="row">
+      <div class="who"><span class="dot ${st.cls}"></span><span class="name" title="${esc(label)}">${esc(label)}</span>${tags}</div>
+      <div class="seg">${segs}</div>
+    </div>
+    <div class="status">${esc(st.text)}${entry.quota?.observed_at ? " · limits seen " + ago(entry.quota.observed_at) : ""}</div>
+    <div class="limits">${bar(lim.week, "Week")}${bar(lim.short, lim.short?.label || "Short window")}</div>
+    <div class="nums">
+      <div><div class="k">Requests today</div><div class="v">${fmt(today.requests)}</div></div>
+      <div><div class="k">Tokens in / out</div><div class="v">${fmt((today.input_tokens || 0) + (today.cache_read_tokens || 0) + (today.cache_write_tokens || 0))} / ${fmt(today.output_tokens)}</div></div>
+      <div><div class="k">Cache read</div><div class="v">${fmt(today.cache_read_tokens)}</div></div>
+      <div><div class="k">Cache write</div><div class="v">${fmt(today.cache_write_tokens)}</div></div>
+    </div>
+    ${spark(usage?.hourly)}
+  </div>`;
+}
+
+function hitRate(c) {
+  const read = c.cache_read_tokens || 0;
+  const total = read + (c.cache_write_tokens || 0) + (c.input_tokens || 0);
+  return total ? Math.round((read / total) * 100) + "%" : "–";
+}
+
+function render(creds, summary, routing) {
+  const files = (creds.files || []).filter((f) => ["claude", "codex"].includes(String(f.provider || f.type).toLowerCase()));
+  const byProvider = { claude: [], codex: [] };
+  for (const f of files) byProvider[String(f.provider || f.type).toLowerCase()].push(f);
+  const names = {};
+  for (const f of files) names[f.id] = f.email || f.label || f.name || f.id;
+  const t = summary.totals || {};
+  const today = t.today || {}, week = t.last_7d || {};
+  const sessions = summary.sessions || [];
+  const switched = sessions.filter((s) => (s.auth_ids || []).length > 1).length;
+  const recent = sessions.filter((s) => Date.now() - Date.parse(s.last_seen) < 864e5).length;
+  const strategy = routing.strategy || "";
+  const affinity = routing.session_affinity;
+
+  let html = `<header>
+    <div><h1>Account pool</h1>
+      <div class="chips">
+        ${strategy ? `<span class="chip">Routing <b>${esc(strategy)}</b></span>` : ""}
+        ${affinity !== undefined ? `<span class="chip">Session affinity <b>${affinity ? "on" : "off"}</b></span>` : ""}
+        <span class="chip"><b>${byProvider.claude.length}</b> Claude · <b>${byProvider.codex.length}</b> Codex</span>
+      </div>
+    </div>
+    <div class="meta">Updated ${new Date(summary.generated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} · <button class="link" id="forget">Forget key</button></div>
+  </header>
+  <div class="stats">
+    <div class="stat"><div class="label">Requests today</div><div class="value">${fmt(today.requests)}</div><div class="sub">${fmt(week.requests)} in 7 days${today.failed ? ` · <span class="warnline">${fmt(today.failed)} failed</span>` : ""}</div></div>
+    <div class="stat"><div class="label">Output tokens today</div><div class="value">${fmt(today.output_tokens)}</div><div class="sub">${fmt(week.output_tokens)} in 7 days</div></div>
+    <div class="stat"><div class="label">Cache hit rate today</div><div class="value">${hitRate(today)}</div><div class="sub">${fmt(today.cache_read_tokens)} read · ${fmt(today.cache_write_tokens)} written</div></div>
+    <div class="stat"><div class="label">Sessions, 24 hours</div><div class="value">${recent}</div><div class="sub">${switched ? `<span class="warnline">${switched} changed account</span>` : "None changed account"}</div></div>
+  </div>`;
+
+  for (const [prov, title] of [["claude", "Claude"], ["codex", "Codex"]]) {
+    const list = byProvider[prov].slice().sort((a, b) => String(names[a.id]).localeCompare(String(names[b.id])));
+    html += `<h2>${title}</h2>`;
+    if (!list.length) { html += `<div class="card empty">No ${title} accounts signed in</div>`; continue; }
+    const next = nextUp(list);
+    html += `<div class="grid">${list.map((e) => card(e, summary.accounts?.[e.id], e.id === next)).join("")}</div>`;
+  }
+
+  html += `<h2>Recent sessions</h2><div class="card tablecard">`;
+  if (!sessions.length) html += `<div class="empty">No sessions yet</div>`;
+  else {
+    html += `<table><thead><tr><th>Session</th><th>Account</th><th class="n">Requests</th><th class="n">Cache read</th><th class="n">Cache write</th><th class="n">Last seen</th></tr></thead><tbody>`;
+    html += sessions.slice(0, 30).map((s) => {
+      const ids = s.auth_ids || [];
+      const acct = ids.map((id) => esc(names[id] || id)).join(" → ");
+      return `<tr><td class="mono" title="${esc(s.id)}">${esc(String(s.id).slice(0, 8))}</td><td class="${ids.length > 1 ? "warnline" : ""}">${acct}</td><td class="n">${fmt(s.requests)}</td><td class="n">${fmt(s.cache_read_tokens)}</td><td class="n">${fmt(s.cache_write_tokens)}</td><td class="n">${ago(s.last_seen)}</td></tr>`;
+    }).join("");
+    html += `</tbody></table>`;
+  }
+  html += `</div>`;
+  app.innerHTML = html;
+  document.getElementById("forget").onclick = () => { try { localStorage.removeItem(KEY_STORE); } catch (e) {} key = ""; showKey(); };
+  app.querySelectorAll(".seg button").forEach((b) => b.onclick = () => setMode(b));
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch("/v8/management" + path, { ...opts, headers: { "X-Management-Key": key, "Content-Type": "application/json", ...(opts.headers || {}) } });
+  if (res.status === 401 || res.status === 403) throw Object.assign(new Error("Key rejected"), { auth: true });
+  if (!res.ok) throw new Error(path + " returned " + res.status);
+  return res.json();
+}
+
+async function setMode(button) {
+  if (busy) return;
+  busy = true;
+  app.querySelectorAll(".seg button").forEach((b) => b.disabled = true);
+  const name = button.dataset.name, want = button.dataset.mode;
+  try {
+    await api("/credentials/status", { method: "PATCH", body: JSON.stringify({ name, disabled: want === "off" }) });
+    if (want !== "off") await api("/credentials/fields", { method: "PATCH", body: JSON.stringify({ name, priority: want === "reserve" ? -1 : 0 }) });
+  } catch (e) { alert("Could not change account: " + e.message); }
+  busy = false;
+  load();
+}
+
+async function load() {
+  if (!key) return showKey();
+  try {
+    const [creds, usage] = await Promise.all([
+      api("/credentials"),
+      api("/observability/usage/summary?sessions=100"),
+    ]);
+    if (!busy) render(creds, usage.summary || {}, usage.routing || {});
+  } catch (e) {
+    if (e.auth) { try { localStorage.removeItem(KEY_STORE); } catch (x) {} key = ""; return showKey("That key was rejected."); }
+    const note = document.getElementById("loaderr") || Object.assign(document.createElement("div"), { id: "loaderr", className: "err" });
+    note.textContent = "Refresh failed: " + e.message;
+    app.prepend(note);
+  }
+}
+
+function showKey(message) {
+  clearInterval(timer);
+  app.innerHTML = `<div class="keybox card"><h1>Account pool</h1>
+    <div class="meta">Paste the management key once. It stays in this browser only.</div>
+    <form id="kf"><input id="k" type="password" autocomplete="off" placeholder="Management key"><button>Open dashboard</button></form>
+    ${message ? `<div class="err">${esc(message)}</div>` : ""}</div>`;
+  document.getElementById("kf").onsubmit = (ev) => {
+    ev.preventDefault();
+    key = document.getElementById("k").value.trim();
+    try { localStorage.setItem(KEY_STORE, key); } catch (e) {}
+    start();
+  };
+}
+
+function start() {
+  clearInterval(timer);
+  load();
+  timer = setInterval(load, 15000);
+}
+
+start();
+</script>
+</body>
+</html>

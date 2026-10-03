@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/usagestats"
 )
 
 type usageQueueRecord []byte
@@ -52,4 +53,24 @@ func parseUsageQueueCount(value string) (int, error) {
 		return 0, errors.New("count must be a positive integer")
 	}
 	return count, nil
+}
+
+// GetUsageSummary returns per-credential usage totals, hourly buckets and recent
+// session-to-credential bindings collected by the usagestats store.
+func (h *Handler) GetUsageSummary(c *gin.Context) {
+	limit := 100
+	if raw := strings.TrimSpace(c.Query("sessions")); raw != "" {
+		parsed, errParse := strconv.Atoi(raw)
+		if errParse != nil || parsed < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "sessions must be a non-negative integer"})
+			return
+		}
+		limit = parsed
+	}
+	routing := gin.H{}
+	if h != nil && h.cfg != nil {
+		strategy, _ := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
+		routing = gin.H{"strategy": strategy, "session_affinity": h.cfg.Routing.SessionAffinity}
+	}
+	c.JSON(http.StatusOK, gin.H{"routing": routing, "summary": usagestats.Default().Summary(limit)})
 }
