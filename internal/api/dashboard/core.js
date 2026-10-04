@@ -458,7 +458,7 @@ export function email(addr) {
 }
 
 export const pill = (text, cls = "") => `<span class="pill ${cls}">${esc(text)}</span>`;
-export const warnState = (text, cls = "") => `<span class="state ${cls}">${warnIcon(14)}<span class="clamp">${esc(text)}</span></span>`;
+export const warnState = (text, cls = "") => `<span class="state ${cls}" title="${esc(text)}">${warnIcon(14)}<span class="clamp">${esc(text)}</span></span>`;
 
 // Status shown next to an account name: Next pill, or a warning for problems.
 export function acctBadge(acct, nextId) {

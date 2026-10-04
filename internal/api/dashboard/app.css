@@ -197,7 +197,8 @@ svg { display: block; flex-shrink: 0; }
 /* Pills and inline states */
 .pill { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--brand-tint); color: var(--brand); font-size: 11px; font-weight: 500; line-height: 14px; white-space: nowrap; flex-shrink: 0; }
 .pill.grey { background: var(--surface-2); color: var(--muted-fg); }
-.state { display: inline-flex; align-items: center; gap: 6px; color: var(--warn-text); font-size: 13px; white-space: nowrap; }
+.state { display: inline-flex; align-items: center; gap: 6px; color: var(--warn-text); font-size: 13px; white-space: nowrap; min-width: 0; flex-shrink: 2; }
+.state > svg { flex-shrink: 0; }
 .state.sm { font-size: 12px; gap: 4px; }
 .state.strong { font-weight: 500; }
 .email b { font-weight: 500; color: var(--fg); }
