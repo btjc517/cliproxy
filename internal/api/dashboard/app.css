@@ -450,6 +450,7 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
   .stat { flex: 1 1 40%; }
   .panes { grid-template-columns: 1fr; }
   .pane + .pane { border-left: 0; border-top: 1px solid var(--hairline); }
+  .panehead { height: auto; min-height: 24px; flex-wrap: wrap; row-gap: 8px; }
   .acctcols { flex-direction: column; gap: 10px; }
   .acctcol { padding-right: 0; }
   .figs { padding: 12px 4px 16px; }
