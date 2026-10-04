@@ -1825,8 +1825,18 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 	return payload
 }
 
+// claudeCacheControlLimit returns how many cache_control blocks the upstream
+// accepts for payload: 4, or 3 when "thread" is set, because the server then
+// reserves the fourth slot for its own marker on the last cache-eligible block.
+func claudeCacheControlLimit(payload []byte) int {
+	if gjson.GetBytes(payload, "thread").Exists() {
+		return 3
+	}
+	return 4
+}
+
 // enforceCacheControlLimit removes excess cache_control blocks from a payload
-// so the total does not exceed the Anthropic API limit (currently 4).
+// so the total does not exceed maxBlocks (see claudeCacheControlLimit).
 //
 // Anthropic evaluates cache breakpoints in order: tools → system → messages.
 // The most valuable breakpoints are:
