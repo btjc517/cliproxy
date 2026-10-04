@@ -58,13 +58,18 @@ type Record struct {
 	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.
 	Generate *bool
 	// Stream reports whether the request was executed in streaming mode.
-	Stream      bool
-	RequestedAt time.Time
-	Latency     time.Duration
-	TTFT        time.Duration
-	Failed      bool
-	Fail        Failure
-	Detail      Detail
+	Stream bool
+	// UpstreamStream reports whether the upstream reply arrived as a stream, so
+	// TTFT marks its first streamed event and Latency minus TTFT is generation
+	// time. It can differ from Stream: some executors stream from upstream to
+	// answer a non-streaming client.
+	UpstreamStream bool
+	RequestedAt    time.Time
+	Latency        time.Duration
+	TTFT           time.Duration
+	Failed         bool
+	Fail           Failure
+	Detail         Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }

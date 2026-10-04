@@ -21,7 +21,10 @@ const (
 	// lookupTimeout bounds one reverse lookup against MagicDNS. It is not an
 	// upstream model connection.
 	lookupTimeout = 3 * time.Second
-	maxEntries    = 1024
+	// maxEntries caps the cache and maxLookups the lookups in flight. A new
+	// address that finds either full gets no name until room frees up.
+	maxEntries = 1024
+	maxLookups = 8
 )
 
 // Prefixes are the Tailscale address ranges (CGNAT IPv4 and the Tailscale ULA
@@ -70,8 +73,14 @@ type entry struct {
 
 // Resolver caches reverse DNS names for tailnet addresses.
 type Resolver struct {
-	mu      sync.Mutex
-	entries map[string]*entry
+	mu         sync.Mutex
+	entries    map[string]*entry
+	maxEntries int
+	// sweepAfter is the earliest expiry seen by the last sweep of a full
+	// cache; sweeping again before it would find nothing to drop.
+	sweepAfter time.Time
+	// slots holds one token per lookup in flight.
+	slots   chan struct{}
 	lookup  func(ctx context.Context, ip string) ([]string, error)
 	nowFunc func() time.Time
 }
@@ -83,7 +92,17 @@ func Default() *Resolver { return defaultResolver }
 
 // NewResolver builds a resolver around lookup, which returns PTR names for ip.
 func NewResolver(lookup func(ctx context.Context, ip string) ([]string, error)) *Resolver {
-	return &Resolver{entries: make(map[string]*entry), lookup: lookup, nowFunc: time.Now}
+	return newResolver(lookup, maxEntries, maxLookups)
+}
+
+func newResolver(lookup func(ctx context.Context, ip string) ([]string, error), entries, lookups int) *Resolver {
+	return &Resolver{
+		entries:    make(map[string]*entry),
+		maxEntries: entries,
+		slots:      make(chan struct{}, lookups),
+		lookup:     lookup,
+		nowFunc:    time.Now,
+	}
 }
 
 func magicDNSLookup(ctx context.Context, ip string) ([]string, error) {
@@ -112,13 +131,27 @@ func (r *Resolver) Name(ip string) string {
 	if current != nil && (current.pending || r.nowFunc().Before(current.expires)) {
 		return current.name
 	}
+	if current == nil && !r.roomLocked() {
+		return ""
+	}
+	select {
+	case r.slots <- struct{}{}:
+	default:
+		// Too many lookups in flight: try again on a later call.
+		if current == nil {
+			return ""
+		}
+		return current.name
+	}
 	if current == nil {
-		r.pruneLocked()
 		current = &entry{}
 		r.entries[key] = current
 	}
 	current.pending = true
-	go r.resolve(key)
+	go func() {
+		defer func() { <-r.slots }()
+		r.resolve(key)
+	}()
 	return current.name
 }
 
@@ -151,18 +184,36 @@ func (r *Resolver) resolve(ip string) {
 	}
 	current.pending = false
 	current.expires = r.nowFunc().Add(ttl)
+	// The last sweep skipped this entry while it was pending. A failed lookup
+	// expires sooner than what that sweep kept, so sweep again by then.
+	if current.expires.Before(r.sweepAfter) {
+		r.sweepAfter = current.expires
+	}
 }
 
-func (r *Resolver) pruneLocked() {
-	if len(r.entries) < maxEntries {
-		return
+// roomLocked reports whether the cache can take a new address, dropping
+// expired entries first when it is full. The scan is bounded by maxEntries
+// and skipped until the earliest entry it kept has expired.
+func (r *Resolver) roomLocked() bool {
+	if len(r.entries) < r.maxEntries {
+		return true
 	}
 	now := r.nowFunc()
+	if now.Before(r.sweepAfter) {
+		return false
+	}
+	var next time.Time
 	for key, current := range r.entries {
-		if !current.pending && now.After(current.expires) {
+		switch {
+		case current.pending:
+		case now.After(current.expires):
 			delete(r.entries, key)
+		case next.IsZero() || current.expires.Before(next):
+			next = current.expires
 		}
 	}
+	r.sweepAfter = next
+	return len(r.entries) < r.maxEntries
 }
 
 // MachineName is the short machine name for a client address: this host's
