@@ -447,6 +447,10 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.codexLiveHandler != nil {
 		s.codexLiveHandler.Close()
 	}
+	// Save the usage tally so a restart does not drop the last minute of it.
+	if errFlush := usagestats.Default().Flush(); errFlush != nil {
+		log.Warnf("failed to save usage stats: %v", errFlush)
+	}
 	if errCloseServer != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", errCloseServer)
 	}
