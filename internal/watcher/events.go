@@ -71,9 +71,12 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
+	// Saving through a temporary file and a rename replaces the file the watch
+	// follows. The old file reports Remove (or Rename), and its watch goes with it.
+	isConfigReplaced := normalizedName == normalizedConfigPath && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
-	if !isConfigEvent && !isAuthJSON {
+	if !isConfigEvent && !isConfigReplaced && !isAuthJSON {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
 	}
@@ -82,8 +85,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	log.Debugf("file system event detected: %s %s", event.Op.String(), event.Name)
 
 	// Handle config file changes
-	if isConfigEvent {
+	if isConfigEvent || isConfigReplaced {
 		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
+		if isConfigReplaced {
+			w.rewatchConfig()
+		}
 		w.scheduleConfigReload()
 		return
 	}
@@ -232,4 +238,23 @@ func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) boo
 	}
 	w.clientsMutex.Unlock()
 	return false
+}
+
+// rewatchConfig watches the config path again after the file was replaced.
+// The old watch followed the replaced file, so without this every later edit
+// would go unnoticed until a restart.
+func (w *Watcher) rewatchConfig() {
+	if w.watcher == nil {
+		return
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		if _, errStat := os.Stat(w.configPath); errStat == nil {
+			if errAdd := w.watcher.Add(w.configPath); errAdd != nil {
+				log.Warnf("failed to watch replaced config file %s: %v", w.configPath, errAdd)
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	log.Warnf("config file %s was removed; edits will not reload until it is restored and the proxy restarts", w.configPath)
 }
