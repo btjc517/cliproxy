@@ -61,6 +61,21 @@ func TestStoreSessionRecordsEveryCredentialUsed(t *testing.T) {
 	}
 }
 
+func TestStoreSessionIgnoresFailedTries(t *testing.T) {
+	now := time.Date(2026, 10, 4, 16, 0, 0, 0, time.UTC)
+	store := newTestStore(now)
+	store.record(coreusage.Record{AuthID: "refused", SessionID: "s1", RequestedAt: now, Failed: true})
+	store.record(coreusage.Record{AuthID: "a", SessionID: "s1", RequestedAt: now})
+
+	session := store.Summary(10).Sessions[0]
+	if len(session.AuthIDs) != 1 || session.AuthIDs[0] != "a" {
+		t.Fatalf("auth ids = %v, want only the account that answered", session.AuthIDs)
+	}
+	if session.Requests != 2 || session.Failed != 1 {
+		t.Fatalf("session counters = %+v, want the failed try still counted", session.Counters)
+	}
+}
+
 func TestStorePersistsAcrossRestart(t *testing.T) {
 	now := time.Date(2026, 10, 3, 15, 30, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "usage-stats.json")

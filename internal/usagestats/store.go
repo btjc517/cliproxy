@@ -172,7 +172,9 @@ func (s *Store) record(record coreusage.Record) {
 			session = &Session{ID: sessionID, Provider: strings.TrimSpace(record.Provider), FirstSeen: at}
 			s.sessions[sessionID] = session
 		}
-		if !containsString(session.AuthIDs, authID) {
+		// Only accounts that answered count as serving the session. A failed try
+		// that fell back to another account did not move its prompt cache.
+		if !record.Failed && !containsString(session.AuthIDs, authID) {
 			session.AuthIDs = append(session.AuthIDs, authID)
 		}
 		if at.After(session.LastSeen) {

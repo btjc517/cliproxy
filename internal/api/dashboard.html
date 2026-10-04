@@ -345,7 +345,7 @@ function render(accounts, summary, routing) {
     html += `<table><thead><tr><th>Session</th><th>Account</th><th class="n">Requests</th><th class="n">Cache read</th><th class="n">Cache write</th><th class="n">Last seen</th></tr></thead><tbody>`;
     html += sessions.slice(0, 30).map((s) => {
       const ids = s.auth_ids || [];
-      const acct = ids.map((id) => esc(names[id] || id)).join(" → ");
+      const acct = ids.length ? ids.map((id) => esc(names[id] || id)).join(" → ") : `<span class="meta">No answer yet</span>`;
       const shortID = String(s.id).replace(/^[a-z]+:/, "").slice(0, 8);
       return `<tr><td class="mono" title="${esc(s.id)}">${esc(shortID)}</td><td class="${ids.length > 1 ? "warnline" : ""}">${acct}</td><td class="n">${fmt(s.requests)}</td><td class="n">${fmt(s.cache_read_tokens)}</td><td class="n">${fmt(s.cache_write_tokens)}</td><td class="n">${ago(s.last_seen)}</td></tr>`;
     }).join("");
