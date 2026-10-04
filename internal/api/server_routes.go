@@ -55,6 +55,8 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	s.engine.GET("/dashboard", s.serveDashboard)
 	s.engine.GET("/dashboard/data", s.serveDashboardData)
+	s.engine.GET("/dashboard/static/*filepath", s.serveDashboardStatic)
+	s.engine.POST("/dashboard/sessions", s.postDashboardSessions)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)

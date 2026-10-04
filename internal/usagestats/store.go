@@ -14,7 +14,9 @@ import (
 	"sync"
 	"time"
 
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/tailnetname"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
@@ -54,12 +56,32 @@ func (c *Counters) add(other Counters) {
 
 // Session records which credentials served one client session.
 type Session struct {
-	ID        string    `json:"id"`
-	Provider  string    `json:"provider"`
-	AuthIDs   []string  `json:"auth_ids"`
-	FirstSeen time.Time `json:"first_seen"`
-	LastSeen  time.Time `json:"last_seen"`
+	ID       string `json:"id"`
+	ParentID string `json:"parent_id"`
+	Provider string `json:"provider"`
+	// Title and Machine come from POST /dashboard/sessions; Machine falls back
+	// to the tailnet name of the client address. Both are filled in by Summary.
+	Title         string                `json:"title"`
+	Machine       string                `json:"machine"`
+	Model         string                `json:"model"`
+	ServingAuthID string                `json:"serving_auth_id"`
+	AuthIDs       []string              `json:"auth_ids"`
+	ByAuth        map[string]*AuthCount `json:"by_auth"`
+	FirstSeen     time.Time             `json:"first_seen"`
+	LastSeen      time.Time             `json:"last_seen"`
+	TTFTP50       int64                 `json:"ttft_ms_p50"`
+	// ClientIP and TTFTHist are kept in the stats file and left out of
+	// Summary. ServedAt is when the request that set ServingAuthID started.
+	ClientIP string    `json:"client_ip,omitempty"`
+	TTFTHist histogram `json:"ttft_hist,omitempty"`
+	ServedAt time.Time `json:"served_at,omitzero"`
 	Counters
+}
+
+// AuthCount is how many of a session's requests went to one credential.
+type AuthCount struct {
+	Requests int64 `json:"requests"`
+	Failed   int64 `json:"failed"`
 }
 
 type fileState struct {
@@ -67,6 +89,10 @@ type fileState struct {
 	Hourly   map[string]map[int64]*Counters  `json:"hourly"`
 	Daily    map[string]map[string]*Counters `json:"daily,omitempty"`
 	Sessions map[string]*Session             `json:"sessions"`
+	// Perf is hourly request timing per credential.
+	Perf          map[string]map[int64]*perfBucket `json:"perf,omitempty"`
+	AuthProviders map[string]string                `json:"auth_providers,omitempty"`
+	SessionMeta   map[string]*sessionMeta          `json:"session_meta,omitempty"`
 }
 
 // historyFile is the backfill written by the log collector. Days and machines
@@ -84,11 +110,21 @@ type Store struct {
 	hourly   map[string]map[int64]*Counters
 	daily    map[string]map[string]*Counters
 	sessions map[string]*Session
+	// perf is hourly request timing per credential; authProviders remembers
+	// each credential's provider for the provider scopes.
+	perf          map[string]map[int64]*perfBucket
+	authProviders map[string]string
+	// traces follows recent inbound requests that had a failed attempt.
+	traces   map[string]*traceState
+	meta     map[string]*sessionMeta
 	backfill *historyFile
 	dirty    bool
 	nowFunc  func() time.Time
-	stopOnce sync.Once
-	stop     chan struct{}
+	// machineName maps a client address to a short machine name. It must not
+	// block.
+	machineName func(ip string) string
+	stopOnce    sync.Once
+	stop        chan struct{}
 }
 
 var defaultStore = newStore()
@@ -99,10 +135,15 @@ func init() {
 
 func newStore() *Store {
 	return &Store{
-		hourly:   make(map[string]map[int64]*Counters),
-		daily:    make(map[string]map[string]*Counters),
-		sessions: make(map[string]*Session),
-		nowFunc:  time.Now,
+		hourly:        make(map[string]map[int64]*Counters),
+		daily:         make(map[string]map[string]*Counters),
+		sessions:      make(map[string]*Session),
+		perf:          make(map[string]map[int64]*perfBucket),
+		authProviders: make(map[string]string),
+		traces:        make(map[string]*traceState),
+		meta:          make(map[string]*sessionMeta),
+		nowFunc:       time.Now,
+		machineName:   tailnetname.MachineName,
 	}
 }
 
@@ -153,14 +194,24 @@ func (s *Store) flushLoop() {
 
 // HandleUsage implements coreusage.Plugin.
 func (s *Store) HandleUsage(ctx context.Context, record coreusage.Record) {
-	_ = ctx
 	if s == nil || !redisqueue.UsageStatisticsEnabled() {
 		return
 	}
-	s.record(record)
+	meta := internallogging.GetClientRequestMetadata(ctx)
+	clientIP := strings.TrimSpace(meta.ClientIP)
+	if clientIP == "" {
+		clientIP = strings.TrimSpace(meta.ResolvedClientIP)
+	}
+	s.recordFrom(record, clientIP)
 }
 
 func (s *Store) record(record coreusage.Record) {
+	s.recordFrom(record, "")
+}
+
+// recordFrom adds one upstream attempt. clientIP is the address of the client
+// that sent the inbound request, or "".
+func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 	authID := strings.TrimSpace(record.AuthID)
 	if authID == "" {
 		return
@@ -171,6 +222,9 @@ func (s *Store) record(record coreusage.Record) {
 	}
 	delta := countersFromRecord(record)
 
+	location := s.nowFunc().Location()
+	hourStart := bucketStart(at, location, 1)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	buckets := s.hourly[authID]
@@ -178,7 +232,7 @@ func (s *Store) record(record coreusage.Record) {
 		buckets = make(map[int64]*Counters)
 		s.hourly[authID] = buckets
 	}
-	hour := at.Truncate(time.Hour).Unix()
+	hour := hourStart.Unix()
 	bucket := buckets[hour]
 	if bucket == nil {
 		bucket = &Counters{}
@@ -186,8 +240,18 @@ func (s *Store) record(record coreusage.Record) {
 	}
 	bucket.add(delta)
 
-	day := at.In(s.nowFunc().Location()).Format(dayLayout)
-	s.dailyBucketLocked(day, providerOf(record.Provider, authID)).add(delta)
+	provider := providerOf(record.Provider, authID)
+	day := at.In(location).Format(dayLayout)
+	s.dailyBucketLocked(day, provider).add(delta)
+	s.recordPerfLocked(authID, provider, hourStart, recordTiming{
+		traceID: strings.TrimSpace(record.TraceID),
+		at:      at,
+		stream:  record.UpstreamStream,
+		failed:  record.Failed,
+		ttft:    record.TTFT,
+		latency: record.Latency,
+		output:  delta.Output,
+	})
 
 	if sessionID := strings.TrimSpace(record.SessionID); sessionID != "" {
 		session := s.sessions[sessionID]
@@ -200,7 +264,40 @@ func (s *Store) record(record coreusage.Record) {
 		if !record.Failed && !containsString(session.AuthIDs, authID) {
 			session.AuthIDs = append(session.AuthIDs, authID)
 		}
-		if at.After(session.LastSeen) {
+		if session.ByAuth == nil {
+			session.ByAuth = make(map[string]*AuthCount)
+		}
+		count := session.ByAuth[authID]
+		if count == nil {
+			count = &AuthCount{}
+			session.ByAuth[authID] = count
+		}
+		count.Requests++
+		if record.Failed {
+			count.Failed++
+		} else {
+			// Attempts finish out of order: the serving account is the one that
+			// answered the latest request, not the last one to finish.
+			if !at.Before(session.ServedAt) {
+				session.ServingAuthID = authID
+				session.ServedAt = at
+			}
+			if record.TTFT > 0 {
+				session.TTFTHist.observe(float64(record.TTFT)/float64(time.Millisecond), ttftBase)
+			}
+		}
+		// Model and client address describe the request at LastSeen.
+		if !at.Before(session.LastSeen) {
+			if model := strings.TrimSpace(record.Model); model != "" {
+				session.Model = model
+			}
+			if clientIP != "" && clientIP != session.ClientIP {
+				session.ClientIP = clientIP
+				if s.machineName != nil {
+					// Starts the background name lookup so Summary finds it cached.
+					s.machineName(clientIP)
+				}
+			}
 			session.LastSeen = at
 		}
 		session.Counters.add(delta)
@@ -266,6 +363,8 @@ type Summary struct {
 	Sessions    []Session                 `json:"sessions"`
 	Totals      map[string]Counters       `json:"totals"`
 	History     History                   `json:"history"`
+	Range       string                    `json:"range"`
+	Performance Performance               `json:"performance"`
 }
 
 // History is the long view: one entry per day with usage, oldest first, from
@@ -286,13 +385,24 @@ type HistoryDay struct {
 	Providers map[string]Counters `json:"providers"`
 }
 
-// AccountSummary holds one credential's totals and its last 48 hourly buckets.
+// AccountSummary holds one credential's totals, its last 48 hourly buckets
+// and its last 14 local days.
 type AccountSummary struct {
 	Today   Counters     `json:"today"`
 	Last24h Counters     `json:"last_24h"`
 	Last7d  Counters     `json:"last_7d"`
 	Hourly  []HourBucket `json:"hourly"`
+	Daily   []DayBucket  `json:"daily"`
 }
+
+// DayBucket is one local calendar day of usage.
+type DayBucket struct {
+	Date string `json:"date"`
+	Counters
+}
+
+// accountDays is the number of local days in AccountSummary.Daily.
+const accountDays = 14
 
 // HourBucket is one hour of usage, keyed by the hour's start time.
 type HourBucket struct {
@@ -300,12 +410,23 @@ type HourBucket struct {
 	Counters
 }
 
-// Summary builds the dashboard view. sessionLimit caps the session list.
+// Summary builds the dashboard view with the default performance range.
+// sessionLimit caps the session list.
 func (s *Store) Summary(sessionLimit int) Summary {
+	window, _ := LookupWindow(DefaultWindow)
+	return s.SummaryFor(sessionLimit, window)
+}
+
+// SummaryFor builds the dashboard view with performance over window.
+func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 	now := s.nowFunc()
-	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	thisHour := now.Truncate(time.Hour)
-	firstHour := thisHour.Add(-47 * time.Hour)
+	startOfDay := bucketStart(now, now.Location(), 24)
+	hourBounds := localBounds(now, 1, 48)
+	firstDay := startOfDay.AddDate(0, 0, -(accountDays - 1))
+	dayIndex := make(map[string]int, accountDays)
+	for i := 0; i < accountDays; i++ {
+		dayIndex[firstDay.AddDate(0, 0, i).Format(dayLayout)] = i
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -313,7 +434,7 @@ func (s *Store) Summary(sessionLimit int) Summary {
 
 	summary := Summary{
 		GeneratedAt: now,
-		Timezone:    now.Location().String(),
+		Timezone:    zoneName(now.Location()),
 		Accounts:    make(map[string]AccountSummary, len(s.hourly)),
 		Totals:      map[string]Counters{},
 	}
@@ -322,10 +443,17 @@ func (s *Store) Summary(sessionLimit int) Summary {
 		var account AccountSummary
 		hourly := make([]HourBucket, 48)
 		for i := range hourly {
-			hourly[i].Start = firstHour.Add(time.Duration(i) * time.Hour)
+			hourly[i].Start = hourBounds[i]
+		}
+		daily := make([]DayBucket, accountDays)
+		for i := range daily {
+			daily[i].Date = firstDay.AddDate(0, 0, i).Format(dayLayout)
 		}
 		for hourUnix, bucket := range buckets {
 			start := time.Unix(hourUnix, 0)
+			if index, ok := dayIndex[start.In(now.Location()).Format(dayLayout)]; ok {
+				daily[index].Counters.add(*bucket)
+			}
 			if !start.Before(startOfDay) {
 				account.Today.add(*bucket)
 			}
@@ -335,11 +463,14 @@ func (s *Store) Summary(sessionLimit int) Summary {
 			if now.Sub(start) < 7*24*time.Hour {
 				account.Last7d.add(*bucket)
 			}
-			if index := int(start.Sub(firstHour) / time.Hour); index >= 0 && index < len(hourly) {
+			// Stored hours from older files may sit on another grid. One that
+			// starts before the first hour is out of range, not part of it.
+			if index, ok := boundsIndex(hourBounds, start); ok {
 				hourly[index].Counters.add(*bucket)
 			}
 		}
 		account.Hourly = hourly
+		account.Daily = daily
 		summary.Accounts[authID] = account
 		today.add(account.Today)
 		day.add(account.Last24h)
@@ -349,12 +480,12 @@ func (s *Store) Summary(sessionLimit int) Summary {
 	summary.Totals["last_24h"] = day
 	summary.Totals["last_7d"] = week
 	summary.History = s.historyLocked(now)
+	summary.Range = window.Key
+	summary.Performance = s.performanceLocked(now, window)
 
 	sessions := make([]Session, 0, len(s.sessions))
 	for _, session := range s.sessions {
-		copySession := *session
-		copySession.AuthIDs = append([]string(nil), session.AuthIDs...)
-		sessions = append(sessions, copySession)
+		sessions = append(sessions, s.sessionViewLocked(session))
 	}
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].LastSeen.After(sessions[j].LastSeen) })
 	if sessionLimit > 0 && len(sessions) > sessionLimit {
@@ -362,6 +493,37 @@ func (s *Store) Summary(sessionLimit int) Summary {
 	}
 	summary.Sessions = sessions
 	return summary
+}
+
+// sessionViewLocked copies a session for Summary and fills in the derived
+// fields.
+func (s *Store) sessionViewLocked(session *Session) Session {
+	view := *session
+	view.AuthIDs = append([]string{}, session.AuthIDs...)
+	view.ByAuth = make(map[string]*AuthCount, len(session.ByAuth))
+	for authID, count := range session.ByAuth {
+		if count == nil {
+			continue
+		}
+		copyCount := *count
+		view.ByAuth[authID] = &copyCount
+	}
+	view.ParentID = parentSessionID(session.ID)
+	view.TTFTP50 = roundMillis(session.TTFTHist.percentile(0.5, ttftBase))
+	view.TTFTHist = nil
+	view.ClientIP = ""
+	base, agent := splitSessionID(session.ID)
+	if meta := s.meta[base]; meta != nil {
+		view.Machine = meta.Machine
+		// Agent threads inherit the machine; the title names the main session.
+		if !agent {
+			view.Title = meta.Title
+		}
+	}
+	if view.Machine == "" && session.ClientIP != "" && s.machineName != nil {
+		view.Machine = s.machineName(session.ClientIP)
+	}
+	return view
 }
 
 func (s *Store) historyLocked(now time.Time) History {
@@ -436,6 +598,19 @@ func (s *Store) pruneLocked(now time.Time) {
 			delete(s.hourly, authID)
 		}
 	}
+	perfCutoff := now.Add(-perfRetention).Unix()
+	for authID, buckets := range s.perf {
+		for hourUnix := range buckets {
+			if hourUnix < perfCutoff {
+				delete(buckets, hourUnix)
+				s.dirty = true
+			}
+		}
+		if len(buckets) == 0 {
+			delete(s.perf, authID)
+		}
+	}
+	s.pruneSessionMetaLocked(now)
 	sessionCutoff := now.Add(-sessionRetention)
 	for id, session := range s.sessions {
 		if session.LastSeen.Before(sessionCutoff) {
@@ -464,7 +639,15 @@ func (s *Store) Flush() error {
 		return nil
 	}
 	s.pruneLocked(s.nowFunc())
-	data, errMarshal := json.Marshal(fileState{Version: statsFileVersion, Hourly: s.hourly, Daily: s.daily, Sessions: s.sessions})
+	data, errMarshal := json.Marshal(fileState{
+		Version:       statsFileVersion,
+		Hourly:        s.hourly,
+		Daily:         s.daily,
+		Sessions:      s.sessions,
+		Perf:          s.perf,
+		AuthProviders: s.authProviders,
+		SessionMeta:   s.meta,
+	})
 	path := s.path
 	s.dirty = false
 	s.mu.Unlock()
@@ -536,9 +719,51 @@ func (s *Store) loadLocked() {
 	}
 	for id, session := range state.Sessions {
 		if session != nil && s.sessions[id] == nil {
-			s.sessions[id] = session
+			s.sessions[id] = loadedSession(id, session)
 		}
 	}
+	for authID, buckets := range state.Perf {
+		target := s.perf[authID]
+		if target == nil {
+			target = make(map[int64]*perfBucket, len(buckets))
+			s.perf[authID] = target
+		}
+		for hour, bucket := range buckets {
+			if bucket == nil {
+				continue
+			}
+			bucket.validate()
+			if existing := target[hour]; existing != nil {
+				existing.add(bucket)
+			} else {
+				target[hour] = bucket
+			}
+		}
+	}
+	for authID, provider := range state.AuthProviders {
+		if s.authProviders[authID] == "" {
+			s.authProviders[authID] = provider
+		}
+	}
+	for id, meta := range state.SessionMeta {
+		if meta != nil && s.meta[id] == nil {
+			s.meta[id] = meta
+		}
+	}
+}
+
+// loadedSession repairs a session read from the stats file: the map key is
+// its id, and nil per-account counts and invalid histogram entries are
+// dropped so Summary never meets them.
+func loadedSession(id string, session *Session) *Session {
+	session.ID = id
+	session.TTFTHist = session.TTFTHist.valid()
+	for authID, count := range session.ByAuth {
+		if count == nil {
+			delete(session.ByAuth, authID)
+		}
+	}
+	return session
 }
 
 // loadHistoryLocked reads the log backfill. A missing file is normal.

@@ -301,6 +301,26 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			delete(req, key)
 		}
 	}
+	// Plan dates are checked before anything changes so a bad date leaves the
+	// auth untouched.
+	for key, rawValue := range req {
+		fieldPath := strings.TrimSpace(key)
+		if _, isPlanDate := planDateFields[rootAuthFileField(fieldPath)]; !isPlanDate {
+			continue
+		}
+		if fieldPath != rootAuthFileField(fieldPath) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s does not support nested fields", rootAuthFileField(fieldPath))})
+			return
+		}
+		value, errDecode := decodeAuthFileFieldValue(rawValue)
+		if errDecode == nil {
+			errDecode = validatePlanDateValue(fieldPath, value)
+		}
+		if errDecode != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s must be a YYYY-MM-DD date or null", fieldPath)})
+			return
+		}
+	}
 
 	ctx := c.Request.Context()
 
@@ -365,6 +385,12 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			return
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
+		} else if _, isPlanDate := planDateFields[fieldPath]; isPlanDate {
+			if value == nil {
+				delete(targetAuth.Metadata, fieldPath)
+			} else {
+				targetAuth.Metadata[fieldPath] = value
+			}
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errSet.Error()})
 			return
