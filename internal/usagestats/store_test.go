@@ -1,7 +1,10 @@
 package usagestats
 
 import (
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,5 +107,89 @@ func TestStorePrunesOldBuckets(t *testing.T) {
 	summary := store.Summary(10)
 	if _, ok := summary.Accounts["a"]; ok || len(summary.Sessions) != 0 {
 		t.Fatalf("expected old data pruned, got %+v", summary)
+	}
+}
+
+func TestStoreDailyTallyOutlivesHourlyPruning(t *testing.T) {
+	now := time.Date(2026, 10, 3, 15, 30, 0, 0, time.UTC)
+	store := newTestStore(now)
+	old := now.Add(-20 * 24 * time.Hour)
+	store.record(coreusage.Record{AuthID: "claude-a.json", Provider: "claude", RequestedAt: old, Detail: coreusage.Detail{OutputTokens: 40}})
+	store.record(coreusage.Record{AuthID: "codex-b.json", Provider: "codex", RequestedAt: now, Detail: coreusage.Detail{OutputTokens: 2}})
+
+	history := store.Summary(10).History
+	if len(history.Days) != 2 || history.Days[0].Date != "2026-09-13" || history.Days[0].Providers["claude"].Output != 40 {
+		t.Fatalf("days = %+v, want the pruned hour kept in the daily tally", history.Days)
+	}
+	if history.Lifetime.Output != 42 || history.Today.Output != 2 || history.ThisMonth.Output != 2 {
+		t.Fatalf("history totals = %+v", history)
+	}
+}
+
+func TestStoreSeedsDailyFromOlderStatsFile(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "usage-stats.json")
+	hour := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC).Unix()
+	older := `{"version":1,"hourly":{` +
+		`"claude-x@example.com.json":{"` + strconv.FormatInt(hour, 10) + `":{"requests":3,"output_tokens":30}},` +
+		`"codex-y@example.com-pro.json":{"` + strconv.FormatInt(hour, 10) + `":{"requests":1,"cache_read_tokens":9}}},"sessions":{}}`
+	if errWrite := os.WriteFile(path, []byte(older), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+
+	first := newTestStore(now)
+	first.path = path
+	first.loadLocked()
+	days := first.Summary(10).History.Days
+	if len(days) != 1 || days[0].Providers["claude"].Output != 30 || days[0].Providers["codex"].CacheRead != 9 {
+		t.Fatalf("seeded days = %+v", days)
+	}
+	if errFlush := first.Flush(); errFlush != nil {
+		t.Fatalf("Flush() error = %v", errFlush)
+	}
+
+	second := newTestStore(now)
+	second.path = path
+	second.loadLocked()
+	if got := second.Summary(10).History.Lifetime; got.Requests != 4 || got.Output != 30 {
+		t.Fatalf("reloaded lifetime = %+v, want the seed counted once", got)
+	}
+}
+
+func TestStoreMergesLogBackfill(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) // a Sunday
+	dir := t.TempDir()
+	backfill := `{"cutoff":"2026-10-03T18:18:00+01:00",` +
+		`"days":{"2026-09-28":{"claude":{"requests":5,"output_tokens":100}},` +
+		`"2026-10-03":{"claude":{"requests":2,"output_tokens":10},"codex":{"requests":1,"input_tokens":7}},` +
+		`"2026-08-01":{"codex":{"requests":1,"output_tokens":1000}}},` +
+		`"machines":{"m1":{"codex":{"requests":1,"output_tokens":1000}}}}`
+	if errWrite := os.WriteFile(filepath.Join(dir, HistoryFileName), []byte(backfill), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+
+	store := newTestStore(now)
+	store.configure(filepath.Join(dir, "usage-stats.json"))
+	defer close(store.stop)
+	store.record(coreusage.Record{AuthID: "claude-a.json", Provider: "claude", RequestedAt: time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC), Detail: coreusage.Detail{OutputTokens: 5}})
+	store.record(coreusage.Record{AuthID: "claude-a.json", Provider: "claude", RequestedAt: now, Detail: coreusage.Detail{OutputTokens: 1}})
+
+	history := store.Summary(10).History
+	if history.BackfillCutoff == nil || history.BackfillMachines["m1"]["codex"].Output != 1000 {
+		t.Fatalf("backfill metadata = %+v", history)
+	}
+	dates := make([]string, 0, len(history.Days))
+	for _, day := range history.Days {
+		dates = append(dates, day.Date)
+	}
+	if strings.Join(dates, ",") != "2026-08-01,2026-09-28,2026-10-03,2026-10-04" {
+		t.Fatalf("dates = %v, want oldest first", dates)
+	}
+	if got := history.Days[2].Providers["claude"]; got.Output != 15 || got.Requests != 3 {
+		t.Fatalf("3 Oct claude = %+v, want backfill and proxy tally added", got)
+	}
+	if history.Lifetime.Output != 1116 || history.ThisWeek.Output != 116 || history.ThisMonth.Output != 16 || history.Today.Output != 1 {
+		t.Fatalf("totals: lifetime %d, week %d, month %d, today %d",
+			history.Lifetime.Output, history.ThisWeek.Output, history.ThisMonth.Output, history.Today.Output)
 	}
 }
