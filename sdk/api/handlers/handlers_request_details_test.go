@@ -128,6 +128,11 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 // the body, so formatting it into a JSON literal would let a caller corrupt the
 // payload or overwrite the error code that clients branch on.
 func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
+	// Some model must be registered, or the proxy reports that it is still starting.
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient("test-unknown-model-claude", "claude", []*registry.ModelInfo{{ID: "claude-sonnet-4-5"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient("test-unknown-model-claude") })
+
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 
 	for _, model := range []string{
@@ -157,6 +162,27 @@ func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
 				t.Fatalf("error message = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// TestGetRequestDetails_NoModelsRegisteredIsTemporary covers the moment after a
+// restart before credentials register their models. Clients must get a status
+// they retry, not a 400 that ends the request.
+func TestGetRequestDetails_NoModelsRegisteredIsTemporary(t *testing.T) {
+	if registry.GetGlobalRegistry().HasModels() {
+		t.Fatal("another test left models registered in the global registry")
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	_, _, errMsg := handler.getRequestDetails("claude-opus-5-5")
+	if errMsg == nil || errMsg.Error == nil {
+		t.Fatal("expected an error while no models are registered")
+	}
+	if errMsg.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+	}
+	if got := gjson.Get(errMsg.Error.Error(), "error.code").String(); got != "service_starting" {
+		t.Fatalf("error code = %q, want service_starting", got)
 	}
 }
 

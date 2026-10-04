@@ -10,6 +10,7 @@ import (
 
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -197,6 +198,16 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	// custom model registrations that include thinking suffixes.
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
+	}
+
+	if len(providers) == 0 && !registry.GetGlobalRegistry().HasModels() {
+		// No credential has registered its models yet, which happens for a moment
+		// after a restart. Report it as temporary so clients retry instead of
+		// treating the model as unknown.
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error:      errors.New(`{"error":{"message":"the proxy is starting and has no models registered yet","type":"api_error","code":"service_starting"}}`),
+		}
 	}
 
 	if len(providers) == 0 {

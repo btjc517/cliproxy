@@ -205,3 +205,18 @@ func TestModelRegistryHook_PanicDoesNotAffectRegistry(t *testing.T) {
 		t.Fatal("timeout waiting for OnModelsUnregistered hook call")
 	}
 }
+
+func TestModelRegistryHasModels(t *testing.T) {
+	r := newTestModelRegistry()
+	if r.HasModels() {
+		t.Fatal("empty registry reports models")
+	}
+	r.RegisterClient("client-1", "claude", []*ModelInfo{{ID: "claude-sonnet-4-5"}})
+	if !r.HasModels() {
+		t.Fatal("registry with a client reports no models")
+	}
+	r.UnregisterClient("client-1")
+	if r.HasModels() {
+		t.Fatal("registry still reports models after the last client left")
+	}
+}

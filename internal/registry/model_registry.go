@@ -1536,6 +1536,14 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 	return result
 }
 
+// HasModels reports whether any client has registered a model. It is false for
+// a moment after startup, before the loaded credentials register their models.
+func (r *ModelRegistry) HasModels() bool {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return len(r.models) > 0
+}
+
 // GetModelCount returns the number of available clients for a specific model
 // Parameters:
 //   - modelID: The model ID to check
