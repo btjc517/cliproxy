@@ -69,6 +69,17 @@ func (h *histogram) merge(other histogram) {
 	}
 }
 
+// valid drops entries a damaged stats file could hold: indexes outside the
+// histogram, which would turn into infinite bounds, and counts below one.
+func (h histogram) valid() histogram {
+	for index, count := range h {
+		if index < 0 || index >= histBuckets || count <= 0 {
+			delete(h, index)
+		}
+	}
+	return h
+}
+
 func (h histogram) sortedIndexes() []int {
 	indexes := make([]int, 0, len(h))
 	for index, count := range h {
@@ -118,6 +129,13 @@ type perfBucket struct {
 	Throughput histogram `json:"throughput,omitempty"`
 }
 
+// validate repairs a bucket read from the stats file.
+func (b *perfBucket) validate() {
+	b.TTFT = b.TTFT.valid()
+	b.Latency = b.Latency.valid()
+	b.Throughput = b.Throughput.valid()
+}
+
 func (b *perfBucket) add(other *perfBucket) {
 	b.Requests += other.Requests
 	b.Failed += other.Failed
@@ -156,33 +174,84 @@ func LookupWindow(key string) (Window, bool) {
 	return window, ok
 }
 
-// localHourStart is the start of the local hour in loc that holds at. Stats
-// are stored under these keys, so local hours and days always split on a
-// stored hour, even in zones whose offset is not a whole number of hours.
-// Working back from at by the local minutes avoids the hour that a DST
-// change repeats or skips.
-func localHourStart(at time.Time, loc *time.Location) time.Time {
-	local := at.In(loc)
-	return local.Add(-time.Duration(local.Minute())*time.Minute -
-		time.Duration(local.Second())*time.Second - time.Duration(local.Nanosecond()))
+// slotStep is the grid every bucket boundary sits on. Every time zone in use
+// today is a whole number of quarter hours from UTC, and so is every DST
+// change, so local hours, days and range buckets all start on this grid.
+const slotStep = 15 * time.Minute
+
+// maxBoundaryWalk bounds the search for a bucket start: a 12 hour bucket that
+// gains a DST hour is 52 quarter hours, and a local day is at most 100.
+const maxBoundaryWalk = 26 * 4
+
+// isBucketStart reports whether a bucket of hours local hours starts at t, a
+// point on the slotStep grid. A bucket starts where the local day or the
+// bucket number (local hour / hours) changes from the quarter hour before, and
+// also where the local clock reads a whole bucket hour again after a DST change
+// turned it back. Buckets are therefore built from the same local clock for
+// every size: each 6 or 12 hour bucket and each local day is a run of whole
+// 1 hour buckets, and stats stored per 1 hour bucket never straddle a boundary.
+func isBucketStart(t time.Time, loc *time.Location, hours int) bool {
+	local := t.In(loc)
+	if local.Minute() == 0 && local.Second() == 0 && local.Hour()%hours == 0 {
+		return true
+	}
+	prev := t.Add(-slotStep).In(loc)
+	return local.YearDay() != prev.YearDay() || local.Year() != prev.Year() ||
+		local.Hour()/hours != prev.Hour()/hours
 }
 
-// firstBucketStart is the start of the oldest bucket. The newest bucket holds
-// now and starts on a local hour that is a multiple of the bucket size, so
-// buckets line up with local midnight. Older buckets are whole bucket lengths
-// back from it.
-func (w Window) firstBucketStart(now time.Time) time.Time {
-	hours := int(w.Bucket / time.Hour)
-	last := localHourStart(now, now.Location())
-	for step := 0; step < 24 && last.Hour()%hours != 0; step++ {
-		last = localHourStart(last.Add(-time.Minute), now.Location())
+// bucketStart is the start of the bucket of hours local hours that holds at.
+func bucketStart(at time.Time, loc *time.Location, hours int) time.Time {
+	start := at.Truncate(slotStep)
+	for step := 0; step < maxBoundaryWalk && !isBucketStart(start, loc, hours); step++ {
+		start = start.Add(-slotStep)
 	}
-	return last.Add(-time.Duration(w.Buckets-1) * w.Bucket)
+	return start
+}
+
+// nextBucketStart is the start of the bucket after the one that holds at.
+func nextBucketStart(at time.Time, loc *time.Location, hours int) time.Time {
+	next := at.Truncate(slotStep).Add(slotStep)
+	for step := 0; step < maxBoundaryWalk && !isBucketStart(next, loc, hours); step++ {
+		next = next.Add(slotStep)
+	}
+	return next
+}
+
+// localBounds returns count+1 instants in now's location: the starts of count
+// buckets of hours local hours, oldest first, ending with the bucket that
+// holds now, followed by the end of that newest bucket. Buckets that cross a
+// DST change are an hour longer or shorter than the rest.
+func localBounds(now time.Time, hours, count int) []time.Time {
+	loc := now.Location()
+	bounds := make([]time.Time, count+1)
+	bounds[count] = nextBucketStart(now, loc, hours).In(loc)
+	bounds[count-1] = bucketStart(now, loc, hours).In(loc)
+	for i := count - 2; i >= 0; i-- {
+		bounds[i] = bucketStart(bounds[i+1].Add(-slotStep), loc, hours).In(loc)
+	}
+	return bounds
+}
+
+// boundsIndex returns the bucket of bounds that holds at, or false when at is
+// before the first bucket or not before the end of the last.
+func boundsIndex(bounds []time.Time, at time.Time) (int, bool) {
+	index := sort.Search(len(bounds), func(i int) bool { return bounds[i].After(at) }) - 1
+	return index, index >= 0 && index < len(bounds)-1
+}
+
+// bounds returns the window's bucket starts and the end of its newest bucket.
+// Buckets start on local hours that are a multiple of the bucket size, so they
+// line up with local midnight.
+func (w Window) bounds(now time.Time) []time.Time {
+	return localBounds(now, int(w.Bucket/time.Hour), w.Buckets)
 }
 
 // Performance is request timing over the selected range.
 type Performance struct {
-	Range         string          `json:"range"`
+	Range string `json:"range"`
+	// BucketSeconds is the usual bucket length. A bucket that crosses a DST
+	// change is longer or shorter, so each series point carries its start.
 	BucketSeconds int64           `json:"bucket_seconds"`
 	Scopes        map[string]Perf `json:"scopes"`
 }
@@ -247,7 +316,7 @@ func (a *perfAccumulator) add(index int, bucket *perfBucket) {
 	a.series[index].add(bucket)
 }
 
-func (a *perfAccumulator) build(first time.Time, window Window) Perf {
+func (a *perfAccumulator) build(bounds []time.Time) Perf {
 	perf := Perf{
 		Requests:  a.total.Requests,
 		Failed:    a.total.Failed,
@@ -279,7 +348,7 @@ func (a *perfAccumulator) build(first time.Time, window Window) Perf {
 	for i := range a.series {
 		bucket := &a.series[i]
 		perf.Series[i] = PerfPoint{
-			Start:         first.Add(time.Duration(i) * window.Bucket),
+			Start:         bounds[i],
 			Requests:      bucket.Requests,
 			Failed:        bucket.Failed,
 			TTFTP50:       roundMillis(bucket.TTFT.percentile(0.5, ttftBase)),
@@ -292,8 +361,7 @@ func (a *perfAccumulator) build(first time.Time, window Window) Perf {
 
 // performanceLocked builds the performance view for window ending at now.
 func (s *Store) performanceLocked(now time.Time, window Window) Performance {
-	first := window.firstBucketStart(now)
-	end := first.Add(time.Duration(window.Buckets) * window.Bucket)
+	bounds := window.bounds(now)
 	scopes := make(map[string]*perfAccumulator)
 	scope := func(key string) *perfAccumulator {
 		acc := scopes[key]
@@ -316,11 +384,10 @@ func (s *Store) performanceLocked(now time.Time, window Window) Performance {
 		}
 		targets := []*perfAccumulator{scope("all"), scope(provider), scope(authID)}
 		for hourUnix, bucket := range buckets {
-			start := time.Unix(hourUnix, 0)
-			if start.Before(first) || !start.Before(end) {
+			index, ok := boundsIndex(bounds, time.Unix(hourUnix, 0))
+			if !ok {
 				continue
 			}
-			index := int(start.Sub(first) / window.Bucket)
 			for _, target := range targets {
 				target.add(index, bucket)
 			}
@@ -332,14 +399,15 @@ func (s *Store) performanceLocked(now time.Time, window Window) Performance {
 		Scopes:        make(map[string]Perf, len(scopes)),
 	}
 	for key, acc := range scopes {
-		performance.Scopes[key] = acc.build(first.In(now.Location()), window)
+		performance.Scopes[key] = acc.build(bounds)
 	}
 	return performance
 }
 
 // recordPerfLocked adds one attempt's timing to its credential's hour, keyed
-// by the start of that local hour, and counts a failover when an inbound
-// request that already failed on another credential succeeds here.
+// by the start of that local hour (bucketStart with 1 hour), and counts a
+// failover when an inbound request that already failed on another credential
+// succeeds here.
 func (s *Store) recordPerfLocked(authID, provider string, hourStart time.Time, record recordTiming) {
 	if provider != "" {
 		s.authProviders[authID] = provider
@@ -365,9 +433,9 @@ func (s *Store) recordPerfLocked(authID, provider string, hourStart time.Time, r
 		if record.latency > 0 {
 			bucket.Latency.observe(float64(record.latency)/float64(time.Millisecond), ttftBase)
 		}
-		// Only a streamed reply has a first token time that splits waiting from
-		// generating. A buffered reply's first byte comes after the whole body
-		// is ready.
+		// Only a reply streamed from upstream has a first token time that splits
+		// waiting from generating. A buffered reply's first byte comes after the
+		// whole body is ready.
 		if generation := record.latency - record.ttft; record.stream && record.ttft > 0 && generation > 0 && record.output >= minThroughputTokens {
 			bucket.Throughput.observe(float64(record.output)/generation.Seconds(), throughputBase)
 		}
@@ -429,8 +497,8 @@ func (s *Store) pruneTracesLocked(now time.Time) {
 type recordTiming struct {
 	traceID string
 	at      time.Time
-	// stream is true when the attempt ran in streaming mode
-	// (coreusage.Record.Stream).
+	// stream is true when the upstream reply arrived as a stream
+	// (coreusage.Record.UpstreamStream), whatever the client asked for.
 	stream  bool
 	failed  bool
 	ttft    time.Duration

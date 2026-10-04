@@ -46,6 +46,7 @@ type UsageReporter struct {
 	serviceTier         string
 	generate            bool
 	stream              bool
+	upstreamStream      bool
 	requestedAt         time.Time
 	ttftMu              sync.RWMutex
 	ttft                time.Duration
@@ -130,6 +131,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		serviceTier:     usage.ServiceTierFromContext(ctx),
 		generate:        usage.GenerateFromContext(ctx),
 		stream:          usage.StreamFromContext(ctx),
+		upstreamStream:  usage.StreamFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -145,6 +147,16 @@ func (r *UsageReporter) SetStream(stream bool) {
 		return
 	}
 	r.stream = stream
+}
+
+// SetUpstreamStream records whether the upstream reply arrives as a stream.
+// It defaults to the client's stream flag; executors that stream from upstream
+// to answer a non-streaming client, or the reverse, set it.
+func (r *UsageReporter) SetUpstreamStream(stream bool) {
+	if r == nil {
+		return
+	}
+	r.upstreamStream = stream
 }
 
 // SetSessionHierarchy sets the explicit session and parent session identifiers.
@@ -655,6 +667,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ResponseModel:       responseModel,
 		Generate:            usage.GenerateFlag(r.generate),
 		Stream:              r.stream,
+		UpstreamStream:      r.upstreamStream,
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
 		TTFT:                r.ttftDuration(),

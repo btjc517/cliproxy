@@ -184,6 +184,11 @@ func (r *Resolver) resolve(ip string) {
 	}
 	current.pending = false
 	current.expires = r.nowFunc().Add(ttl)
+	// The last sweep skipped this entry while it was pending. A failed lookup
+	// expires sooner than what that sweep kept, so sweep again by then.
+	if current.expires.Before(r.sweepAfter) {
+		r.sweepAfter = current.expires
+	}
 }
 
 // roomLocked reports whether the cache can take a new address, dropping

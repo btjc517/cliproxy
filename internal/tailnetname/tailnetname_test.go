@@ -139,3 +139,43 @@ func TestResolverCapsCacheEntries(t *testing.T) {
 		t.Fatalf("after expiry: %d entries, want only the new address", len(resolver.entries))
 	}
 }
+
+// A full-cache sweep skips a pending lookup and waits for the earliest expiry
+// it kept. When that lookup then fails, its short negative entry must free
+// room when it expires, not when the hour-long entries do.
+func TestResolverSweepsWhenAFailedLookupExpires(t *testing.T) {
+	var clock atomic.Int64
+	clock.Store(time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC).UnixNano())
+	release := make(chan struct{})
+	resolver := newResolver(func(ctx context.Context, ip string) ([]string, error) {
+		if ip == "100.64.0.3" {
+			<-release
+			return nil, errors.New("no PTR")
+		}
+		return []string{"host.tail.ts.net."}, nil
+	}, 3, 8)
+	resolver.nowFunc = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+
+	resolver.Name("100.64.0.1")
+	resolver.Name("100.64.0.2")
+	waitIdle(resolver)
+	// The third lookup hangs, so the cache is full with one entry pending.
+	resolver.Name("100.64.0.3")
+	if got := resolver.Name("100.64.0.4"); got != "" {
+		t.Fatalf("full cache name = %q, want empty", got)
+	}
+
+	close(release)
+	waitIdle(resolver)
+	clock.Add(int64(failureTTL + time.Minute))
+	resolver.Name("100.64.0.4")
+	waitIdle(resolver)
+
+	resolver.mu.Lock()
+	_, added := resolver.entries["100.64.0.4"]
+	_, kept := resolver.entries["100.64.0.3"]
+	resolver.mu.Unlock()
+	if !added || kept {
+		t.Fatalf("after the failed entry expired: new address added %v, failed entry kept %v, want added and dropped", added, kept)
+	}
+}

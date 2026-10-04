@@ -223,7 +223,7 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 	delta := countersFromRecord(record)
 
 	location := s.nowFunc().Location()
-	hourStart := localHourStart(at, location)
+	hourStart := bucketStart(at, location, 1)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -246,7 +246,7 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 	s.recordPerfLocked(authID, provider, hourStart, recordTiming{
 		traceID: strings.TrimSpace(record.TraceID),
 		at:      at,
-		stream:  record.Stream,
+		stream:  record.UpstreamStream,
 		failed:  record.Failed,
 		ttft:    record.TTFT,
 		latency: record.Latency,
@@ -420,9 +420,8 @@ func (s *Store) Summary(sessionLimit int) Summary {
 // SummaryFor builds the dashboard view with performance over window.
 func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 	now := s.nowFunc()
-	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	thisHour := localHourStart(now, now.Location())
-	firstHour := thisHour.Add(-47 * time.Hour)
+	startOfDay := bucketStart(now, now.Location(), 24)
+	hourBounds := localBounds(now, 1, 48)
 	firstDay := startOfDay.AddDate(0, 0, -(accountDays - 1))
 	dayIndex := make(map[string]int, accountDays)
 	for i := 0; i < accountDays; i++ {
@@ -444,7 +443,7 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 		var account AccountSummary
 		hourly := make([]HourBucket, 48)
 		for i := range hourly {
-			hourly[i].Start = firstHour.Add(time.Duration(i) * time.Hour)
+			hourly[i].Start = hourBounds[i]
 		}
 		daily := make([]DayBucket, accountDays)
 		for i := range daily {
@@ -464,7 +463,9 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 			if now.Sub(start) < 7*24*time.Hour {
 				account.Last7d.add(*bucket)
 			}
-			if index := int(start.Sub(firstHour) / time.Hour); index >= 0 && index < len(hourly) {
+			// Stored hours from older files may sit on another grid. One that
+			// starts before the first hour is out of range, not part of it.
+			if index, ok := boundsIndex(hourBounds, start); ok {
 				hourly[index].Counters.add(*bucket)
 			}
 		}
@@ -732,6 +733,7 @@ func (s *Store) loadLocked() {
 			if bucket == nil {
 				continue
 			}
+			bucket.validate()
 			if existing := target[hour]; existing != nil {
 				existing.add(bucket)
 			} else {
@@ -752,9 +754,11 @@ func (s *Store) loadLocked() {
 }
 
 // loadedSession repairs a session read from the stats file: the map key is
-// its id, and nil per-account counts are dropped so Summary never meets them.
+// its id, and nil per-account counts and invalid histogram entries are
+// dropped so Summary never meets them.
 func loadedSession(id string, session *Session) *Session {
 	session.ID = id
+	session.TTFTHist = session.TTFTHist.valid()
 	for authID, count := range session.ByAuth {
 		if count == nil {
 			delete(session.ByAuth, authID)

@@ -56,6 +56,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Use an upstream stream whenever the downstream response needs translation
 	// from Claude events. Native Claude responses use the JSON response path.
 	upstreamStream := responseFormat != to
+	reporter.SetUpstreamStream(upstreamStream)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest

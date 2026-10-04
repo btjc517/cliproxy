@@ -159,10 +159,12 @@ func TestThroughputCountsOnlyStreamedReplies(t *testing.T) {
 	now := time.Date(2026, 10, 4, 15, 30, 0, 0, time.UTC)
 	store := newTestStore(now)
 	store.machineName = func(string) string { return "" }
-	// A buffered reply: its first byte came after the whole body was ready.
-	store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", RequestedAt: now,
-		TTFT: 2900 * time.Millisecond, Latency: 3 * time.Second, Detail: coreusage.Detail{OutputTokens: 400}})
+	// A buffered upstream reply: its first byte came after the whole body was
+	// ready, even though the client asked for a stream.
 	store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", RequestedAt: now, Stream: true,
+		TTFT: 2900 * time.Millisecond, Latency: 3 * time.Second, Detail: coreusage.Detail{OutputTokens: 400}})
+	// Streamed from upstream to answer a client that did not ask for a stream.
+	store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", RequestedAt: now, UpstreamStream: true,
 		TTFT: time.Second, Latency: 3 * time.Second, Detail: coreusage.Detail{OutputTokens: 200}})
 
 	all := store.Summary(10).Performance.Scopes["all"]
