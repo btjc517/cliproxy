@@ -434,7 +434,7 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 
 	summary := Summary{
 		GeneratedAt: now,
-		Timezone:    now.Location().String(),
+		Timezone:    zoneName(now.Location()),
 		Accounts:    make(map[string]AccountSummary, len(s.hourly)),
 		Totals:      map[string]Counters{},
 	}
