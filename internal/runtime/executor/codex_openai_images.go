@@ -119,7 +119,11 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
+	// The body asks for stream:true, so the reply is an upstream SSE stream.
+	// Time it the way Execute does: TTFT is the first token event, not the
+	// first byte.
+	reporter.SetUpstreamStream(true)
+	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -132,7 +136,10 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	}()
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	data, errRead := io.ReadAll(httpResp.Body)
+	data, errRead := io.ReadAll(helps.ObserveSSEData(httpResp.Body, func(payload []byte) bool {
+		reporter.ObserveTokenEvent(helps.IsResponsesTokenEvent(payload))
+		return !reporter.IsTTFTSet()
+	}))
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
