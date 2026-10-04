@@ -162,6 +162,19 @@ const rollForward = (t, windowMs) => {
   return t;
 };
 
+// Providers whose weekly window starts at the first request after a reset
+// (routing.prime-after-reset). Filled from /dashboard/data on each render.
+let PRIME = new Set();
+
+// A weekly reading whose reset has passed describes the old week. With priming
+// on, the new week has not started yet; otherwise it runs on a fixed cycle.
+function weekItem(provider, pct, reset, windowMs) {
+  if (reset && reset <= Date.now()) {
+    return PRIME.has(provider) ? { pct: 0, reset: 0, notStarted: true } : { pct: 0, reset: rollForward(reset, windowMs) };
+  }
+  return { pct, reset };
+}
+
 function limitsFor(entry) {
   const q = entry.quota || {};
   const s = q.signals || {};
@@ -170,7 +183,7 @@ function limitsFor(entry) {
   if (provider === "claude") {
     const w = sig(s, "Anthropic-Ratelimit-Unified-7d-Utilization");
     const wr = resetTime(sig(s, "Anthropic-Ratelimit-Unified-7d-Reset"));
-    if (w || wr) out.week = { pct: Number(w) * 100, reset: rollForward(wr, 7 * 864e5) };
+    if (w || wr) out.week = weekItem("claude", Number(w) * 100, wr, 7 * 864e5);
     const f = sig(s, "Anthropic-Ratelimit-Unified-5h-Utilization");
     const fr = resetTime(sig(s, "Anthropic-Ratelimit-Unified-5h-Reset"));
     if (f || fr) out.short = { pct: Number(f) * 100, reset: fr > Date.now() ? fr : 0, label: "5 hour" };
@@ -180,7 +193,7 @@ function limitsFor(entry) {
       if (!minutes) continue;
       const reset = resetTime(sig(s, p + "Reset-At"), q.observed_at, sig(s, p + "Reset-After-Seconds"));
       const item = { pct: Number(sig(s, p + "Used-Percent")), reset };
-      if (minutes >= 6 * 24 * 60) { item.reset = rollForward(reset, minutes * 6e4); out.week = item; }
+      if (minutes >= 6 * 24 * 60) { out.week = weekItem("codex", item.pct, reset, minutes * 6e4); }
       else { item.label = minutes >= 60 ? Math.round(minutes / 60) + " hour" : minutes + " min"; item.reset = reset > Date.now() ? reset : 0; out.short = item; }
     }
   }
@@ -207,7 +220,8 @@ function priorityOf(entry) {
 }
 
 // Mirror the soonest-reset selector: highest priority tier among ready accounts,
-// unobserved accounts first, then the earliest weekly reset.
+// unobserved accounts and (with priming) accounts whose new week has not started
+// first, then the earliest weekly reset.
 function nextUp(entries) {
   const ready = entries.filter((e) => stateFor(e).cls === "");
   if (!ready.length) return null;
@@ -224,6 +238,7 @@ function nextUp(entries) {
 
 function bar(item, label) {
   if (!item) return `<div class="limit"><div class="top"><span>${label}</span><span>No reading yet</span></div><div class="bar"><i style="width:0"></i></div></div>`;
+  if (item.notStarted) return `<div class="limit"><div class="top"><span>${label} · new week not started</span><span>starts at next request</span></div><div class="bar"><i style="width:0"></i></div></div>`;
   const pct = Math.max(0, Math.min(100, Number.isFinite(item.pct) ? item.pct : 0));
   const cls = pct >= 90 ? "high" : pct >= 70 ? "mid" : "";
   const reset = item.reset ? "resets in " + until(item.reset) : "";
@@ -283,6 +298,7 @@ function hitRate(c) {
 }
 
 function render(accounts, summary, routing) {
+  PRIME = new Set((routing.prime_after_reset || []).map((p) => String(p).toLowerCase()));
   const files = (accounts || []).filter((f) => ["claude", "codex"].includes(String(f.provider || f.type).toLowerCase()));
   const byProvider = { claude: [], codex: [] };
   for (const f of files) byProvider[String(f.provider || f.type).toLowerCase()].push(f);
@@ -302,6 +318,7 @@ function render(accounts, summary, routing) {
       <div class="chips">
         ${strategy ? `<span class="chip">Routing <b>${esc(strategy)}</b></span>` : ""}
         ${affinity !== undefined ? `<span class="chip">Session affinity <b>${affinity ? "on" : "off"}</b></span>` : ""}
+        ${PRIME.size ? `<span class="chip">Starts new weeks early <b>${[...PRIME].join(", ")}</b></span>` : ""}
         <span class="chip"><b>${byProvider.claude.length}</b> Claude · <b>${byProvider.codex.length}</b> Codex</span>
       </div>
     </div>

@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +30,9 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
+	// primeAfterReset is the sorted, comma-joined provider list, kept as a string
+	// so the state stays comparable.
+	primeAfterReset string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -58,6 +62,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 			state.sessionAffinityTTL = parsed
 		}
 	}
+	state.primeAfterReset = normalizedProviderList(cfg.Routing.PrimeAfterReset)
 	if state.sessionAffinity && cfg.Routing.SessionAffinitySubagents != nil {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
@@ -72,7 +77,11 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
 	case "soonest-reset":
-		selector = &coreauth.SoonestResetSelector{}
+		var primeProviders []string
+		if state.primeAfterReset != "" {
+			primeProviders = strings.Split(state.primeAfterReset, ",")
+		}
+		selector = coreauth.NewSoonestResetSelector(primeProviders)
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
@@ -308,4 +317,20 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.DisableControlPanel = true
 	cfg.Plugins.StoreAuth = nil
+}
+
+// normalizedProviderList lower-cases, de-duplicates and sorts provider names.
+func normalizedProviderList(providers []string) string {
+	seen := make(map[string]bool, len(providers))
+	names := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		name := strings.ToLower(strings.TrimSpace(provider))
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
 }

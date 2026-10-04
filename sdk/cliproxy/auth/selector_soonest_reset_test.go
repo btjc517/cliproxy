@@ -165,3 +165,67 @@ func TestWeeklyQuotaResetAt_RollsPastResetForward(t *testing.T) {
 		t.Fatalf("WeeklyQuotaResetAt() = %v, want %v", got, want)
 	}
 }
+
+func TestSoonestResetSelectorPick_PrimesCredentialWhoseResetPassed(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_790_000_000, 0)
+	auths := []*Auth{
+		claudeAuthResettingAt("a", now.Add(2*time.Hour)),
+		claudeAuthResettingAt("b", now.Add(-30*time.Minute)),
+	}
+
+	plain := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
+	got, err := plain.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "a" {
+		t.Fatalf("without priming Pick() = %q, want %q (b's reset rolls a week forward)", got.ID, "a")
+	}
+
+	priming := NewSoonestResetSelector([]string{" Claude "})
+	priming.nowFunc = func() time.Time { return now }
+	got, err = priming.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "b" {
+		t.Fatalf("with priming Pick() = %q, want just-reset %q", got.ID, "b")
+	}
+}
+
+func TestSoonestResetSelectorPick_PrimingIsPerProvider(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_790_000_000, 0)
+	selector := NewSoonestResetSelector([]string{"codex"})
+	selector.nowFunc = func() time.Time { return now }
+	auths := []*Auth{
+		claudeAuthResettingAt("a", now.Add(2*time.Hour)),
+		claudeAuthResettingAt("b", now.Add(-30*time.Minute)),
+	}
+
+	got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "a" {
+		t.Fatalf("Pick() = %q, want %q: Claude is not a priming provider here", got.ID, "a")
+	}
+}
+
+func TestWeeklyQuotaResetPassed(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_790_000_000, 0)
+	if WeeklyQuotaResetPassed(claudeAuthResettingAt("a", now.Add(time.Minute)), now) {
+		t.Fatal("future reset reported as passed")
+	}
+	if !WeeklyQuotaResetPassed(claudeAuthResettingAt("a", now.Add(-time.Minute)), now) {
+		t.Fatal("past reset not reported as passed")
+	}
+	if WeeklyQuotaResetPassed(&Auth{ID: "a", Provider: "claude"}, now) {
+		t.Fatal("credential with no snapshot reported as passed")
+	}
+}
