@@ -70,8 +70,8 @@ type Session struct {
 	FirstSeen     time.Time             `json:"first_seen"`
 	LastSeen      time.Time             `json:"last_seen"`
 	TTFTP50       int64                 `json:"ttft_ms_p50"`
-	// ClientIP, TTFTHist and ServedAt are kept in the stats file and left out
-	// of Summary. ServedAt is when the request that set ServingAuthID started.
+	// ClientIP and TTFTHist are kept in the stats file and left out of
+	// Summary. ServedAt is when the request that set ServingAuthID started.
 	ClientIP string    `json:"client_ip,omitempty"`
 	TTFTHist histogram `json:"ttft_hist,omitempty"`
 	ServedAt time.Time `json:"served_at,omitzero"`
@@ -512,7 +512,6 @@ func (s *Store) sessionViewLocked(session *Session) Session {
 	view.TTFTP50 = roundMillis(session.TTFTHist.percentile(0.5, ttftBase))
 	view.TTFTHist = nil
 	view.ClientIP = ""
-	view.ServedAt = time.Time{}
 	base, agent := splitSessionID(session.ID)
 	if meta := s.meta[base]; meta != nil {
 		view.Machine = meta.Machine

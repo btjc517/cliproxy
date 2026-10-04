@@ -247,9 +247,11 @@ func TestSessionFieldsFollowTheLatestRequest(t *testing.T) {
 	store.recordFrom(coreusage.Record{AuthID: "claude-a", SessionID: "claude:s1", Model: "claude-sonnet-5-5", RequestedAt: older.Add(time.Second)}, "100.64.0.1")
 	check(store, "claude-fable-5-1", latest)
 
+	// The dashboard folds agent threads into their parent and needs
+	// served_at to pick which one's serving account is current.
 	view := sessionsByID(store.Summary(10))["claude:s1"]
-	if !view.ServedAt.IsZero() {
-		t.Fatal("summary leaks served_at")
+	if !view.ServedAt.Equal(newer) {
+		t.Fatalf("summary served_at = %v, want %v", view.ServedAt, newer)
 	}
 	if errFlush := store.Flush(); errFlush != nil {
 		t.Fatalf("Flush() error = %v", errFlush)
