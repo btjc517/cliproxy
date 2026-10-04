@@ -1,6 +1,6 @@
 // Overview: weekly allowance per provider, the last 24 hours, active sessions.
 import {
-  S, esc, icon, logo, pill, warnIcon, accounts, status, limits, left, queue, plan, planDay, planDaysAway, resetShort, clock,
+  S, esc, icon, logo, pill, warnState, accounts, status, limits, left, queue, plan, planDay, planDaysAway, resetShort, clock,
   providerTitle, sessions, isToday,
 } from "../core.js";
 import { providerTabs, bindProviderTabs, readAt, usageStrip, sessionTable } from "./common.js";
@@ -11,7 +11,7 @@ function planEnding(acct, reset) {
   const days = planDaysAway(p.ends);
   if (days == null || days < 0) return "";
   const resetDays = reset ? Math.ceil((reset - Date.now()) / 864e5) : 99;
-  return days <= Math.max(7, resetDays) ? `<span class="state sm">${warnIcon(14)}Plan ends ${esc(planDay(p.ends))}</span>` : "";
+  return days <= Math.max(7, resetDays) ? warnState("Plan ends " + planDay(p.ends), "sm") : "";
 }
 
 function accountColumn(acct, isNext) {
@@ -23,7 +23,7 @@ function accountColumn(acct, isNext) {
   if (st.kind === "off") {
     l1 = `<span class="t muted">Off</span>`;
   } else if (st.kind === "blocked" || st.kind === "error") {
-    l1 = `<span class="state strong">${warnIcon(14)}<span class="clamp">${esc(st.text)}</span></span>`;
+    l1 = warnState(st.text, "strong");
   } else if (st.kind === "usedup") {
     l1 = `<span class="t">Used up</span>`;
     end = planEnding(acct, st.until || week?.reset);

@@ -1,7 +1,7 @@
 // Account details: limits and plan, the last 24 hours, its active sessions.
 import {
   S, esc, icon, logo, accountById, status, limits, left, plan, planDay, planDaysAway, inDays, resetLong, clock,
-  modeMenu, planMenu, modeTitle, sessions, warnIcon,
+  modeMenu, planMenu, modeTitle, sessions, warnState,
 } from "../core.js";
 import { usageStrip, sessionTable } from "./common.js";
 
@@ -26,7 +26,7 @@ function planBlock(a) {
   let main, sub;
   if (p.ends) {
     main = `<span class="v">${esc(planDay(p.ends))}</span><span class="u">ends</span>`;
-    sub = `<span class="state sm">${warnIcon(14)}${esc(inDays(planDaysAway(p.ends)))}, no renewal</span>`;
+    sub = warnState(inDays(planDaysAway(p.ends)) + ", no renewal", "sm");
   } else if (p.renews) {
     main = `<span class="v">${esc(planDay(p.renews))}</span><span class="u">renews</span>`;
     sub = esc(inDays(planDaysAway(p.renews))) + (p.source === "token" ? " · from sign-in" : "");
