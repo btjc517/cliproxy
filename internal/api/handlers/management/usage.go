@@ -70,7 +70,7 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 	routing := gin.H{}
 	if h != nil && h.cfg != nil {
 		strategy, _ := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
-		routing = gin.H{"strategy": strategy, "session_affinity": h.cfg.Routing.SessionAffinity}
+		routing = gin.H{"strategy": strategy, "session_affinity": h.cfg.Routing.SessionAffinity, "prime_after_reset": h.cfg.Routing.PrimeAfterReset}
 	}
 	c.JSON(http.StatusOK, gin.H{"routing": routing, "summary": usagestats.Default().Summary(limit)})
 }
@@ -109,7 +109,7 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 	routing := gin.H{}
 	if h.cfg != nil {
 		strategy, _ := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
-		routing = gin.H{"strategy": strategy, "session_affinity": h.cfg.Routing.SessionAffinity}
+		routing = gin.H{"strategy": strategy, "session_affinity": h.cfg.Routing.SessionAffinity, "prime_after_reset": h.cfg.Routing.PrimeAfterReset}
 	}
 	c.JSON(http.StatusOK, gin.H{"routing": routing, "accounts": accounts, "summary": usagestats.Default().Summary(100)})
 }

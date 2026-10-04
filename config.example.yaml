@@ -151,6 +151,11 @@ routing:
   # for maximum parallel concurrency.
   # Ignored when routing.session-affinity is false.
   session-affinity-subagents: true
+  # Providers ("claude", "codex") whose weekly quota window only starts at the first
+  # request after a reset. Under soonest-reset, an account of these providers whose
+  # reset has passed takes the next new session, which starts its new week at once
+  # instead of leaving it idle. Leave empty for providers on a fixed weekly cycle.
+  prime-after-reset: []
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false

@@ -371,6 +371,12 @@ type RoutingConfig struct {
 	// When false, subagents are distributed across the credential pool via the fallback selector.
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
+
+	// PrimeAfterReset lists providers ("claude", "codex") whose weekly quota window
+	// starts at the first request after a reset. Under the soonest-reset strategy,
+	// a credential of these providers whose reset has passed takes the next new
+	// session, which starts its window instead of leaving it idle.
+	PrimeAfterReset []string `yaml:"prime-after-reset,omitempty" json:"prime-after-reset,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
