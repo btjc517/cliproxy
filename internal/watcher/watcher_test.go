@@ -1828,3 +1828,110 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
 }
+
+// TestConfigReloadSurvivesReplacingTheFile saves the config twice the way many
+// editors do, through a temporary file and a rename. The watch follows the
+// file, so before the fix the first replace dropped it and the second edit
+// never reloaded.
+func TestConfigReloadSurvivesReplacingTheFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create fsnotify watcher: %v", err)
+	}
+	defer func() { _ = fsWatcher.Close() }()
+	if err = fsWatcher.Add(configPath); err != nil {
+		t.Fatalf("failed to watch config: %v", err)
+	}
+
+	var reloads int32
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		watcher:        fsWatcher,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.processEvents(ctx)
+
+	replace := func(content string) {
+		tmp := configPath + ".tmp"
+		if errWrite := os.WriteFile(tmp, []byte(content), 0o644); errWrite != nil {
+			t.Fatalf("failed to write temp config: %v", errWrite)
+		}
+		if errRename := os.Rename(tmp, configPath); errRename != nil {
+			t.Fatalf("failed to replace config: %v", errRename)
+		}
+	}
+	waitFor := func(want int32) {
+		deadline := time.Now().Add(3 * time.Second)
+		for atomic.LoadInt32(&reloads) < want && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if got := atomic.LoadInt32(&reloads); got < want {
+			t.Fatalf("reloads = %d, want %d", got, want)
+		}
+	}
+
+	replace("auth_dir: " + authDir + "\nport: 8318\n")
+	waitFor(1)
+	replace("auth_dir: " + authDir + "\nport: 8319\n")
+	waitFor(2)
+}
+
+// TestHandleEventConfigRemoveReloadsAndRewatches feeds the event Linux sends
+// when the config is replaced through a rename: Remove on the old file, whose
+// watch is then gone. The watcher must reload and watch the path again.
+func TestHandleEventConfigRemoveReloadsAndRewatches(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create fsnotify watcher: %v", err)
+	}
+	defer func() { _ = fsWatcher.Close() }()
+
+	var reloads int32
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		watcher:        fsWatcher,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+
+	watched := false
+	for _, path := range fsWatcher.WatchList() {
+		if path == configPath {
+			watched = true
+		}
+	}
+	if !watched {
+		t.Fatal("config path is not watched again after the file was replaced")
+	}
+	time.Sleep(400 * time.Millisecond)
+	if got := atomic.LoadInt32(&reloads); got != 1 {
+		t.Fatalf("reloads = %d, want 1 after the config was replaced", got)
+	}
+}
