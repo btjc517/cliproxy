@@ -9642,3 +9642,38 @@ func TestClaudeExecutor_CloakModePrefersStoredPrevReqOverCallerFake(t *testing.T
 		t.Fatalf("CPA must not use fake caller cc_prev_req, got: %s", turn2System)
 	}
 }
+
+func TestClaudeCacheControlLimit_ThreadReservesOneSlot(t *testing.T) {
+	if got := claudeCacheControlLimit([]byte(`{"model":"m","messages":[]}`)); got != 4 {
+		t.Fatalf("limit without thread = %d, want 4", got)
+	}
+	if got := claudeCacheControlLimit([]byte(`{"model":"m","thread":{"id":"t"},"messages":[]}`)); got != 3 {
+		t.Fatalf("limit with thread = %d, want 3", got)
+	}
+}
+
+func TestEnforceCacheControlLimit_ThreadPayloadKeepsThreeBlocks(t *testing.T) {
+	// Shape seen from Claude Desktop's Code tab: three client markers plus one
+	// added by cloaking, with "thread" set. Upstream rejects four.
+	payload := []byte(`{
+		"thread": {"id": "t"},
+		"tools": [{"name":"t1","cache_control":{"type":"ephemeral"}}],
+		"system": [
+			{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":"s2","cache_control":{"type":"ephemeral"}}
+		],
+		"messages": [{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}}]}]
+	}`)
+
+	out := enforceCacheControlLimit(payload, claudeCacheControlLimit(payload))
+
+	if got := countCacheControls(out); got != 3 {
+		t.Fatalf("cache_control count = %d, want 3", got)
+	}
+	if gjson.GetBytes(out, "system.0.cache_control").Exists() {
+		t.Fatalf("system.0.cache_control should be removed first (non-last system block)")
+	}
+	if !gjson.GetBytes(out, "thread.id").Exists() {
+		t.Fatalf("thread must be preserved")
+	}
+}
