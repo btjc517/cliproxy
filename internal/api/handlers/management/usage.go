@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/usagestats"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type usageQueueRecord []byte
@@ -91,8 +93,10 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 		return
 	}
 	accounts := make([]gin.H, 0)
+	var auths []*coreauth.Auth
 	if h.authManager != nil {
-		for _, auth := range h.authManager.List() {
+		auths = h.authManager.List()
+		for _, auth := range auths {
 			entry := h.buildAuthFileEntry(auth)
 			if entry == nil {
 				continue
@@ -111,5 +115,6 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 		strategy, _ := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
 		routing = gin.H{"strategy": strategy, "session_affinity": h.cfg.Routing.SessionAffinity, "prime_after_reset": h.cfg.Routing.PrimeAfterReset}
 	}
-	c.JSON(http.StatusOK, gin.H{"routing": routing, "accounts": accounts, "summary": usagestats.Default().Summary(100)})
+	router := coreauth.DefaultRoutingState().Dashboard(auths, time.Now())
+	c.JSON(http.StatusOK, gin.H{"routing": routing, "accounts": accounts, "router": router, "summary": usagestats.Default().Summary(100)})
 }

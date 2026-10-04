@@ -445,3 +445,91 @@ func (c *SessionCache) cleanup() {
 		}
 	}
 }
+
+// SessionBinding is one persisted session-to-auth binding.
+type SessionBinding struct {
+	AuthID    string    `json:"auth_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Aliases   []string  `json:"aliases"`
+}
+
+// Snapshot returns the live bindings so they can be persisted.
+func (c *SessionCache) Snapshot() []SessionBinding {
+	if c == nil {
+		return nil
+	}
+	now := time.Now()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	bindings := make([]SessionBinding, 0, len(c.groups))
+	for _, group := range c.groups {
+		if !now.Before(group.expiresAt) || group.authID == "" || len(group.aliases) == 0 {
+			continue
+		}
+		bindings = append(bindings, SessionBinding{
+			AuthID:    group.authID,
+			ExpiresAt: group.expiresAt,
+			Aliases:   append([]string(nil), group.aliases...),
+		})
+	}
+	return bindings
+}
+
+// Restore re-creates persisted bindings that have not expired. A session that
+// already has a live binding keeps it.
+func (c *SessionCache) Restore(bindings []SessionBinding) {
+	if c == nil || len(bindings) == 0 {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitializedLocked()
+	for _, binding := range bindings {
+		if binding.AuthID == "" || !now.Before(binding.ExpiresAt) {
+			continue
+		}
+		aliases := make([]string, 0, len(binding.Aliases))
+		for _, alias := range compactSessionAliases(mergeSessionAliases(nil, binding.Aliases...)) {
+			if _, taken := c.entries[alias]; !taken {
+				aliases = append(aliases, alias)
+			}
+		}
+		if len(aliases) == 0 {
+			continue
+		}
+		expiresAt := binding.ExpiresAt
+		if limit := now.Add(c.ttl); expiresAt.After(limit) {
+			expiresAt = limit
+		}
+		c.replaceAliasGroupsLocked(binding.AuthID, expiresAt, aliases)
+	}
+}
+
+// ActiveSessionsByAuth counts, per auth, the distinct sessions whose binding
+// was last used after since. A session bound separately per model counts once.
+func (c *SessionCache) ActiveSessionsByAuth(since time.Time) map[string]int {
+	counts := make(map[string]int)
+	if c == nil {
+		return counts
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	seen := make(map[string]struct{})
+	for _, group := range c.groups {
+		if len(group.aliases) == 0 || !group.expiresAt.Add(-c.ttl).After(since) {
+			continue
+		}
+		session := group.aliases[0]
+		if index := strings.LastIndex(session, "::"); index > 0 {
+			session = session[:index]
+		}
+		key := group.authID + "\x00" + session
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		counts[group.authID]++
+	}
+	return counts
+}

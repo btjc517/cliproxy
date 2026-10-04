@@ -1015,6 +1015,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			}
 		}
+		defaultRoutingState.observeResult(result, responseHeaders, now)
 
 		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()

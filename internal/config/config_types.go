@@ -377,6 +377,26 @@ type RoutingConfig struct {
 	// a credential of these providers whose reset has passed takes the next new
 	// session, which starts its window instead of leaving it idle.
 	PrimeAfterReset []string `yaml:"prime-after-reset,omitempty" json:"prime-after-reset,omitempty"`
+
+	// Scorer configures the scored selector, which places new sessions by how
+	// much of each account's allowance is at risk of expiring unused.
+	Scorer RoutingScorerConfig `yaml:"scorer,omitempty" json:"scorer,omitempty"`
+}
+
+// RoutingScorerConfig configures the scored selector.
+type RoutingScorerConfig struct {
+	// Mode is "off" (default), "shadow" (record what it would pick next to the
+	// live strategy's pick, without changing routing) or "live" (route with it).
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+
+	// Headroom maps an account email (or auth file name) to the highest share of
+	// its 5-hour window, from 0 to 1, the pool should use while another account
+	// has room. It keeps a seat free for its owner's own use.
+	Headroom map[string]float64 `yaml:"headroom,omitempty" json:"headroom,omitempty"`
+
+	// MaxSessionsPerAccount is how many active sessions make an account count as
+	// busy. Zero means 6.
+	MaxSessionsPerAccount int `yaml:"max-sessions-per-account,omitempty" json:"max-sessions-per-account,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

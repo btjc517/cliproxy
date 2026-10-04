@@ -25,6 +25,9 @@ const (
 // picked first so one request can learn their reset time. Ties keep the
 // ID-sorted candidate order, which makes the choice deterministic.
 //
+// Credentials the provider recently refused outright (see
+// AccountHealth.refusedReason) are skipped while any other candidate remains.
+//
 // For providers listed in PrimeProviders, a credential whose observed reset has
 // passed is also picked first. Use it where the next window only starts at the
 // first request after a reset: the next new session then starts that window
@@ -35,6 +38,8 @@ type SoonestResetSelector struct {
 	PrimeProviders map[string]bool
 	// nowFunc overrides the clock in tests.
 	nowFunc func() time.Time
+	// state overrides the process-wide routing state in tests.
+	state *RoutingState
 }
 
 // NewSoonestResetSelector builds the selector; primeProviders may be empty.
@@ -63,6 +68,11 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
+	state := defaultRoutingState
+	if s != nil && s.state != nil {
+		state = s.state
+	}
+	available = state.withoutRefused(available, now)
 	if len(available) == 1 {
 		return available[0], nil
 	}

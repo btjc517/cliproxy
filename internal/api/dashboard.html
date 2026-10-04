@@ -97,6 +97,13 @@ tr:last-child td { border-bottom: 0; }
 .empty { color: var(--ink-3); padding: 16px; text-align: center; }
 .link { font: inherit; font-size: 12px; background: transparent; border: 0; color: var(--ink-3); padding: 0; margin: 0; }
 .err { color: var(--danger); font-size: 12px; margin-top: 8px; }
+.lead { color: var(--ink-2); padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.lead b { color: var(--ink); font-weight: 500; }
+.subhead { font-size: 11px; color: var(--ink-3); padding: 10px 12px 0; }
+td.why { white-space: normal; color: var(--ink-2); min-width: 280px; }
+td.why .problem { color: var(--warn); }
+tr.excluded td { color: var(--ink-3); }
+.rk { width: 28px; color: var(--ink-3); }
 @media (max-width: 760px) {
   .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .grid { grid-template-columns: 1fr; }
@@ -139,6 +146,9 @@ const ago = (iso) => {
   if (s < 86400) return Math.floor(s / 3600) + "h ago";
   return Math.floor(s / 86400) + "d ago";
 };
+// Go encodes an unset time as year 1; treat anything that old as missing.
+const validTime = (iso) => (iso && Date.parse(iso) > Date.UTC(2001, 0, 1) ? iso : "");
+const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const sig = (signals, name) => {
   if (!signals) return "";
   const want = name.toLowerCase();
@@ -165,6 +175,8 @@ const rollForward = (t, windowMs) => {
 // Providers whose weekly window starts at the first request after a reset
 // (routing.prime-after-reset). Filled from /dashboard/data on each render.
 let PRIME = new Set();
+// Router view from /dashboard/data: per-account meters and the scorer's ranking.
+let ROUTER = {};
 
 // A weekly reading whose reset has passed describes the old week. With priming
 // on, the new week has not started yet; otherwise it runs on a fixed cycle.
@@ -175,11 +187,43 @@ function weekItem(provider, pct, reset, windowMs) {
   return { pct, reset };
 }
 
+const meterLabel = (m) => {
+  if (m.name === "5h" || m.name === "primary") return "5 hour";
+  if (m.name === "7d" || m.name === "secondary") return "Week";
+  const t = String(m.title || m.name);
+  return t.charAt(0).toUpperCase() + t.slice(1);
+};
+
+// Limits from the router's meters, which keep every window the provider has
+// reported (including per-model weeks) and survive restarts.
+function routerLimits(entry, provider) {
+  const meters = ROUTER.accounts?.[entry.id]?.meters;
+  if (!meters || !meters.length) return null;
+  const out = { week: null, short: null, extra: [] };
+  for (const m of meters) {
+    const reset = m.reset_at ? Date.parse(m.reset_at) : 0;
+    const burn = m.burn_per_hour != null && m.burn_per_hour > 0 ? m.burn_per_hour * 100 : 0;
+    const item = { pct: (Number(m.utilization) || 0) * 100, reset: reset > Date.now() ? reset : 0, label: meterLabel(m), burn };
+    if (m.long && m.reset_since_reading && PRIME.has(provider)) Object.assign(item, { pct: 0, reset: 0, notStarted: true });
+    if ((m.name === "7d" || m.name === "secondary") && !out.week) out.week = item;
+    else if ((m.name === "5h" || m.name === "primary") && !out.short) out.short = item;
+    else out.extra.push(item);
+  }
+  return out;
+}
+
 function limitsFor(entry) {
+  return routerLimits(entry, String(entry.provider || entry.type || "").toLowerCase()) || signalLimits(entry);
+}
+
+// Limits from the credential's last quota snapshot, which is what the live
+// soonest-reset selector reads. It is empty after a restart until the
+// credential answers again.
+function signalLimits(entry) {
   const q = entry.quota || {};
   const s = q.signals || {};
   const provider = (entry.provider || entry.type || "").toLowerCase();
-  const out = { week: null, short: null };
+  const out = { week: null, short: null, extra: [] };
   if (provider === "claude") {
     const w = sig(s, "Anthropic-Ratelimit-Unified-7d-Utilization");
     const wr = resetTime(sig(s, "Anthropic-Ratelimit-Unified-7d-Reset"));
@@ -202,6 +246,8 @@ function limitsFor(entry) {
 
 function stateFor(entry) {
   if (entry.disabled) return { cls: "off", text: "Off" };
+  const refused = ROUTER.accounts?.[entry.id]?.refused;
+  if (refused) return { cls: "err", text: refused + ", skipped for new sessions" };
   const retry = entry.next_retry_after ? Date.parse(entry.next_retry_after) : 0;
   if (retry && retry > Date.now()) {
     const week = limitsFor(entry).week;
@@ -228,7 +274,7 @@ function nextUp(entries) {
   const top = Math.max(...ready.map(priorityOf));
   const tier = ready.filter((e) => priorityOf(e) === top);
   tier.sort((a, b) => {
-    const ra = limitsFor(a).week?.reset || 0, rb = limitsFor(b).week?.reset || 0;
+    const ra = signalLimits(a).week?.reset || 0, rb = signalLimits(b).week?.reset || 0;
     if (!ra !== !rb) return ra ? 1 : -1;
     if (ra !== rb) return ra - rb;
     return String(a.id).localeCompare(String(b.id));
@@ -242,7 +288,8 @@ function bar(item, label) {
   const pct = Math.max(0, Math.min(100, Number.isFinite(item.pct) ? item.pct : 0));
   const cls = pct >= 90 ? "high" : pct >= 70 ? "mid" : "";
   const reset = item.reset ? "resets in " + until(item.reset) : "";
-  return `<div class="limit"><div class="top"><span>${label} · ${Math.round(pct)}% used</span><span>${reset}</span></div><div class="bar"><i class="${cls}" style="width:${pct}%"></i></div></div>`;
+  const burn = item.burn ? ` · rising ${item.burn < 10 ? item.burn.toFixed(1) : Math.round(item.burn)}%/h` : "";
+  return `<div class="limit"><div class="top"><span>${label} · ${Math.round(pct)}% used${burn}</span><span>${reset}</span></div><div class="bar"><i class="${cls}" style="width:${pct}%"></i></div></div>`;
 }
 
 function spark(hourly) {
@@ -266,6 +313,7 @@ function card(entry, usage, isNext) {
   const today = usage?.today || {};
   const label = entry.email || entry.label || entry.account || entry.name || entry.id;
   const provider = String(entry.provider || entry.type || "").toLowerCase();
+  const seen = validTime(ROUTER.accounts?.[entry.id]?.observed_at) || validTime(entry.quota?.observed_at);
   const tags = [
     isNext ? `<span class="tag next">Next up</span>` : "",
     m === "reserve" ? `<span class="tag reserve">Reserve</span>` : "",
@@ -279,8 +327,8 @@ function card(entry, usage, isNext) {
       <div class="who"><span class="dot ${st.cls}"></span><span class="name" title="${esc(label)}">${esc(label)}</span>${tags}</div>
       <div class="seg">${segs}</div>
     </div>
-    <div class="status">${esc(st.text)}${entry.quota?.observed_at ? " · limits seen " + ago(entry.quota.observed_at) : ""}</div>
-    <div class="limits">${bar(lim.week, "Week")}${lim.short || provider === "claude" ? bar(lim.short, lim.short?.label || "5 hour") : ""}</div>
+    <div class="status">${esc(st.text)}${seen ? " · limits seen " + ago(seen) : ""}</div>
+    <div class="limits">${bar(lim.week, "Week")}${lim.short || provider === "claude" ? bar(lim.short, lim.short?.label || "5 hour") : ""}${(lim.extra || []).map((x) => bar(x, x.label)).join("")}</div>
     <div class="nums">
       <div><div class="k">Requests today</div><div class="v">${fmt(today.requests)}</div></div>
       <div><div class="k">Tokens in / out</div><div class="v">${fmt((today.input_tokens || 0) + (today.cache_read_tokens || 0) + (today.cache_write_tokens || 0))} / ${fmt(today.output_tokens)}</div></div>
@@ -297,8 +345,51 @@ function hitRate(c) {
   return total ? Math.round((read / total) * 100) + "%" : "–";
 }
 
-function render(accounts, summary, routing) {
+function candidateWhy(c) {
+  const problems = (c.problems || []).map((p) => `<span class="problem">${esc(p.charAt(0).toUpperCase() + p.slice(1))}.</span> `).join("");
+  return problems + esc(c.summary || "");
+}
+
+// The scorer section: how it would place a new session now, and how its
+// shadow picks compared with the live router's.
+function routerSection(names) {
+  const mode = ROUTER.mode;
+  if (!mode || mode === "off") return "";
+  const shadow = ROUTER.shadow || {};
+  const choices = shadow.choices || 0, agreed = shadow.agreed || 0;
+  const title = mode === "shadow" ? "Scorer, shadow test" : "Scorer";
+  let lead;
+  if (mode === "shadow") {
+    lead = choices
+      ? `Runs next to the live router without changing anything. In the last 24 hours it agreed with the live pick on <b>${agreed} of ${choices}</b> new sessions.`
+      : `Runs next to the live router without changing anything. No choices recorded in the last 24 hours: a choice needs two ready accounts.`;
+  } else {
+    lead = `Places new sessions. Ranking below is what it would do now.`;
+  }
+  const headroom = Object.entries(ROUTER.headroom || {});
+  if (headroom.length) lead += ` Keeps ${headroom.map(([a, line]) => `${esc(a)} below <b>${Math.round(line * 100)}%</b> of its 5-hour window`).join(", ")} while another account has room.`;
+  let html = `<h2>${title}</h2><div class="card tablecard"><div class="lead">${lead}</div>`;
+  for (const r of ROUTER.rankings || []) {
+    const provTitle = r.provider === "claude" ? "Claude" : r.provider === "codex" ? "Codex" : r.provider;
+    html += `<div class="subhead">If a new ${esc(provTitle)} session started now${r.model ? ` (${esc(r.model)})` : ""}</div>`;
+    html += `<table><tbody>${(r.candidates || []).map((c, i) => `<tr class="${c.excluded ? "excluded" : ""}"><td class="rk">${c.excluded ? "–" : i + 1}</td><td>${esc(names[c.auth_id] || c.account || c.auth_id)}</td><td class="why">${candidateWhy(c)}</td></tr>`).join("")}</tbody></table>`;
+  }
+  const disagreed = shadow.disagreed || [];
+  if (mode === "shadow" && disagreed.length) {
+    html += `<div class="subhead">Where it would have picked differently</div>`;
+    html += `<table><thead><tr><th>When</th><th>Model</th><th>Live picked</th><th>Scorer picks</th><th>Why</th></tr></thead><tbody>`;
+    html += disagreed.map((d) => {
+      const top = (d.ranking || []).find((c) => c.auth_id === d.shadow) || {};
+      return `<tr><td>${clock(d.at)}</td><td class="mono">${esc(d.model || "")}</td><td>${esc(names[d.live] || d.live)}</td><td>${esc(names[d.shadow] || d.shadow)}</td><td class="why">${candidateWhy(top)}</td></tr>`;
+    }).join("");
+    html += `</tbody></table>`;
+  }
+  return html + `</div>`;
+}
+
+function render(accounts, summary, routing, router) {
   PRIME = new Set((routing.prime_after_reset || []).map((p) => String(p).toLowerCase()));
+  ROUTER = router || {};
   const files = (accounts || []).filter((f) => ["claude", "codex"].includes(String(f.provider || f.type).toLowerCase()));
   const byProvider = { claude: [], codex: [] };
   for (const f of files) byProvider[String(f.provider || f.type).toLowerCase()].push(f);
@@ -319,6 +410,7 @@ function render(accounts, summary, routing) {
         ${strategy ? `<span class="chip">Routing <b>${esc(strategy)}</b></span>` : ""}
         ${affinity !== undefined ? `<span class="chip">Session affinity <b>${affinity ? "on" : "off"}</b></span>` : ""}
         ${PRIME.size ? `<span class="chip">Starts new weeks early <b>${[...PRIME].join(", ")}</b></span>` : ""}
+        ${ROUTER.mode && ROUTER.mode !== "off" ? `<span class="chip">Scorer <b>${esc(ROUTER.mode)}</b></span>` : ""}
         <span class="chip"><b>${byProvider.claude.length}</b> Claude · <b>${byProvider.codex.length}</b> Codex</span>
       </div>
     </div>
@@ -339,6 +431,7 @@ function render(accounts, summary, routing) {
     html += `<div class="grid">${list.map((e) => card(e, summary.accounts?.[e.id], e.id === next)).join("")}</div>`;
   }
 
+  html += routerSection(names);
   html += `<h2>Recent sessions</h2><div class="card tablecard">`;
   if (!sessions.length) html += `<div class="empty">No sessions yet</div>`;
   else {
@@ -392,7 +485,7 @@ async function load() {
     const res = await fetch("/dashboard/data", { cache: "no-store" });
     if (!res.ok) throw new Error("dashboard data returned " + res.status);
     const data = await res.json();
-    if (!busy) render(data.accounts || [], data.summary || {}, data.routing || {});
+    if (!busy) render(data.accounts || [], data.summary || {}, data.routing || {}, data.router || {});
   } catch (e) {
     const note = document.getElementById("loaderr") || Object.assign(document.createElement("div"), { id: "loaderr", className: "err" });
     note.textContent = "Refresh failed: " + e.message;

@@ -1328,6 +1328,14 @@ func truncateSessionID(id string) string {
 }
 
 // Stop releases resources held by the selector.
+// SessionCache returns the selector's session-to-auth bindings.
+func (s *SessionAffinitySelector) SessionCache() *SessionCache {
+	if s == nil {
+		return nil
+	}
+	return s.cache
+}
+
 func (s *SessionAffinitySelector) Stop() {
 	if s == nil {
 		return

@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,12 @@ type routingRuntimeState struct {
 	// primeAfterReset is the sorted, comma-joined provider list, kept as a string
 	// so the state stays comparable.
 	primeAfterReset string
+	// scorerMode is "off", "shadow" or "live".
+	scorerMode string
+	// scorerHeadroom is the sorted "account=line" list, comma-joined, kept as a
+	// string so the state stays comparable.
+	scorerHeadroom    string
+	scorerMaxSessions int
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -63,6 +70,18 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		}
 	}
 	state.primeAfterReset = normalizedProviderList(cfg.Routing.PrimeAfterReset)
+	switch strings.ToLower(strings.TrimSpace(cfg.Routing.Scorer.Mode)) {
+	case "shadow":
+		state.scorerMode = "shadow"
+	case "live":
+		state.scorerMode = "live"
+	default:
+		state.scorerMode = "off"
+	}
+	state.scorerHeadroom = normalizedHeadroom(cfg.Routing.Scorer.Headroom)
+	if cfg.Routing.Scorer.MaxSessionsPerAccount > 0 {
+		state.scorerMaxSessions = cfg.Routing.Scorer.MaxSessionsPerAccount
+	}
 	if state.sessionAffinity && cfg.Routing.SessionAffinitySubagents != nil {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
@@ -85,15 +104,58 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
+	routing := coreauth.DefaultRoutingState()
+	scorerConfig := coreauth.ScorerConfig{Headroom: parseHeadroom(state.scorerHeadroom), MaxSessions: state.scorerMaxSessions}
+	routing.SetScorer(state.scorerMode, scorerConfig)
+	switch state.scorerMode {
+	case "shadow":
+		selector = coreauth.NewShadowSelector(selector, coreauth.NewScoredSelector(scorerConfig, routing), routing)
+	case "live":
+		selector = coreauth.NewScoredSelector(scorerConfig, routing)
+	}
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents
-		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+		affinity := coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
 			Fallback:         selector,
 			TTL:              state.sessionAffinityTTL,
 			SubagentAffinity: &subagents,
 		})
+		routing.AttachSessionCache(affinity.SessionCache())
+		selector = affinity
 	}
 	return selector
+}
+
+// normalizedHeadroom turns the headroom map into a sorted "account=line" list
+// so routingRuntimeState stays comparable. Lines outside (0, 1] are dropped.
+func normalizedHeadroom(headroom map[string]float64) string {
+	entries := make([]string, 0, len(headroom))
+	for account, line := range headroom {
+		account = strings.ToLower(strings.TrimSpace(account))
+		if account == "" || line <= 0 || line > 1 || strings.ContainsAny(account, ",=") {
+			continue
+		}
+		entries = append(entries, account+"="+strconv.FormatFloat(line, 'f', -1, 64))
+	}
+	sort.Strings(entries)
+	return strings.Join(entries, ",")
+}
+
+func parseHeadroom(normalized string) map[string]float64 {
+	if normalized == "" {
+		return nil
+	}
+	headroom := make(map[string]float64)
+	for _, entry := range strings.Split(normalized, ",") {
+		account, raw, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if line, errParse := strconv.ParseFloat(raw, 64); errParse == nil {
+			headroom[account] = line
+		}
+	}
+	return headroom
 }
 
 func (s *Service) applyConfigUpdateWithAuthSynthesis(ctx context.Context, newCfg *config.Config, synthesizeConfigAuths bool) bool {

@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/usagestats"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -50,6 +53,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	usage.StartDefault(ctx)
+	if strings.TrimSpace(s.configPath) != "" {
+		coreauth.ConfigureRoutingState(filepath.Join(filepath.Dir(s.configPath), "routing-state.json"))
+	}
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
@@ -352,6 +358,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		usage.StopDefault()
+		if errFlush := coreauth.DefaultRoutingState().Flush(); errFlush != nil {
+			log.Warnf("routing state flush on shutdown failed: %v", errFlush)
+		}
+		if errFlush := usagestats.Default().Flush(); errFlush != nil {
+			log.Warnf("usage statistics flush on shutdown failed: %v", errFlush)
+		}
 	})
 	return shutdownErr
 }

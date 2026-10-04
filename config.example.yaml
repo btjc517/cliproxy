@@ -157,6 +157,26 @@ routing:
   # instead of leaving it idle. Leave empty for providers on a fixed weekly cycle.
   prime-after-reset: []
 
+  # The scored selector places new sessions by least laxity: the account whose
+  # weekly allowance is most at risk of expiring unused (allowance left divided by
+  # hours to reset, on the window that binds the requested model) goes first.
+  # Soft problems rank an account lower: its 5-hour window is on course to run
+  # out, it is above its headroom line, it is busy, or its reading is stale or
+  # missing. Accounts the provider refused, or with a window used up, are skipped.
+  # Meters, their history, session bindings and shadow picks are kept in
+  # routing-state.json beside this file, so they survive restarts.
+  scorer:
+    # off (default), shadow (record what it would pick next to the live
+    # strategy's pick, shown on /dashboard) or live (route with it).
+    mode: "off"
+    # Highest share of the 5-hour window the pool should use on an account while
+    # another account has room, keyed by account email. Keeps a seat free for its
+    # owner's own use.
+    headroom: {}
+    #   person@example.com: 0.7
+    # Active sessions at which an account counts as busy.
+    max-sessions-per-account: 6
+
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
 
