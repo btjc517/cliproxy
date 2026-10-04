@@ -319,6 +319,10 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .tr .c.g { flex: 1 1 0; }
 .tr .c.r { justify-content: flex-end; text-align: right; }
 .tr .c.ic { width: 16px; }
+/* Long text that wraps. Inline-size containment keeps it from widening the table. */
+.tr .c.why { display: block; contain: inline-size; min-width: 280px; white-space: normal; line-height: 18px; }
+.tr:not(.head):has(.c.why) { height: auto; min-height: 48px; }
+.tr:not(.head) .c.why { padding: 15px 0; }
 .subhead { padding: 16px 24px 8px; color: var(--muted-fg); display: flex; align-items: center; gap: 6px; }
 .tr.dim { color: var(--muted-fg); }
 .tr.group .c { gap: 8px; align-items: baseline; }

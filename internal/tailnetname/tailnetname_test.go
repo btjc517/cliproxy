@@ -179,3 +179,29 @@ func TestResolverSweepsWhenAFailedLookupExpires(t *testing.T) {
 		t.Fatalf("after the failed entry expired: new address added %v, failed entry kept %v, want added and dropped", added, kept)
 	}
 }
+
+func TestLocalHostNamePrefersTheFleetLabel(t *testing.T) {
+	windows := func() (string, error) { return "DESKTOP-A1GNVPI", nil }
+	env := func(values map[string]string) func(string) string {
+		return func(key string) string { return values[key] }
+	}
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"agent-cloud label", map[string]string{"AC_HOST_LABEL": "desktop-home"}, "desktop-home"},
+		{"explicit name wins", map[string]string{"CLIPROXY_HOST_NAME": "pool", "AC_HOST_LABEL": "desktop-home"}, "pool"},
+		{"blank label ignored", map[string]string{"AC_HOST_LABEL": "  "}, "DESKTOP-A1GNVPI"},
+		{"OS hostname", map[string]string{}, "DESKTOP-A1GNVPI"},
+	}
+	for _, c := range cases {
+		if got := localHostName(env(c.env), windows); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	failing := func() (string, error) { return "", errors.New("no hostname") }
+	if got := localHostName(env(nil), failing); got != "" {
+		t.Errorf("failing hostname: got %q, want empty", got)
+	}
+}

@@ -21,14 +21,14 @@ export const wantRange = () => (location.hash.startsWith("#/performance") ? S.ra
 let started = 0, applied = 0;
 
 // Loads /dashboard/data for the current route. A reply that arrives after a
-// newer one has been applied is dropped, so a slow load cannot undo a route change.
+// newer one, or after the route moved to another window, is dropped.
 export async function fetchData() {
   const want = wantRange();
   const my = ++started;
   const res = await fetch("/dashboard/data?range=" + encodeURIComponent(want), { cache: "no-store" });
   if (!res.ok) throw new Error("Could not read the proxy (" + res.status + ")");
   const data = await res.json();
-  if (my < applied) return;
+  if (my < applied || want !== wantRange()) return;
   applied = my;
   S.data = data;
   S.dataRange = want;
@@ -390,6 +390,14 @@ export function perf(scope, range = "24h") {
 // Milliseconds for a timestamp, or 0 when it is missing or unset.
 const ms0 = (iso) => Date.parse(validTime(iso)) || 0;
 
+// True when Go timestamp a is after b, to the nanosecond; Date.parse keeps only milliseconds.
+function laterThan(a, b) {
+  const sub = (iso) => Number(((/\.(\d+)/.exec(iso) || [])[1] || "").padEnd(9, "0").slice(3, 9));
+  const ma = ms0(a), mb = ms0(b);
+  if (ma !== mb) return ma > mb;
+  return ma > 0 && sub(a) > sub(b);
+}
+
 // Adds each account's numeric counters from src into dst.
 function addByAuth(dst, src) {
   for (const [id, v] of Object.entries(src || {})) {
@@ -424,7 +432,7 @@ export function sessions() {
       addByAuth(t.by_auth, c.by_auth);
       if (ms0(c.last_seen) > ms0(t.last_seen)) t.last_seen = c.last_seen;
       // served_at is when the latest successful request started; failures do not move it.
-      if (c.serving_auth_id && ms0(c.served_at) > ms0(t.served_at)) {
+      if (c.serving_auth_id && laterThan(c.served_at, t.served_at)) {
         t.serving_auth_id = c.serving_auth_id;
         t.served_at = c.served_at;
       }

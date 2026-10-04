@@ -56,7 +56,7 @@ function queueRows(provider) {
 
 function candidateWhy(c) {
   const problems = (c.problems || []).map((p) => `<span class="warn">${esc(p.charAt(0).toUpperCase() + p.slice(1))}.</span> `).join("");
-  return `<span class="clamp">${problems}${esc(c.summary || "")}</span>`;
+  return `<span>${problems}${esc(c.summary || "")}</span>`;
 }
 
 // The scorer: how it would place a new session now, and how its shadow
@@ -75,7 +75,7 @@ function scorer() {
   const headroom = Object.entries(R.headroom || {});
   if (headroom.length) lead += ` Keeps ${headroom.map(([a, line]) => `${esc(a)} below <b class="strong">${Math.round(line * 100)}%</b> of its 5-hour window`).join(", ")} while another account has room.`;
 
-  const cols = [{ label: "#", w: 40 }, { label: "", w: 16, cls: "ic" }, { label: "Account", w: 280 }, { label: "Why" }];
+  const cols = [{ label: "#", w: 40 }, { label: "", w: 16, cls: "ic" }, { label: "Account", w: 280 }, { label: "Why", cls: "why" }];
   let html = `<div class="sec">
     <div class="sech tall"><div class="t"><b>${R.mode === "shadow" ? "Scorer, shadow test" : "Scorer"}</b></div></div>
     <div class="ui muted" style="padding:0 24px 16px;max-width:820px">${lead}</div>`;
@@ -95,7 +95,7 @@ function scorer() {
   }
   const disagreed = shadow.disagreed || [];
   if (R.mode === "shadow" && disagreed.length) {
-    const dcols = [{ label: "When", w: 64 }, { label: "Model", w: 180 }, { label: "Live picked", w: 220 }, { label: "Scorer picks", w: 220 }, { label: "Why" }];
+    const dcols = [{ label: "When", w: 64 }, { label: "Model", w: 180 }, { label: "Live picked", w: 220 }, { label: "Scorer picks", w: 220 }, { label: "Why", cls: "why" }];
     const rows = disagreed.map((d) => {
       const top = (d.ranking || []).find((c) => c.auth_id === d.shadow) || {};
       return { cells: [clock(d.at), `<span class="mono clamp">${esc(d.model || "")}</span>`, `<span class="clamp">${esc(nm[d.live] || d.live)}</span>`, `<span class="clamp">${esc(nm[d.shadow] || d.shadow)}</span>`, candidateWhy(top)] };

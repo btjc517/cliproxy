@@ -231,7 +231,18 @@ func MachineName(ip string) string {
 
 // LocalHostName is this host's short name, or "" when the OS does not say.
 func LocalHostName() string {
-	host, errHost := os.Hostname()
+	return localHostName(os.Getenv, os.Hostname)
+}
+
+// localHostName prefers the agent-cloud host label: under WSL the OS
+// hostname is the Windows machine name, not the name the fleet uses.
+func localHostName(getenv func(string) string, hostname func() (string, error)) string {
+	for _, key := range []string{"CLIPROXY_HOST_NAME", "AC_HOST_LABEL"} {
+		if name := strings.TrimSpace(getenv(key)); name != "" {
+			return name
+		}
+	}
+	host, errHost := hostname()
 	if errHost != nil {
 		return ""
 	}
