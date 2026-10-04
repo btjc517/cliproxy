@@ -100,7 +100,7 @@ function pane(id, title, legend, p, which, range) {
 export function view() {
   const prov = S.ui.pfProv || "all";
   const range = RANGES.find((r) => r.id === S.range) || RANGES[0];
-  const p = perf(prov);
+  const p = perf(prov, range.id);
   const has = p && p.requests;
   const t = p?.ttft_ms || {}, l = p?.latency_ms || {}, tp = p?.throughput || {};
   const failRate = has ? rateText(p.failed, p.requests) : "–";
@@ -118,7 +118,7 @@ export function view() {
 
   const list = accounts().filter((x) => prov === "all" || x.provider === prov);
   const rows = list.map((x) => {
-    const q = perf(x.id);
+    const q = perf(x.id, range.id);
     const st = status(x);
     const warn = st.kind === "blocked" || st.kind === "error" ? warnState(st.text) : "";
     const fr = q && q.requests ? rate(q.failed, q.requests) : null;

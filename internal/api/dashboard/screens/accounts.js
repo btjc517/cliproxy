@@ -2,7 +2,7 @@
 // #/accounts/add opens the Add account drawer over it.
 import {
   S, esc, int, icon, logo, email, pill, warnState, accounts, status, limits, left, queue, plan, planDay, day,
-  meterCell, table, modeMenu, planMenu, modeTitle, MODES, api, setMode, toast,
+  meterCell, table, modeMenu, planMenu, modeTitle, MODES, api, setMode, toast, fetchData,
 } from "../core.js";
 import { providerTabs, bindProviderTabs } from "./common.js";
 
@@ -110,7 +110,7 @@ function drawer() {
       <div><label class="k">If the page after Authorize does not load, copy its address and paste it here</label>
       <div class="row gap8"><input class="input grow" data-paste value="${esc(S.ui.addPaste || "")}" placeholder="http://localhost:.../callback?code=..."><button class="btn outline" data-submit>Send</button></div></div>`;
   } else if (st?.phase === "error") {
-    body = `<div class="note"><b class="warn">Sign-in did not finish.</b><span>${esc(st.msg)}</span></div>`;
+    body = `<div class="note"><b class="warn">${esc(st.title || "Sign-in did not finish.")}</b><span>${esc(st.msg)}</span></div>`;
   } else {
     body = `<div class="muted">Sign in from home with no VPN on, as with cliproxy-login. The sign-in opens in a new tab.</div>`;
   }
@@ -127,12 +127,27 @@ function drawer() {
 }
 
 let poll = null;
+let flow = 0; // bumped on every start and stop, so replies for an older flow are dropped
 
 function stopFlow() {
-  if (poll) clearInterval(poll);
+  flow++;
+  if (poll) clearTimeout(poll);
   poll = null;
   S.ui.addState = null;
   S.ui.addPaste = "";
+}
+
+// Leaving the drawer by any route (Back, a nav link, Close) ends the flow.
+window.addEventListener("hashchange", () => {
+  if (location.hash !== "#/accounts/add" && (S.ui.addState || poll)) stopFlow();
+});
+
+function fail(id, msg, title) {
+  if (id !== flow) return;
+  if (poll) clearTimeout(poll);
+  poll = null;
+  S.ui.addState = { phase: "error", msg, title };
+  window.dispatchEvent(new Event("dash:render"));
 }
 
 function mountDrawer(root) {
@@ -144,18 +159,21 @@ function mountDrawer(root) {
   const start = root.querySelector("[data-start]");
   start.onclick = async () => {
     const prov = S.ui.addProv || "claude";
+    stopFlow();
+    const id = flow;
     const win = window.open("", "_blank");
     try {
       const before = accounts().map((a) => a.id);
       const res = await api(`/oauth/auth-url?provider=${prov}&is_webui=true`);
+      if (id !== flow) { if (win) win.close(); return; }
       if (!res?.url || !res?.state) throw new Error("The proxy did not return a sign-in link.");
       if (win) { win.opener = null; win.location = res.url; } else window.open(res.url, "_blank", "noopener");
       S.ui.addState = { phase: "waiting", state: res.state, prov, before };
       rerender();
-      watch();
+      watch(id);
     } catch (e) {
       if (win) win.close();
-      if (!e.cancelled) { S.ui.addState = { phase: "error", msg: e.message }; rerender(); }
+      if (!e.cancelled) fail(id, e.message);
     }
   };
   const paste = root.querySelector("[data-paste]");
@@ -164,7 +182,7 @@ function mountDrawer(root) {
   if (submit) {
     submit.onclick = async () => {
       const v = root.querySelector("[data-paste]").value.trim();
-      if (!v) return;
+      if (!v || !S.ui.addState?.state) return;
       try {
         await api("/oauth/callback", { method: "POST", body: JSON.stringify({ redirect_url: v, state: S.ui.addState.state }) });
         toast("Sent. Waiting for the proxy to finish.");
@@ -173,31 +191,36 @@ function mountDrawer(root) {
   }
 }
 
-function watch() {
-  if (poll) clearInterval(poll);
-  poll = setInterval(async () => {
+// One status check at a time, two seconds apart, until the flow ends.
+function watch(id) {
+  const tick = async () => {
+    poll = null;
     const st = S.ui.addState;
-    if (!st || st.phase !== "waiting") return stopFlow();
+    if (id !== flow || st?.phase !== "waiting") return;
+    let r;
     try {
-      const r = await api(`/oauth/status?state=${encodeURIComponent(st.state)}`);
-      if (r?.status === "ok") {
-        clearInterval(poll);
-        poll = null;
-        await finish(st);
-      } else if (r?.status === "error") {
-        S.ui.addState = { phase: "error", msg: r.error || "The sign-in failed." };
-        clearInterval(poll);
-        poll = null;
-        window.dispatchEvent(new Event("dash:render"));
-      }
-    } catch (e) { /* keep waiting; a blip should not end the flow */ }
-  }, 2000);
+      r = await api(`/oauth/status?state=${encodeURIComponent(st.state)}`);
+    } catch (e) {
+      if (e.auth || e.cancelled) return fail(id, "This page stopped checking because it has no valid management key. Start again to enter it.");
+      if (id === flow) poll = setTimeout(tick, 2000); // a network blip should not end the flow
+      return;
+    }
+    if (id !== flow) return;
+    if (r?.status === "ok") return finish(st, id);
+    if (r?.status === "error") return fail(id, r.error || "The sign-in failed.");
+    poll = setTimeout(tick, 2000);
+  };
+  poll = setTimeout(tick, 2000);
 }
 
-async function finish(st) {
+async function finish(st, id) {
   const mode = S.ui.addMode || "rotation";
-  const res = await fetch("/dashboard/data?range=" + encodeURIComponent(S.range), { cache: "no-store" });
-  S.data = await res.json();
+  try {
+    await fetchData();
+  } catch (e) {
+    return fail(id, e.message + ". Close this panel; the account shows up when the page next refreshes.", "Signed in, but this page could not reload.");
+  }
+  if (id !== flow) return;
   const added = accounts().find((a) => a.provider === st.prov && !st.before.includes(a.id));
   S.ui.addState = null;
   if (added && mode !== "rotation") {

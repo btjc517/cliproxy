@@ -5,7 +5,8 @@ export const S = {
   readAt: 0,         // when it arrived
   error: "",
   key: "",
-  range: "24h",      // performance window, sent as ?range=
+  range: "24h",      // window chosen on the Performance screen
+  dataRange: "",     // window the loaded performance data covers
   ui: {},            // per-screen choices that survive a refresh
   hold: 0,           // >0 while a menu, drawer or hover would be lost by a re-render
 };
@@ -13,6 +14,18 @@ export const S = {
 const KEY_STORE = "cliproxy-dashboard-key";
 const THEME_STORE = "cliproxy-dashboard-theme";
 try { S.key = localStorage.getItem(KEY_STORE) || ""; } catch (e) { /* storage blocked */ }
+
+// Only the Performance screen picks a window; every other screen shows 24 hours.
+export const wantRange = () => (location.hash.startsWith("#/performance") ? S.range : "24h");
+
+export async function fetchData() {
+  const want = wantRange();
+  const res = await fetch("/dashboard/data?range=" + encodeURIComponent(want), { cache: "no-store" });
+  if (!res.ok) throw new Error("Could not read the proxy (" + res.status + ")");
+  S.data = await res.json();
+  S.dataRange = want;
+  S.readAt = Date.now();
+}
 
 export function setKey(k) {
   S.key = k || "";
@@ -360,8 +373,20 @@ export function hourly(ids, n = 24) {
   return { per, starts, n: Math.max(starts.length, n) };
 }
 
-export function perf(scope) {
+// range: the window the caller shows. Data loaded for another window reads as none.
+export function perf(scope, range = "24h") {
+  if (S.dataRange !== range) return null;
   return S.data?.summary?.performance?.scopes?.[scope] || null;
+}
+
+// Adds each account's numeric counters from src into dst.
+function addByAuth(dst, src) {
+  for (const [id, v] of Object.entries(src || {})) {
+    if (!v) continue;
+    const d = dst[id] || (dst[id] = {});
+    for (const [k, n] of Object.entries(v)) if (typeof n === "number") d[k] = (d[k] || 0) + n;
+  }
+  return dst;
 }
 
 // Sessions with agent threads folded into their parent.
@@ -381,11 +406,15 @@ export function sessions() {
     p.threads.push(s);
   }
   const out = [...byId.values()].map((p) => {
-    const t = { ...p, own: { requests: p.requests, failed: p.failed } };
+    const t = { ...p, own: { requests: p.requests, failed: p.failed }, by_auth: addByAuth({}, p.by_auth) };
     for (const c of p.threads) {
       for (const k of ["requests", "failed", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]) t[k] = (t[k] || 0) + (c[k] || 0);
       for (const id of c.auth_ids || []) if (!t.auth_ids.includes(id)) t.auth_ids.push(id);
-      if (c.last_seen > t.last_seen) t.last_seen = c.last_seen;
+      addByAuth(t.by_auth, c.by_auth);
+      if (c.last_seen > t.last_seen) {
+        t.last_seen = c.last_seen;
+        if (c.serving_auth_id) t.serving_auth_id = c.serving_auth_id;
+      }
       if (!t.first_seen || c.first_seen < t.first_seen) t.first_seen = c.first_seen;
       if (!t.machine && c.machine) t.machine = c.machine;
     }
@@ -619,7 +648,7 @@ export async function api(path, opts = {}) {
   const res = await fetch("/v8/management" + path, { ...opts, headers: { "X-Management-Key": S.key, "Content-Type": "application/json", ...(opts.headers || {}) } });
   if (res.status === 401 || res.status === 403) {
     setKey("");
-    throw new Error("The management key was rejected. Enter it again.");
+    throw Object.assign(new Error("The management key was rejected. Enter it again."), { auth: true });
   }
   let body = null;
   try { body = await res.json(); } catch (e) { /* empty body */ }

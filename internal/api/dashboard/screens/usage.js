@@ -1,14 +1,15 @@
 // Usage: a year of token activity, period totals, and a breakdown table.
 import {
   S, esc, fmt, int, icon, logo, email, accounts, status, warnState, sumUsage, tokens, cacheReuse, pctText, dayKey,
-  table, menu, seg, barChart, bindChart, tipRows,
+  hourly, clock, table, menu, seg, barChart, bindChart, tipRows,
 } from "../core.js";
 import { providerTabs, bindProviderTabs, readAt } from "./common.js";
 
 const RANGES = [
   { id: "today", label: "Today", window: "today", days: 1 },
-  { id: "24h", label: "Last 24 hours", window: "last_24h", days: 2 },
-  { id: "7d", label: "Last 7 days", window: "last_7d", days: 7 },
+  { id: "24h", label: "Last 24 hours", window: "last_24h", hours: 24 },
+  // Longer ranges are whole calendar days, so By account and By day agree.
+  { id: "7d", label: "Last 7 days", window: "", days: 7 },
   { id: "14d", label: "Last 14 days", window: "", days: 14 },
 ];
 const EMPTY = () => ({ requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 });
@@ -174,6 +175,20 @@ export function view() {
     });
     rows.push({ cls: "total", cells: ["", "All accounts", ...usageCells(total)] });
     tableHtml = table([{ label: "", w: 16, cls: "ic" }, { label: "Account" }, ...NUM_COLS], rows);
+  } else if (range.hours) {
+    // A rolling window splits across calendar days; each row covers only its part.
+    const ids = accounts().filter((a) => prov === "all" || a.provider === prov).map((a) => a.id);
+    const { per, starts } = hourly(ids, range.hours);
+    const days = new Map();
+    starts.forEach((st, i) => {
+      const k = dayKey(st);
+      const d = days.get(k) || { from: st, u: EMPTY() };
+      for (const id of ids) add(d.u, per[id]?.[i]);
+      days.set(k, d);
+    });
+    const today = dayKey(Date.now());
+    const rows = [...days.entries()].reverse().map(([k, d]) => ({ cells: [k === today ? "Today" : `${longDay(k)}, from ${clock(d.from)}`, ...usageCells(d.u)] }));
+    tableHtml = table([{ label: "Day" }, ...NUM_COLS], rows);
   } else {
     const today = parseDay(dayKey(Date.now()));
     const rows = [];

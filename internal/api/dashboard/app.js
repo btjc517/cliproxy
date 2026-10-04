@@ -1,5 +1,5 @@
 // Shell, router and data polling for the dashboard.
-import { S, esc, icon, applyTheme, closeMenu } from "./core.js";
+import { S, esc, icon, applyTheme, closeMenu, fetchData, wantRange } from "./core.js";
 import * as overview from "./screens/overview.js";
 import * as accounts from "./screens/accounts.js";
 import * as account from "./screens/account.js";
@@ -87,10 +87,7 @@ export function render() {
 
 export async function load() {
   try {
-    const res = await fetch("/dashboard/data?range=" + encodeURIComponent(S.range), { cache: "no-store" });
-    if (!res.ok) throw new Error("Could not read the proxy (" + res.status + ")");
-    S.data = await res.json();
-    S.readAt = Date.now();
+    await fetchData();
     S.error = "";
   } catch (e) {
     S.error = (e.message || String(e)) + (S.data ? ". Showing the last reading." : "");
@@ -98,7 +95,13 @@ export async function load() {
   render();
 }
 
-window.addEventListener("hashchange", () => { closeMenu(); S.hold = 0; render(); document.getElementById("main").querySelector(".body")?.scrollTo(0, 0); });
+window.addEventListener("hashchange", () => {
+  closeMenu();
+  S.hold = 0;
+  render();
+  document.getElementById("main").querySelector(".body")?.scrollTo(0, 0);
+  if (S.data && wantRange() !== S.dataRange) load();
+});
 window.addEventListener("dash:refresh", load);
 window.addEventListener("dash:render", render);
 setInterval(() => { if (pending && S.hold === 0) render(); }, 500);
