@@ -84,14 +84,25 @@ var dashboardAccountFields = []string{
 	"disabled", "unavailable", "next_retry_after", "priority", "quota",
 }
 
-// GetDashboardData returns what the /dashboard page renders: routing settings,
-// each credential's state and quota snapshot, and the usage summary. The
-// caller is responsible for restricting who may reach it.
+// GetDashboardData returns what the /dashboard page renders: this server,
+// routing settings, each credential's state, quota snapshot and plan, and the
+// usage summary with performance over the range named by ?range= (24h, 7d or
+// 14d). The caller is responsible for restricting who may reach it.
 func (h *Handler) GetDashboardData(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
+	rangeKey := strings.TrimSpace(c.Query("range"))
+	if rangeKey == "" {
+		rangeKey = usagestats.DefaultWindow
+	}
+	window, okWindow := usagestats.LookupWindow(rangeKey)
+	if !okWindow {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "range must be 24h, 7d or 14d"})
+		return
+	}
+	now := time.Now()
 	accounts := make([]gin.H, 0)
 	var auths []*coreauth.Auth
 	if h.authManager != nil {
@@ -107,14 +118,27 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 					account[field] = value
 				}
 			}
+			account["mode"] = dashboardAccountMode(entry)
+			account["plan"] = dashboardAccountPlan(auth, now.Location())
 			accounts = append(accounts, account)
 		}
 	}
 	routing := gin.H{}
 	if h.cfg != nil {
 		strategy, _ := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
-		routing = gin.H{"strategy": strategy, "session_affinity": h.cfg.Routing.SessionAffinity, "prime_after_reset": h.cfg.Routing.PrimeAfterReset}
+		routing = gin.H{
+			"strategy":          strategy,
+			"session_affinity":  h.cfg.Routing.SessionAffinity,
+			"prime_after_reset": h.cfg.Routing.PrimeAfterReset,
+			"strategies":        routingStrategies,
+		}
 	}
-	router := coreauth.DefaultRoutingState().Dashboard(auths, time.Now())
-	c.JSON(http.StatusOK, gin.H{"routing": routing, "accounts": accounts, "router": router, "summary": usagestats.Default().Summary(100)})
+	router := coreauth.DefaultRoutingState().Dashboard(auths, now)
+	c.JSON(http.StatusOK, gin.H{
+		"server":   h.dashboardServer(c, now),
+		"routing":  routing,
+		"accounts": accounts,
+		"router":   router,
+		"summary":  usagestats.Default().SummaryFor(100, window),
+	})
 }
