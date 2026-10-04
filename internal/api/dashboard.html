@@ -103,7 +103,10 @@ tr:last-child td { border-bottom: 0; }
 td.why { white-space: normal; color: var(--ink-2); min-width: 280px; }
 td.why .problem { color: var(--warn); }
 tr.excluded td { color: var(--ink-3); }
-.rk { width: 28px; color: var(--ink-3); }
+table.rank { table-layout: fixed; min-width: 640px; }
+table.rank col.rk { width: 40px; } table.rank col.acct { width: 260px; }
+table.rank td { overflow: hidden; text-overflow: ellipsis; }
+td.rk { color: var(--ink-3); }
 @media (max-width: 760px) {
   .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .grid { grid-template-columns: 1fr; }
@@ -372,7 +375,7 @@ function routerSection(names) {
   for (const r of ROUTER.rankings || []) {
     const provTitle = r.provider === "claude" ? "Claude" : r.provider === "codex" ? "Codex" : r.provider;
     html += `<div class="subhead">If a new ${esc(provTitle)} session started now${r.model ? ` (${esc(r.model)})` : ""}</div>`;
-    html += `<table><tbody>${(r.candidates || []).map((c, i) => `<tr class="${c.excluded ? "excluded" : ""}"><td class="rk">${c.excluded ? "–" : i + 1}</td><td>${esc(names[c.auth_id] || c.account || c.auth_id)}</td><td class="why">${candidateWhy(c)}</td></tr>`).join("")}</tbody></table>`;
+    html += `<table class="rank"><colgroup><col class="rk"><col class="acct"><col></colgroup><tbody>${(r.candidates || []).map((c, i) => `<tr class="${c.excluded ? "excluded" : ""}"><td class="rk">${c.excluded ? "–" : i + 1}</td><td>${esc(names[c.auth_id] || c.account || c.auth_id)}</td><td class="why">${candidateWhy(c)}</td></tr>`).join("")}</tbody></table>`;
   }
   const disagreed = shadow.disagreed || [];
   if (mode === "shadow" && disagreed.length) {
