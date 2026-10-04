@@ -58,3 +58,40 @@ func TestPostDashboardSessions(t *testing.T) {
 		t.Fatalf("over 1 MB: status %d, want 413", rec.Code)
 	}
 }
+
+func TestServeDashboardApp(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := &Server{cfg: &config.Config{}}
+	server.managementRoutesEnabled.Store(true)
+	engine := gin.New()
+	engine.GET("/dashboard", server.serveDashboard)
+	engine.GET("/dashboard/static/*filepath", server.serveDashboardStatic)
+	get := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+
+	page := get("/dashboard")
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `src="/dashboard/static/app.js"`) {
+		t.Fatalf("page: status %d, want 200 and a script tag for app.js", page.Code)
+	}
+	for _, path := range []string{"app.js", "core.js", "app.css", "screens/overview.js", "screens/routing.js"} {
+		rec := get("/dashboard/static/" + path)
+		if rec.Code != http.StatusOK || rec.Body.Len() == 0 {
+			t.Fatalf("%s: status %d, %d bytes", path, rec.Code, rec.Body.Len())
+		}
+		if strings.HasSuffix(path, ".js") && !strings.Contains(rec.Header().Get("Content-Type"), "javascript") {
+			t.Fatalf("%s: content type %q, want javascript so the browser runs it as a module", path, rec.Header().Get("Content-Type"))
+		}
+	}
+	if rec := get("/dashboard/static/missing.js"); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing file: status %d, want 404", rec.Code)
+	}
+
+	server.managementRoutesEnabled.Store(false)
+	if rec := get("/dashboard/static/app.js"); rec.Code != http.StatusNotFound {
+		t.Fatalf("dashboard off: status %d, want 404", rec.Code)
+	}
+}

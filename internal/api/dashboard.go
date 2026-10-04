@@ -1,9 +1,10 @@
 package api
 
 import (
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net"
 	"net/http"
 
@@ -15,8 +16,20 @@ import (
 // maxDashboardSessionsBody caps the POST /dashboard/sessions body.
 const maxDashboardSessionsBody = 1 << 20
 
-//go:embed dashboard.html
-var dashboardHTML []byte
+// dashboardFiles holds the dashboard app: index.html, app.css and the
+// JavaScript modules it loads from /dashboard/static/.
+//
+//go:embed dashboard
+var dashboardFiles embed.FS
+
+// dashboardStatic serves everything under dashboard/ at /dashboard/static/.
+var dashboardStatic = func() http.Handler {
+	sub, err := fs.Sub(dashboardFiles, "dashboard")
+	if err != nil {
+		panic(err)
+	}
+	return http.StripPrefix("/dashboard/static/", http.FileServer(http.FS(sub)))
+}()
 
 // dashboardAvailable reports whether the dashboard should be served at all.
 func (s *Server) dashboardAvailable() bool {
@@ -38,14 +51,30 @@ func fromLoopbackOrTailnet(remoteAddr string) bool {
 	return ip.IsLoopback() || tailnetname.IsTailnet(ip)
 }
 
-// serveDashboard serves the embedded account-pool dashboard page.
+// serveDashboard serves the dashboard app's page.
 func (s *Server) serveDashboard(c *gin.Context) {
 	if !s.dashboardAvailable() {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+	page, err := dashboardFiles.ReadFile("dashboard/index.html")
+	if err != nil {
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
 	c.Header("Cache-Control", "no-store")
-	c.Data(http.StatusOK, "text/html; charset=utf-8", dashboardHTML)
+	c.Data(http.StatusOK, "text/html; charset=utf-8", page)
+}
+
+// serveDashboardStatic serves the dashboard's stylesheet and scripts. They
+// change with each build and are small, so the browser always revalidates.
+func (s *Server) serveDashboardStatic(c *gin.Context) {
+	if !s.dashboardAvailable() {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	dashboardStatic.ServeHTTP(c.Writer, c.Request)
 }
 
 // serveDashboardData returns the read-only dashboard data without a management
