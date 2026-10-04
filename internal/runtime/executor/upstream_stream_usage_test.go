@@ -2,8 +2,11 @@ package executor
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -147,5 +150,99 @@ func TestCodexExecuteReportsUpstreamStreaming(t *testing.T) {
 	}
 	if record.TTFT <= 0 || record.Latency < record.TTFT {
 		t.Fatalf("ttft %s latency %s, want a first token time within the latency", record.TTFT, record.Latency)
+	}
+}
+
+// gatedBody holds back the rest of an upstream reply until its first bytes
+// have been read and the wait in the next Read has passed.
+type gatedBody struct {
+	io.ReadCloser
+	wait func()
+	read bool
+	once sync.Once
+}
+
+func (b *gatedBody) Read(p []byte) (int, error) {
+	if b.read {
+		b.once.Do(b.wait)
+	}
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.read = true
+	}
+	return n, err
+}
+
+// The image path for a model without a direct images endpoint asks Codex
+// Responses for stream:true and reads the SSE reply to the
+// end. Its record is marked as streamed upstream, and TTFT is the first token
+// event, not the first byte. The server sends response.created, then waits
+// until the executor has read it. The wait ends only once more time has passed
+// than the first byte could account for, so a TTFT taken at the first byte is
+// always shorter than the bound checked below.
+func TestCodexImageExecuteReportsUpstreamStreaming(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"AA=="}` + "\n\n" +
+			`data: {"type":"response.completed","response":{"id":"resp_1","created_at":1713833628,"status":"completed","model":"gpt-5.4-mini","output":[{"type":"image_generation_call","result":"AA==","output_format":"png"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}` + "\n\n"))
+	}))
+	defer server.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	auth := newCodexOpenAIImageTestAuth(server.URL)
+	auth.ID = "codex-image-upstream-stream"
+	plugin := captureAuthUsage(t, auth.ID)
+
+	testStart := time.Now()
+	var roundTripAt, releaseAt time.Time
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		roundTripAt = time.Now()
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			return resp, err
+		}
+		resp.Body = &gatedBody{ReadCloser: resp.Body, wait: func() {
+			// The first byte was marked before this Read began, at most
+			// readAt-testStart after the TTFT start. Wait past that before
+			// the token event can arrive.
+			readAt := time.Now()
+			for time.Since(readAt) <= roundTripAt.Sub(testStart) {
+				runtime.Gosched()
+			}
+			releaseAt = time.Now()
+			close(release)
+		}}
+		return resp, nil
+	})
+	ctx := context.WithValue(usage.WithStream(context.Background(), false), "cliproxy.roundtripper", http.RoundTripper(transport))
+	_, err := NewCodexExecutor(&config.Config{}).Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-1",
+		Payload: []byte(`{"model":"gpt-image-1","prompt":"a cat"}`),
+	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	record := plugin.next(t)
+	if !record.UpstreamStream || record.Stream {
+		t.Fatalf("record upstream stream %v client stream %v, want true and false", record.UpstreamStream, record.Stream)
+	}
+	if releaseAt.IsZero() {
+		t.Fatal("the executor never read past the first frame")
+	}
+	if minTTFT := releaseAt.Sub(roundTripAt); record.TTFT < minTTFT || record.Latency < record.TTFT {
+		t.Fatalf("ttft %s latency %s, want a first token time of at least %s within the latency", record.TTFT, record.Latency, minTTFT)
 	}
 }

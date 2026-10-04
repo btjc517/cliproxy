@@ -230,3 +230,44 @@ func TestLoadDropsInvalidHistogramEntries(t *testing.T) {
 		t.Fatalf("session ttft p50 = %d, want the index 20 value", got)
 	}
 }
+
+// On 1 Nov 2026 Havana reaches local midnight twice, at 04:00 UTC and again at
+// 05:00 UTC. Today starts at the first, so it keeps the requests from both
+// midnight hours, while the hourly view still shows them as separate hours.
+func TestTodayCountsBothRepeatedMidnightHours(t *testing.T) {
+	havana := mustZone(t, "America/Havana")
+	firstMidnight := time.Date(2026, 11, 1, 4, 0, 0, 0, time.UTC)
+	secondMidnight := time.Date(2026, 11, 1, 5, 0, 0, 0, time.UTC)
+	for _, now := range []time.Time{
+		secondMidnight.Add(30 * time.Minute).In(havana),
+		time.Date(2026, 11, 1, 18, 0, 0, 0, havana),
+	} {
+		store := newTestStore(now)
+		store.machineName = func(string) string { return "" }
+		for _, at := range []time.Time{
+			firstMidnight.Add(-10 * time.Minute), // 23:50 on 31 Oct
+			firstMidnight.Add(10 * time.Minute),
+			secondMidnight.Add(10 * time.Minute),
+		} {
+			store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", RequestedAt: at})
+		}
+		summary := store.Summary(10)
+		account := summary.Accounts["claude-a"]
+		if account.Today.Requests != 2 || summary.Totals["today"].Requests != 2 {
+			t.Fatalf("at %s: today = %d, totals today = %d, want 2 from both midnight hours",
+				now, account.Today.Requests, summary.Totals["today"].Requests)
+		}
+		var midnightHours int
+		for _, bucket := range account.Hourly {
+			if bucket.Start.Equal(firstMidnight) || bucket.Start.Equal(secondMidnight) {
+				if bucket.Requests != 1 {
+					t.Fatalf("at %s: hour %s has %d requests, want 1", now, bucket.Start, bucket.Requests)
+				}
+				midnightHours++
+			}
+		}
+		if midnightHours != 2 {
+			t.Fatalf("at %s: found %d midnight hours in the hourly view, want 2", now, midnightHours)
+		}
+	}
+}

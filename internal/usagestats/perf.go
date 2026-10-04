@@ -190,9 +190,11 @@ const maxBoundaryWalk = 26 * 4
 // turned it back. Buckets are therefore built from the same local clock for
 // every size: each 6 or 12 hour bucket and each local day is a run of whole
 // 1 hour buckets, and stats stored per 1 hour bucket never straddle a boundary.
+// A local day (hours >= 24) starts only where the date changes, so a midnight
+// repeated by a DST change does not start the day again.
 func isBucketStart(t time.Time, loc *time.Location, hours int) bool {
 	local := t.In(loc)
-	if local.Minute() == 0 && local.Second() == 0 && local.Hour()%hours == 0 {
+	if hours < 24 && local.Minute() == 0 && local.Second() == 0 && local.Hour()%hours == 0 {
 		return true
 	}
 	prev := t.Add(-slotStep).In(loc)
