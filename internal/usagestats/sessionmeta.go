@@ -42,6 +42,7 @@ func (s *Store) UpdateSessionMeta(machine string, sessions []SessionMetaUpdate) 
 		if id == "" || len(id) > maxSessionIDLength {
 			continue
 		}
+		id = strings.Clone(id)
 		title := clip(update.Title, maxTitleLength)
 		if title == "" && machine == "" {
 			continue
@@ -116,14 +117,15 @@ func (s *Store) pruneSessionMetaLocked(now time.Time) {
 	s.dirty = true
 }
 
+// clip trims value and cuts it to at most limit bytes on a rune boundary. The
+// result is a copy, so storing it does not keep a large request body alive.
 func clip(value string, limit int) string {
 	value = strings.TrimSpace(value)
-	if len(value) <= limit {
-		return value
+	if len(value) > limit {
+		value = value[:limit]
+		for !utf8.ValidString(value) {
+			value = value[:len(value)-1]
+		}
 	}
-	value = value[:limit]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
+	return strings.Clone(value)
 }

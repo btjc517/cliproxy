@@ -271,11 +271,11 @@ func TestPerformanceThroughputAndFailovers(t *testing.T) {
 	store.machineName = func(string) string { return "" }
 	// Inbound request t1 failed on claude-a, then succeeded on claude-b.
 	store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", TraceID: "t1", RequestedAt: now, Failed: true})
-	store.record(coreusage.Record{AuthID: "claude-b", Provider: "claude", TraceID: "t1", RequestedAt: now,
+	store.record(coreusage.Record{AuthID: "claude-b", Provider: "claude", TraceID: "t1", RequestedAt: now, Stream: true,
 		TTFT: time.Second, Latency: 3 * time.Second, Detail: coreusage.Detail{OutputTokens: 200}})
 	// Inbound request t2 retried the same account: not a failover.
 	store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", TraceID: "t2", RequestedAt: now, Failed: true})
-	store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", TraceID: "t2", RequestedAt: now,
+	store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", TraceID: "t2", RequestedAt: now, Stream: true,
 		TTFT: 2 * time.Second, Latency: 4 * time.Second, Detail: coreusage.Detail{OutputTokens: 10}})
 	// A second success on t1 is not counted twice.
 	store.record(coreusage.Record{AuthID: "claude-c", Provider: "claude", TraceID: "t1", RequestedAt: now})

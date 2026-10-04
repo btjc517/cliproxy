@@ -3,7 +3,9 @@ package tailnetname
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -61,5 +63,79 @@ func TestResolverCachesWithoutBlocking(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("lookups = %d, want 2", calls)
+	}
+}
+
+// waitIdle blocks until no lookup holds a slot.
+func waitIdle(resolver *Resolver) {
+	for i := 0; i < cap(resolver.slots); i++ {
+		resolver.slots <- struct{}{}
+	}
+	for i := 0; i < cap(resolver.slots); i++ {
+		<-resolver.slots
+	}
+}
+
+func TestResolverBoundsLookupsInFlight(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int64
+	resolver := newResolver(func(ctx context.Context, ip string) ([]string, error) {
+		calls.Add(1)
+		<-release
+		return []string{"host-" + ip + ".tail.ts.net."}, nil
+	}, 1024, 2)
+
+	// A burst of new clients while DNS hangs.
+	for i := 1; i <= 50; i++ {
+		resolver.Name(fmt.Sprintf("100.64.0.%d", i))
+	}
+	resolver.mu.Lock()
+	pending, entries := 0, len(resolver.entries)
+	for _, current := range resolver.entries {
+		if current.pending {
+			pending++
+		}
+	}
+	resolver.mu.Unlock()
+	if pending > 2 || entries > 2 {
+		t.Fatalf("%d lookups pending and %d entries during the burst, want at most 2", pending, entries)
+	}
+
+	close(release)
+	waitIdle(resolver)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("lookups = %d, want 2", got)
+	}
+	// Freed slots let a later call start the next lookup.
+	resolver.Name("100.64.0.9")
+	waitIdle(resolver)
+	if got := resolver.Name("100.64.0.9"); got != "host-100.64.0.9.tail.ts.net" {
+		t.Fatalf("name after a slot freed = %q", got)
+	}
+}
+
+func TestResolverCapsCacheEntries(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	var calls atomic.Int64
+	resolver := newResolver(func(ctx context.Context, ip string) ([]string, error) {
+		calls.Add(1)
+		return []string{"host.tail.ts.net."}, nil
+	}, 3, 8)
+	resolver.nowFunc = func() time.Time { return now }
+
+	for i := 1; i <= 3; i++ {
+		resolver.Name(fmt.Sprintf("100.64.0.%d", i))
+	}
+	waitIdle(resolver)
+	if got := resolver.Name("100.64.0.4"); got != "" || len(resolver.entries) != 3 || calls.Load() != 3 {
+		t.Fatalf("full cache: name %q, %d entries, %d lookups, want no new entry or lookup", got, len(resolver.entries), calls.Load())
+	}
+
+	// Once the cached names expire there is room again.
+	now = now.Add(successTTL + time.Minute)
+	resolver.Name("100.64.0.4")
+	waitIdle(resolver)
+	if len(resolver.entries) != 1 || resolver.Name("100.64.0.4") != "host.tail.ts.net" {
+		t.Fatalf("after expiry: %d entries, want only the new address", len(resolver.entries))
 	}
 }

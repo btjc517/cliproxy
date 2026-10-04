@@ -127,11 +127,11 @@ func (b *perfBucket) add(other *perfBucket) {
 	b.Throughput.merge(other.Throughput)
 }
 
-// traceState follows the attempts of one inbound request to spot failovers.
+// traceState follows the failed attempts of one inbound request to spot a
+// failover. It is dropped once an attempt succeeds.
 type traceState struct {
-	failed  map[string]struct{}
-	seen    time.Time
-	counted bool
+	failed map[string]struct{}
+	seen   time.Time
 }
 
 // Window is a range the dashboard can show performance for.
@@ -156,11 +156,27 @@ func LookupWindow(key string) (Window, bool) {
 	return window, ok
 }
 
-// firstBucketStart is the start of the oldest bucket. Buckets line up with
-// local midnight, and the newest one holds now.
+// localHourStart is the start of the local hour in loc that holds at. Stats
+// are stored under these keys, so local hours and days always split on a
+// stored hour, even in zones whose offset is not a whole number of hours.
+// Working back from at by the local minutes avoids the hour that a DST
+// change repeats or skips.
+func localHourStart(at time.Time, loc *time.Location) time.Time {
+	local := at.In(loc)
+	return local.Add(-time.Duration(local.Minute())*time.Minute -
+		time.Duration(local.Second())*time.Second - time.Duration(local.Nanosecond()))
+}
+
+// firstBucketStart is the start of the oldest bucket. The newest bucket holds
+// now and starts on a local hour that is a multiple of the bucket size, so
+// buckets line up with local midnight. Older buckets are whole bucket lengths
+// back from it.
 func (w Window) firstBucketStart(now time.Time) time.Time {
 	hours := int(w.Bucket / time.Hour)
-	last := time.Date(now.Year(), now.Month(), now.Day(), now.Hour()/hours*hours, 0, 0, 0, now.Location())
+	last := localHourStart(now, now.Location())
+	for step := 0; step < 24 && last.Hour()%hours != 0; step++ {
+		last = localHourStart(last.Add(-time.Minute), now.Location())
+	}
 	return last.Add(-time.Duration(w.Buckets-1) * w.Bucket)
 }
 
@@ -321,10 +337,10 @@ func (s *Store) performanceLocked(now time.Time, window Window) Performance {
 	return performance
 }
 
-// recordPerfLocked adds one attempt's timing to its credential's hour and
-// counts a failover when an inbound request that already failed on another
-// credential succeeds here.
-func (s *Store) recordPerfLocked(authID, provider string, at time.Time, record recordTiming) {
+// recordPerfLocked adds one attempt's timing to its credential's hour, keyed
+// by the start of that local hour, and counts a failover when an inbound
+// request that already failed on another credential succeeds here.
+func (s *Store) recordPerfLocked(authID, provider string, hourStart time.Time, record recordTiming) {
 	if provider != "" {
 		s.authProviders[authID] = provider
 	}
@@ -333,7 +349,7 @@ func (s *Store) recordPerfLocked(authID, provider string, at time.Time, record r
 		buckets = make(map[int64]*perfBucket)
 		s.perf[authID] = buckets
 	}
-	hour := at.Truncate(time.Hour).Unix()
+	hour := hourStart.Unix()
 	bucket := buckets[hour]
 	if bucket == nil {
 		bucket = &perfBucket{}
@@ -349,7 +365,10 @@ func (s *Store) recordPerfLocked(authID, provider string, at time.Time, record r
 		if record.latency > 0 {
 			bucket.Latency.observe(float64(record.latency)/float64(time.Millisecond), ttftBase)
 		}
-		if generation := record.latency - record.ttft; record.ttft > 0 && generation > 0 && record.output >= minThroughputTokens {
+		// Only a streamed reply has a first token time that splits waiting from
+		// generating. A buffered reply's first byte comes after the whole body
+		// is ready.
+		if generation := record.latency - record.ttft; record.stream && record.ttft > 0 && generation > 0 && record.output >= minThroughputTokens {
 			bucket.Throughput.observe(float64(record.output)/generation.Seconds(), throughputBase)
 		}
 	}
@@ -360,44 +379,59 @@ func (s *Store) recordPerfLocked(authID, provider string, at time.Time, record r
 	trace := s.traces[record.traceID]
 	if record.failed {
 		if trace == nil {
-			s.pruneTracesLocked(at)
+			s.pruneTracesLocked(record.at)
 			trace = &traceState{failed: make(map[string]struct{})}
 			s.traces[record.traceID] = trace
 		}
 		trace.failed[authID] = struct{}{}
-		trace.seen = at
+		if record.at.After(trace.seen) {
+			trace.seen = record.at
+		}
 		return
 	}
-	if trace == nil || trace.counted {
+	if trace == nil {
 		return
 	}
+	// The inbound request has an answer, so its retry chain is over.
+	delete(s.traces, record.traceID)
 	for failedAuth := range trace.failed {
 		if failedAuth != authID {
 			bucket.Failovers++
-			trace.counted = true
 			return
 		}
 	}
 }
 
+// pruneTracesLocked makes room for one more trace: it drops traces older than
+// traceRetention and, when that is not enough, the single oldest trace.
 func (s *Store) pruneTracesLocked(now time.Time) {
 	if len(s.traces) < maxTraces {
 		return
 	}
 	cutoff := now.Add(-traceRetention)
+	oldestID := ""
+	var oldest time.Time
 	for id, trace := range s.traces {
 		if trace.seen.Before(cutoff) {
 			delete(s.traces, id)
+			continue
+		}
+		if oldestID == "" || trace.seen.Before(oldest) {
+			oldestID, oldest = id, trace.seen
 		}
 	}
 	if len(s.traces) >= maxTraces {
-		s.traces = make(map[string]*traceState)
+		delete(s.traces, oldestID)
 	}
 }
 
 // recordTiming is the part of a usage record the performance view needs.
 type recordTiming struct {
 	traceID string
+	at      time.Time
+	// stream is true when the attempt ran in streaming mode
+	// (coreusage.Record.Stream).
+	stream  bool
 	failed  bool
 	ttft    time.Duration
 	latency time.Duration
