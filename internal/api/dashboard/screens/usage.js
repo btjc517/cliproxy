@@ -178,9 +178,12 @@ export function view() {
   } else if (range.hours) {
     // A rolling window splits across calendar days; each row covers only its part.
     const ids = accounts().filter((a) => prov === "all" || a.provider === prov).map((a) => a.id);
-    const { per, starts } = hourly(ids, range.hours);
+    const { per, starts } = hourly(ids, 48);
+    // The same cutoff the proxy uses for last_24h: hours that started under 24 hours ago.
+    const gen = Date.parse(S.data?.summary?.generated_at) || Date.now();
     const days = new Map();
     starts.forEach((st, i) => {
+      if (!(gen - Date.parse(st) < range.hours * 3600e3)) return;
       const k = dayKey(st);
       const d = days.get(k) || { from: st, u: EMPTY() };
       for (const id of ids) add(d.u, per[id]?.[i]);

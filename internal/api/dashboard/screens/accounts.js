@@ -137,9 +137,10 @@ function stopFlow() {
   S.ui.addPaste = "";
 }
 
-// Leaving the drawer by any route (Back, a nav link, Close) ends the flow.
+// Leaving the drawer by any route (Back, a nav link, Close) ends the flow,
+// including a sign-in link request that has not answered yet.
 window.addEventListener("hashchange", () => {
-  if (location.hash !== "#/accounts/add" && (S.ui.addState || poll)) stopFlow();
+  if (location.hash !== "#/accounts/add") stopFlow();
 });
 
 function fail(id, msg, title) {
@@ -222,11 +223,14 @@ async function finish(st, id) {
   }
   if (id !== flow) return;
   const added = accounts().find((a) => a.provider === st.prov && !st.before.includes(a.id));
-  S.ui.addState = null;
   if (added && mode !== "rotation") {
     try { await setMode(added, mode); } catch (e) { toast("Signed in, but the mode did not change: " + e.message, true); }
   }
   toast(added ? added.email + " added" : "Signed in");
-  location.hash = added ? "#/accounts/" + encodeURIComponent(added.id) : "#/accounts";
+  // The account is saved either way; only move the page if the drawer is still open.
+  if (id === flow) {
+    S.ui.addState = null;
+    location.hash = added ? "#/accounts/" + encodeURIComponent(added.id) : "#/accounts";
+  }
   window.dispatchEvent(new Event("dash:refresh"));
 }

@@ -18,11 +18,19 @@ try { S.key = localStorage.getItem(KEY_STORE) || ""; } catch (e) { /* storage bl
 // Only the Performance screen picks a window; every other screen shows 24 hours.
 export const wantRange = () => (location.hash.startsWith("#/performance") ? S.range : "24h");
 
+let started = 0, applied = 0;
+
+// Loads /dashboard/data for the current route. A reply that arrives after a
+// newer one has been applied is dropped, so a slow load cannot undo a route change.
 export async function fetchData() {
   const want = wantRange();
+  const my = ++started;
   const res = await fetch("/dashboard/data?range=" + encodeURIComponent(want), { cache: "no-store" });
   if (!res.ok) throw new Error("Could not read the proxy (" + res.status + ")");
-  S.data = await res.json();
+  const data = await res.json();
+  if (my < applied) return;
+  applied = my;
+  S.data = data;
   S.dataRange = want;
   S.readAt = Date.now();
 }
@@ -379,6 +387,9 @@ export function perf(scope, range = "24h") {
   return S.data?.summary?.performance?.scopes?.[scope] || null;
 }
 
+// Milliseconds for a timestamp, or 0 when it is missing or unset.
+const ms0 = (iso) => Date.parse(validTime(iso)) || 0;
+
 // Adds each account's numeric counters from src into dst.
 function addByAuth(dst, src) {
   for (const [id, v] of Object.entries(src || {})) {
@@ -411,11 +422,13 @@ export function sessions() {
       for (const k of ["requests", "failed", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]) t[k] = (t[k] || 0) + (c[k] || 0);
       for (const id of c.auth_ids || []) if (!t.auth_ids.includes(id)) t.auth_ids.push(id);
       addByAuth(t.by_auth, c.by_auth);
-      if (c.last_seen > t.last_seen) {
-        t.last_seen = c.last_seen;
-        if (c.serving_auth_id) t.serving_auth_id = c.serving_auth_id;
+      if (ms0(c.last_seen) > ms0(t.last_seen)) t.last_seen = c.last_seen;
+      // served_at is when the latest successful request started; failures do not move it.
+      if (c.serving_auth_id && ms0(c.served_at) > ms0(t.served_at)) {
+        t.serving_auth_id = c.serving_auth_id;
+        t.served_at = c.served_at;
       }
-      if (!t.first_seen || c.first_seen < t.first_seen) t.first_seen = c.first_seen;
+      if (ms0(c.first_seen) && (!ms0(t.first_seen) || ms0(c.first_seen) < ms0(t.first_seen))) t.first_seen = c.first_seen;
       if (!t.machine && c.machine) t.machine = c.machine;
     }
     return t;
