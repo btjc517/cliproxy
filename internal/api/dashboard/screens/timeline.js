@@ -70,10 +70,16 @@ function model(a, now, fr) {
   const ser = allowanceSeries(a.id, true);
   const tr = trajectory(ser, now);
   const p = plan(a);
-  const m = { a, st, kind: st.kind, plan: p, pts: [], outs: [], resets: [], now: null, drawEnd: 0 };
+  const m = { a, st, kind: st.kind, plan: p, pts: [], outs: [], resets: [], now: null, drawEnd: 0, hold: null };
   // The plan runs through the whole of its last day: this is its one end boundary.
   m.endAt = p.ends ? midnight(addDays(p.ends, 1)) : Infinity;
   if (st.kind === "off" || st.kind === "blocked" || st.kind === "error") return m;
+  // When the account is held out from now: until its retry time, or with no
+  // known recovery time, for the rest of the window. This limits availability
+  // only; the allowance line still comes from the weekly meter.
+  const until = st.until > now ? st.until : 0;
+  if (st.kind === "limited") m.hold = [now, until || Infinity];
+  else if (st.kind === "usedup" && until) m.hold = [now, until];
 
   // History: the weekly series inside the window, up to now.
   const s0 = ser ? Date.parse(validTime(ser.start)) || 0 : 0;
@@ -84,7 +90,9 @@ function model(a, now, fr) {
       if (u != null && t >= fr.start - step && t < now) m.pts.push({ t, v: Math.max(0, 100 - u / 10) });
     });
   }
-  const v0 = st.kind === "usedup" ? 0 : w ? (w.notStarted ? 100 : left(w)) : tr ? tr.leftNow : null;
+  // Allowance left now, from the weekly meter or the series. A status of used
+  // up does not zero it: a long retry can come with allowance still left.
+  const v0 = w ? (w.notStarted ? 100 : left(w)) : tr ? tr.leftNow : null;
   if (v0 == null) { m.kind = "noreading"; m.pts = []; return m; }
 
   // Stretches already at 0% before now.
@@ -142,18 +150,28 @@ function valueAt(m, t) {
   return b.t === a.t ? b.v : a.v + ((b.v - a.v) * (t - a.t)) / (b.t - a.t);
 }
 
-// Can the account take a session at time t? From now on, an account that is
-// resting or unavailable stays out until its known recovery time, and for the
-// whole window when there is none.
+const held = (m, t) => !!m.hold && t >= m.hold[0] && t < m.hold[1];
+
+// Can the account take a session at time t? The account's status decides
+// first: off, blocked or in error never; resting or unavailable not until its
+// known recovery time. Then the allowance left, when there is a reading.
 function available(m, t, now) {
-  const k = m.kind;
+  const k = m.st.kind;
   if (k === "off" || k === "blocked" || k === "error" || t >= m.endAt) return false;
-  if (t >= now && k === "limited" && !(m.st.until && t >= m.st.until)) return false;
-  if (t >= now && k === "usedup" && m.st.until && t < m.st.until) return false;
-  if (k === "noreading") return true;
+  if (t >= now && held(m, t)) return false;
+  if (m.kind === "noreading") return true;
   const v = valueAt(m, t);
   if (v == null) return t < now ? k === "ready" : false;
   return v > 0;
+}
+
+// The warning for a hold: resting until a time while allowance is left,
+// used up when there is none, or unavailable with no recovery time.
+function holdText(m, now) {
+  const to = m.hold[1];
+  if (to === Infinity) return m.st.text || "Unavailable";
+  if (m.now == null || m.now <= 0) return m.st.kind === "usedup" || m.now === 0 ? "Used up" : m.st.text;
+  return "Resting until " + (to - now < 6 * 864e5 ? weekdayTime(to) : day(to) + " " + clock(to));
 }
 
 // ---------- drawing ----------
@@ -191,7 +209,15 @@ function rowHtml(m, color, fr, now) {
     const v = valueAt(m, fr.start);
     if (v != null) pts = [{ t: fr.start, v }, ...pts];
   }
-  for (const [a, b] of m.outs) {
+  // Warning bands: stretches at 0% and the hold, merged so overlaps are not drawn twice.
+  const bands = [...m.outs, ...(m.hold ? [[m.hold[0], Math.min(m.hold[1], fr.end, m.endAt)]] : [])].sort((x, y) => x[0] - y[0]);
+  const merged = [];
+  for (const [a, b] of bands) {
+    const last = merged[merged.length - 1];
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else merged.push([a, b]);
+  }
+  for (const [a, b] of merged) {
     const x0 = fr.x(Math.max(a, fr.start)), x1 = fr.x(Math.min(b, fr.end));
     if (x1 <= x0) continue;
     over += `<i class="tl-out" style="left:${pc(x0)};width:${pc(x1 - x0)}"></i>`;
@@ -215,15 +241,13 @@ function rowHtml(m, color, fr, now) {
   if (k === "blocked") over += warnLab(nowX, "Sign-in blocked, no usage data");
   else if (k === "error") over += warnLab(nowX, m.st.text || "Error");
   else if (k === "off") over += lab(nowX, "Off, never used");
-  else if (k === "noreading") over += lab(nowX, "No reading yet");
+  else if (k === "noreading") over += m.hold ? warnLab(nowX, holdText(m, now)) : lab(nowX, "No reading yet");
   else {
     const cur = m.outs.find(([a, b]) => a <= now && b > now);
     const next = m.outs.find(([a]) => a > now && a < fr.end);
-    if (cur) over += warnLab(nowX, k === "usedup" ? "Used up" : "Out now");
-    else {
-      if (k === "limited") over += warnLab(nowX, m.st.text || "Unavailable");
-      if (next) over += warnLab(fr.x(next[0]), "Out " + (next[0] - now < 6 * 864e5 ? weekdayTime(next[0]) : day(next[0])));
-    }
+    if (m.hold) over += warnLab(nowX, holdText(m, now));
+    else if (cur) over += warnLab(nowX, k === "usedup" ? "Used up" : "Out now");
+    if (!cur && next) over += warnLab(fr.x(next[0]), "Out " + (next[0] - now < 6 * 864e5 ? weekdayTime(next[0]) : day(next[0])));
     const r = m.resets.find((t) => t > now && t < fr.end);
     if (r) over += lab(fr.x(r), `${icon("reset", 12)}<span>Resets ${esc(r - now < 6 * 864e5 ? weekdayTime(r) : day(r) + " " + clock(r))}</span>`);
   }
@@ -240,13 +264,19 @@ function rowHtml(m, color, fr, now) {
 }
 
 function stripHtml(models, fr, now) {
+  // Half-hour steps, split at now so a hold that starts now starts there.
+  const cuts = [];
+  for (let t = fr.start; t < fr.end; t += STEP) cuts.push(t);
+  if (now > fr.start && now < fr.end && !cuts.includes(now)) cuts.push(now);
+  cuts.sort((a, b) => a - b);
   const segs = [];
-  for (let t = fr.start; t < fr.end; t += STEP) {
-    const n = models.filter((m) => available(m, Math.min(fr.end - 1, t + STEP / 2), now)).length;
+  cuts.forEach((t, i) => {
+    const to = Math.min(fr.end, cuts[i + 1] ?? fr.end);
+    const n = models.filter((m) => available(m, Math.min(fr.end - 1, (t + to) / 2), now)).length;
     const last = segs[segs.length - 1];
-    if (last && last.n === n) last.to = Math.min(fr.end, t + STEP);
-    else segs.push({ from: t, to: Math.min(fr.end, t + STEP), n });
-  }
+    if (last && last.n === n) last.to = to;
+    else segs.push({ from: t, to, n });
+  });
   const max = Math.max(0, ...segs.map((s) => s.n));
   const total = models.length;
   return segs.map((s) => {
@@ -350,7 +380,8 @@ export function timeline(accts) {
         guide.style.left = e.clientX - ar.left + "px";
         if (!tip) { tip = document.createElement("div"); tip.className = "tip sm"; tl.appendChild(tip); }
         const when = `${day(t)}, ${clock(t)}`;
-        tip.innerHTML = `<div class="h"><span>${esc(when)}</span><span>${v <= 0 ? "Out" : Math.round(v) + "% left"}</span></div>${t > now ? `<div class="s">At the current burn</div>` : ""}`;
+        const note = held(m, t) ? (m.hold[1] === Infinity ? m.st.text || "Unavailable" : "Resting, not used for new sessions") : t > now ? "At the current burn" : "";
+        tip.innerHTML = `<div class="h"><span>${esc(when)}</span><span>${v <= 0 ? "Out" : Math.round(v) + "% left"}</span></div>${note ? `<div class="s">${esc(note)}</div>` : ""}`;
         const w = tip.offsetWidth, h = tip.offsetHeight;
         const x = Math.max(0, Math.min(e.clientX - tr.left + 12, tr.width - w));
         let y = ar.top - tr.top - h - 4;

@@ -71,17 +71,16 @@ export function bindProviderTabs(root, key) {
 
 const SUM_KEYS = ["requests", "failed", "failovers", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"];
 
-// The stored scope when the accounts match one (all, a provider, one
-// account), or the backend's merged selection for the picked accounts.
-// Percentiles cannot be combined from per-account percentiles, so until the
-// selection arrives (or on a backend without it) counts and tokens are added
-// up here and every percentile is left out, which shows as "–".
+// The stored scope for all accounts or a whole provider. When the chips pick
+// some but not all accounts, even just one, percentiles come only from the
+// backend's merged selection. Until it arrives (or on a backend without it)
+// counts and tokens are added up here and every percentile is left out,
+// which shows as "–".
 export function perfFor(sc, range = "24h") {
   if (sc.prov === "all") return perf("all", range);
   if (!sc.some) return perf(sc.prov, range);
   const sel = selectionPerf(sc.ids, range);
   if (sel) return sel;
-  if (sc.ids.length === 1) return perf(sc.ids[0], range);
   const list = sc.ids.map((id) => perf(id, range)).filter(Boolean);
   if (!list.length) return null;
   const has = (k, o) => o && Object.prototype.hasOwnProperty.call(o, k);
