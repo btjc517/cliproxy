@@ -381,7 +381,7 @@ func TestPerfRollupKeepsTotals(t *testing.T) {
 		t.Fatal("the views changed after a save and reload")
 	}
 	// Saving the reloaded store again must not count anything twice.
-	reloaded.dirty = true
+	reloaded.markDirtyLocked()
 	if got := check(t, reloadStore(t, reloaded, clock)); !reflect.DeepEqual(got, first) {
 		t.Fatal("the views changed after a second save and reload")
 	}
@@ -481,7 +481,7 @@ func TestOldStatsFilesLoad(t *testing.T) {
 			if errUnmarshal := json.Unmarshal(data, &saved); errUnmarshal != nil || saved.Version != statsFileVersion || saved.AccountDaily == nil {
 				t.Fatalf("saved file version %d, account daily %v, err %v", saved.Version, saved.AccountDaily != nil, errUnmarshal)
 			}
-			reloaded.dirty = true
+			reloaded.markDirtyLocked()
 			if got := reloadStore(t, reloaded, clock).SummaryFor(10, windows["all"]); view(got) != want {
 				t.Fatal("a second save and reload changed the totals")
 			}

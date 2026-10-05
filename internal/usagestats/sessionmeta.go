@@ -62,7 +62,7 @@ func (s *Store) UpdateSessionMeta(machine string, sessions []SessionMetaUpdate) 
 		updated++
 	}
 	if updated > 0 {
-		s.dirty = true
+		s.markDirtyLocked()
 		s.pruneSessionMetaLocked(now)
 	}
 	return updated
@@ -100,7 +100,7 @@ func (s *Store) pruneSessionMetaLocked(now time.Time) {
 	for id, meta := range s.meta {
 		if meta == nil || meta.UpdatedAt.Before(cutoff) {
 			delete(s.meta, id)
-			s.dirty = true
+			s.markDirtyLocked()
 		}
 	}
 	if len(s.meta) <= maxSessionMeta {
@@ -114,7 +114,7 @@ func (s *Store) pruneSessionMetaLocked(now time.Time) {
 	for _, id := range ids[maxSessionMeta:] {
 		delete(s.meta, id)
 	}
-	s.dirty = true
+	s.markDirtyLocked()
 }
 
 // clip trims value and cuts it to at most limit bytes on a rune boundary. The

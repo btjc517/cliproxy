@@ -9,6 +9,8 @@ package usagestats
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -131,7 +133,18 @@ type Store struct {
 	traces   map[string]*traceState
 	meta     map[string]*sessionMeta
 	backfill *historyFile
-	dirty    bool
+	// changes counts mutations and saved is the count the stats file holds;
+	// the tally needs saving while they differ.
+	changes uint64
+	saved   uint64
+	// persistOff stops every save after the stats file failed to load, so a
+	// near-empty tally never replaces it.
+	persistOff bool
+	// flushMu serializes whole flushes, from snapshot to rename, so an older
+	// snapshot never replaces a newer one. It is taken before mu.
+	flushMu sync.Mutex
+	// saveFile writes a snapshot to the stats file path.
+	saveFile func(path string, data []byte) error
 	nowFunc  func() time.Time
 	// machineName maps a client address to a short machine name. It must not
 	// block.
@@ -157,6 +170,7 @@ func newStore() *Store {
 		authProviders: make(map[string]string),
 		traces:        make(map[string]*traceState),
 		meta:          make(map[string]*sessionMeta),
+		saveFile:      writeFileAtomic,
 		nowFunc:       time.Now,
 		machineName:   tailnetname.MachineName,
 	}
@@ -318,8 +332,11 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 		}
 		session.Counters.add(delta)
 	}
-	s.dirty = true
+	s.markDirtyLocked()
 }
+
+// markDirtyLocked records that the tally changed since the last save.
+func (s *Store) markDirtyLocked() { s.changes++ }
 
 func (s *Store) dailyBucketLocked(day, provider string) *Counters {
 	providers := s.daily[day]
@@ -683,13 +700,33 @@ func (s *Store) historyLocked(now time.Time) History {
 	return history
 }
 
+// hourlyCutoff is the oldest hour start the hourly usage buckets keep: the
+// earliest bucket start of every view read from them, and never later than
+// hourlyRetention before now. A window that crosses the change back from
+// summer time is an hour longer than its usual length.
+func hourlyCutoff(now time.Time) time.Time {
+	cutoff := now.Add(-hourlyRetention)
+	if first := localBounds(now, 1, 48)[0]; first.Before(cutoff) {
+		cutoff = first
+	}
+	for _, window := range windows {
+		if window.daily() {
+			continue
+		}
+		if bounds, _ := window.span(now, time.Time{}); bounds[0].Before(cutoff) {
+			cutoff = bounds[0]
+		}
+	}
+	return cutoff
+}
+
 func (s *Store) pruneLocked(now time.Time) {
-	hourCutoff := now.Add(-hourlyRetention).Unix()
+	hourCutoff := hourlyCutoff(now).Unix()
 	for authID, buckets := range s.hourly {
 		for hourUnix := range buckets {
 			if hourUnix < hourCutoff {
 				delete(buckets, hourUnix)
-				s.dirty = true
+				s.markDirtyLocked()
 			}
 		}
 		if len(buckets) == 0 {
@@ -697,14 +734,14 @@ func (s *Store) pruneLocked(now time.Time) {
 		}
 	}
 	if s.rollUpPerfLocked(now.Add(-perfRetention)) {
-		s.dirty = true
+		s.markDirtyLocked()
 	}
 	s.pruneSessionMetaLocked(now)
 	sessionCutoff := now.Add(-sessionRetention)
 	for id, session := range s.sessions {
 		if session.LastSeen.Before(sessionCutoff) {
 			delete(s.sessions, id)
-			s.dirty = true
+			s.markDirtyLocked()
 		}
 	}
 	if len(s.sessions) > maxSessions {
@@ -716,18 +753,27 @@ func (s *Store) pruneLocked(now time.Time) {
 		for _, session := range sessions[maxSessions:] {
 			delete(s.sessions, session.ID)
 		}
-		s.dirty = true
+		s.markDirtyLocked()
 	}
 }
 
-// Flush writes the tally to disk when it changed since the last write.
+// Flush writes the tally to disk when it changed since the last save. Flushes
+// run one at a time, and the tally counts as saved only once the new file is
+// in place, so a failed write is retried by the next flush.
 func (s *Store) Flush() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
-	if s.path == "" || !s.dirty {
+	if s.path == "" || s.persistOff {
 		s.mu.Unlock()
 		return nil
 	}
 	s.pruneLocked(s.nowFunc())
+	if s.changes == s.saved {
+		s.mu.Unlock()
+		return nil
+	}
+	generation := s.changes
 	data, errMarshal := json.Marshal(fileState{
 		Version:       statsFileVersion,
 		Hourly:        s.hourly,
@@ -740,30 +786,105 @@ func (s *Store) Flush() error {
 		AccountDaily:  s.accountDaily,
 	})
 	path := s.path
-	s.dirty = false
+	save := s.saveFile
 	s.mu.Unlock()
 	if errMarshal != nil {
 		return errMarshal
 	}
-
-	tmp := path + ".tmp"
-	if errWrite := os.WriteFile(tmp, data, 0o600); errWrite != nil {
-		return errWrite
+	// Records that arrive while the file is written raise changes past
+	// generation, so the tally stays unsaved until the next flush.
+	if errSave := save(path, data); errSave != nil {
+		return errSave
 	}
-	return os.Rename(tmp, path)
+	s.mu.Lock()
+	s.saved = generation
+	s.mu.Unlock()
+	return nil
+}
+
+// writeFileAtomic writes data to a temporary file next to path, syncs it and
+// renames it over path, so path holds either the old or the new data.
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	file, errOpen := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if errOpen != nil {
+		return errOpen
+	}
+	_, errWrite := file.Write(data)
+	if errWrite == nil {
+		errWrite = file.Sync()
+	}
+	if errClose := file.Close(); errWrite == nil {
+		errWrite = errClose
+	}
+	if errWrite == nil {
+		errWrite = os.Rename(tmp, path)
+	}
+	if errWrite != nil {
+		if errRemove := os.Remove(tmp); errRemove != nil && !os.IsNotExist(errRemove) {
+			log.Warnf("usagestats: remove %s: %v", filepath.Base(tmp), errRemove)
+		}
+	}
+	return errWrite
+}
+
+// failLoadLocked handles a stats file that exists but could not be read or
+// parsed. It copies the file aside first and then turns saving off for this
+// process, so the original is never replaced by a near-empty tally.
+func (s *Store) failLoadLocked(errLoad error) {
+	name := filepath.Base(s.path)
+	backup := s.path + ".corrupt-" + s.nowFunc().UTC().Format("20060102T150405.000000000Z")
+	errCopy := copyNewFile(s.path, backup)
+	s.persistOff = true
+	if errCopy != nil {
+		log.Errorf("usagestats: cannot load %s: %v; copying it aside failed: %v; usage stats will not be saved until restart", name, errLoad, errCopy)
+		return
+	}
+	log.Errorf("usagestats: cannot load %s: %v; copied it to %s; usage stats will not be saved until restart", name, errLoad, filepath.Base(backup))
+}
+
+// copyNewFile copies src to dst, which must not exist yet. A partial copy is
+// removed.
+func copyNewFile(src, dst string) error {
+	in, errOpen := os.Open(src)
+	if errOpen != nil {
+		return errOpen
+	}
+	defer func() {
+		if errClose := in.Close(); errClose != nil {
+			log.Warnf("usagestats: close %s: %v", filepath.Base(src), errClose)
+		}
+	}()
+	out, errCreate := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errCreate != nil {
+		return errCreate
+	}
+	_, errCopy := io.Copy(out, in)
+	if errCopy == nil {
+		errCopy = out.Sync()
+	}
+	if errClose := out.Close(); errCopy == nil {
+		errCopy = errClose
+	}
+	if errCopy != nil {
+		if errRemove := os.Remove(dst); errRemove != nil && !os.IsNotExist(errRemove) {
+			log.Warnf("usagestats: remove %s: %v", filepath.Base(dst), errRemove)
+		}
+	}
+	return errCopy
 }
 
 func (s *Store) loadLocked() {
 	data, errRead := os.ReadFile(s.path)
 	if errRead != nil {
 		if !os.IsNotExist(errRead) {
-			log.Warnf("usagestats: read %s: %v", filepath.Base(s.path), errRead)
+			s.failLoadLocked(fmt.Errorf("read: %w", errRead))
 		}
 		return
 	}
 	var state fileState
 	if errUnmarshal := json.Unmarshal(data, &state); errUnmarshal != nil {
-		log.Warnf("usagestats: parse %s: %v", filepath.Base(s.path), errUnmarshal)
+		s.failLoadLocked(fmt.Errorf("parse: %w", errUnmarshal))
 		return
 	}
 	for authID, buckets := range state.Hourly {
@@ -798,7 +919,7 @@ func (s *Store) loadLocked() {
 			}
 		}
 		if len(state.Hourly) > 0 {
-			s.dirty = true
+			s.markDirtyLocked()
 		}
 	}
 	for day, providers := range state.Daily {
@@ -819,7 +940,7 @@ func (s *Store) loadLocked() {
 				}
 				day := time.Unix(hour, 0).In(location).Format(dayLayout)
 				s.accountDayLocked(authID, day).add(*bucket)
-				s.dirty = true
+				s.markDirtyLocked()
 			}
 		}
 	}
@@ -851,7 +972,7 @@ func (s *Store) loadLocked() {
 				// hourly usage bucket with the same key holds the same requests.
 				if counters := state.Hourly[authID][hour]; counters != nil {
 					bucket.addTokens(*counters)
-					s.dirty = true
+					s.markDirtyLocked()
 				}
 			}
 			if existing := target[hour]; existing != nil {
