@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -54,6 +55,7 @@ func (s *Service) Run(ctx context.Context) error {
 	usage.StartDefault(ctx)
 	if strings.TrimSpace(s.configPath) != "" {
 		coreauth.ConfigureRoutingState(filepath.Join(filepath.Dir(s.configPath), "routing-state.json"))
+		helps.ConfigureClaudeThreadToolNames(filepath.Join(filepath.Dir(s.configPath), "claude-thread-tools.json"))
 	}
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
@@ -359,6 +361,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		usage.StopDefault()
 		if errFlush := coreauth.DefaultRoutingState().Flush(); errFlush != nil {
 			log.Warnf("routing state flush on shutdown failed: %v", errFlush)
+		}
+		if errFlush := helps.FlushClaudeThreadToolNames(); errFlush != nil {
+			log.Warnf("claude thread tool names flush on shutdown failed: %v", errFlush)
 		}
 	})
 	return shutdownErr

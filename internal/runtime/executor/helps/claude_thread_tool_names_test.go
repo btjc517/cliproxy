@@ -1,6 +1,8 @@
 package helps
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -61,4 +63,39 @@ func TestClaudeThreadToolNameCacheConcurrentSnapshots(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// TestClaudeThreadToolNameCacheSurvivesRestart saves the cache, then loads it
+// into a fresh one, as a proxy restart does. A thread continued after the
+// restart must still find its tool names.
+func TestClaudeThreadToolNameCacheSurvivesRestart(t *testing.T) {
+	now := time.Unix(1000, 0)
+	path := filepath.Join(t.TempDir(), "claude-thread-tools.json")
+	clock := func() time.Time { return now }
+
+	first := newClaudeThreadToolNameCache(8, time.Hour, clock)
+	first.path = path
+	first.store("caller", "msg_old", map[string]string{"mcp__x_Bash": "Bash"})
+	now = now.Add(30 * time.Minute)
+	first.store("caller", "msg_new", map[string]string{"mcp__x_Read": "Read"})
+	first.store("other", "msg_new", map[string]string{"mcp__y_Bash": "Bash"})
+	if err := first.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("saved file = %v, %v; want mode 0600", info, err)
+	}
+
+	now = now.Add(45 * time.Minute)
+	second := newClaudeThreadToolNameCache(8, time.Hour, clock)
+	second.configure(path)
+	if names, ok := second.load("caller", "msg_new"); !ok || names["mcp__x_Read"] != "Read" {
+		t.Fatalf("restored names = %v, %v", names, ok)
+	}
+	if names, ok := second.load("other", "msg_new"); !ok || names["mcp__y_Bash"] != "Bash" {
+		t.Fatalf("callers mixed after restore: %v, %v", names, ok)
+	}
+	if _, ok := second.load("caller", "msg_old"); ok {
+		t.Fatal("an entry that expired while the proxy was down came back")
+	}
 }
