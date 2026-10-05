@@ -6,7 +6,7 @@ import {
   S, esc, icon, logo, warnIcon, clock, day, dayKey, weekdayTime, planDay, status, limits, left, plan, queue, providerTitle, validTime,
 } from "../core.js";
 import { allowanceSeries, trajectory } from "./burn.js";
-import { ACCOUNT_COLORS } from "./common.js";
+import { accountColor } from "./common.js";
 
 const HOUR = 3600e3, WEEK = 7 * 864e5;
 const DAYS = 30;          // yesterday, today and 28 days ahead
@@ -322,8 +322,8 @@ export function timeline(accts) {
     const list = [...q.order, ...q.rest].filter((a) => ids.has(a.id));
     const models = list.map((a) => model(a, now, fr));
     body += `<div class="tl-grp"><div class="lab">${logo(provider)}<b>${providerTitle(provider)}</b><span class="muted">accounts available</span></div><div class="area tl-strip">${stripHtml(models, fr, now)}</div></div>`;
-    models.forEach((m, i) => {
-      const color = list.length === 1 ? "var(--chart-1)" : ACCOUNT_COLORS[i % ACCOUNT_COLORS.length];
+    models.forEach((m) => {
+      const color = accountColor(m.a.id);
       rows.push(m);
       body += rowHtml(m, color, fr, now);
     });

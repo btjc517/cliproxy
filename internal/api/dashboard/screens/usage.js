@@ -5,7 +5,7 @@ import {
   timeChart, bindChart, chartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle, rangeTabs, bindRangeTabs, screenRange,
   providerTitle,
 } from "../core.js";
-import { providerTabs, bindProviderTabs, accountChips, scopeOf, readAt, ACCOUNT_COLORS, gapNote } from "./common.js";
+import { providerTabs, bindProviderTabs, accountChips, scopeOf, readAt, accountColor, gapNote } from "./common.js";
 import { allowanceChart, allowanceTable } from "./burn.js";
 
 const DAY = 864e5;
@@ -289,7 +289,7 @@ export function view() {
   const ids = sc.ids;
   const range = screenRange("usage");
   // One colour per account across the allowance chart, the tokens chart and both tables.
-  const colorOf = (id) => (ids.length === 1 ? "var(--chart-1)" : ACCOUNT_COLORS[Math.max(0, ids.indexOf(id)) % ACCOUNT_COLORS.length]);
+  const colorOf = (id) => accountColor(id);
 
   const long = (S.ui.usWindow || "week") === "week";
   const allowance = allowanceChart({ key: "usAllowance", ids, long, colorOf });
