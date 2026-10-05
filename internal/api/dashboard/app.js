@@ -13,11 +13,21 @@ import * as settings from "./screens/settings.js";
 const NAV = [
   { id: "overview", href: "#/", label: "Overview", icon: "overview" },
   { id: "accounts", href: "#/accounts", label: "Accounts", icon: "accounts" },
-  { id: "usage", href: "#/usage", label: "Usage", icon: "usage" },
-  { id: "performance", href: "#/performance", label: "Performance", icon: "performance" },
   { id: "sessions", href: "#/sessions", label: "Sessions", icon: "sessions" },
   { id: "routing", href: "#/routing", label: "Routing", icon: "routing" },
+  { id: "usage", href: "#/usage", label: "Usage", icon: "usage", group: "Telemetry" },
+  { id: "performance", href: "#/performance", label: "Performance", icon: "performance", group: "Telemetry" },
 ];
+
+// Nav links, with a label before the first link of each group.
+function navLinks() {
+  let group = "";
+  return NAV.map((n) => {
+    const label = n.group && n.group !== group ? `<div class="navlabel">${esc(n.group)}</div>` : "";
+    group = n.group || "";
+    return `${label}<a href="${n.href}" data-nav="${n.id}">${icon(n.icon)}<span>${n.label}</span></a>`;
+  }).join("");
+}
 
 function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
@@ -45,7 +55,7 @@ function shell() {
   app.innerHTML = `
     <aside class="side">
       <div class="brand">${icon("share", 18, "var(--fg)")}<span class="strong">CLI proxy</span><span class="muted">Personal</span></div>
-      <nav class="nav" id="nav">${NAV.map((n) => `<a href="${n.href}" data-nav="${n.id}">${icon(n.icon)}<span>${n.label}</span></a>`).join("")}<a class="only-narrow" href="#/settings" data-nav="settings">${icon("settings")}<span>Settings</span></a></nav>
+      <nav class="nav" id="nav">${navLinks()}<a class="only-narrow" href="#/settings" data-nav="settings">${icon("settings")}<span>Settings</span></a></nav>
       <div class="spacer"></div>
       <div class="nav foot only-wide">
         <a href="#/settings" data-nav="settings">${icon("settings")}<span>Settings</span></a>
