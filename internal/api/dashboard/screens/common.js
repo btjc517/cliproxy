@@ -118,13 +118,17 @@ export function readAt(prefix = "Read") {
 export const ACCOUNT_COLORS = ["var(--chart-1)", "var(--chart-p90)", "var(--chart-p50)", "var(--chart-p99)", "#A3A3A3", "#6E9EEF"];
 
 // One colour per account on every screen. Accounts take the colours in a
-// fixed order (provider, then email, then id), never in the order a screen
-// lists them, which follows the router queue and changes.
+// fixed order (email Z to A, then provider, then id), never in the order a
+// screen lists them, which follows the router queue and changes. The order
+// itself is arbitrary; Z to A matches the colours in the Paper designs.
+let colorCache = { data: undefined, map: new Map() };
 export function accountColor(id) {
-  const order = accounts().slice().sort((a, b) =>
-    String(a.provider).localeCompare(String(b.provider)) || String(a.email).localeCompare(String(b.email)) || String(a.id).localeCompare(String(b.id)));
-  const i = order.findIndex((a) => a.id === id);
-  return ACCOUNT_COLORS[Math.max(0, i) % ACCOUNT_COLORS.length];
+  if (colorCache.data !== S.data) {
+    const order = accounts().slice().sort((a, b) =>
+      String(b.email ?? "").localeCompare(String(a.email ?? "")) || String(a.provider ?? "").localeCompare(String(b.provider ?? "")) || String(a.id ?? "").localeCompare(String(b.id ?? "")));
+    colorCache = { data: S.data, map: new Map(order.map((a, i) => [a.id, ACCOUNT_COLORS[i % ACCOUNT_COLORS.length]])) };
+  }
+  return colorCache.map.get(id) || ACCOUNT_COLORS[0];
 }
 
 // ---------- usage figures and the 24-hour chart ----------
@@ -253,7 +257,8 @@ function buildChart({ chartId, ids, p, stackBy, metric }) {
     all.forEach((a) => {
       const x = b.byAcct[a.id];
       if (!x || !x.requests) return;
-      const color = stackBy === "provider" ? (a.provider === "claude" ? "var(--chart-1)" : "var(--chart-p50)") : accountColor(a.id);
+      // Rows name accounts, so they carry account colours even when the chart stacks by provider.
+      const color = accountColor(a.id);
       rows.push({ k: nm[a.id], v: metric === "tokens" ? fmt(tokens(x)) : metric === "failure" ? int(x.failed) : int(x.requests), color });
     });
     const foot = [];

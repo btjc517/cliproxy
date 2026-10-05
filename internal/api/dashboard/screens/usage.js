@@ -289,7 +289,7 @@ export function view() {
   const ids = sc.ids;
   const range = screenRange("usage");
   // One colour per account across the allowance chart, the tokens chart and both tables.
-  const colorOf = (id) => (ids.length === 1 ? "var(--chart-1)" : accountColor(id));
+  const colorOf = (id) => accountColor(id);
 
   const long = (S.ui.usWindow || "week") === "week";
   const allowance = allowanceChart({ key: "usAllowance", ids, long, colorOf });
