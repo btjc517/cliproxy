@@ -326,8 +326,9 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 }
 
 type claudeErrorDetail struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
+	Type    string          `json:"type"`
+	Message string          `json:"message"`
+	Details json.RawMessage `json:"details,omitempty"`
 }
 
 type claudeErrorResponse struct {
@@ -355,6 +356,7 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 		Error: claudeErrorDetail{
 			Type:    errType,
 			Message: message,
+			Details: claudeErrorDetails(errText),
 		},
 	}
 }
@@ -443,6 +445,17 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 	}
 
 	return errType, message
+}
+
+// claudeErrorDetails keeps Anthropic's machine-readable error.details, such as
+// {"error_code":"thread_not_found"}. Claude Code reads error.details.error_code
+// to decide how to recover; without it a lost thread looks like a missing model.
+func claudeErrorDetails(errText string) json.RawMessage {
+	details := gjson.Get(strings.TrimSpace(errText), "error.details")
+	if !details.IsObject() {
+		return nil
+	}
+	return json.RawMessage(details.Raw)
 }
 
 func claudeErrorTypeFromStatus(status int) string {

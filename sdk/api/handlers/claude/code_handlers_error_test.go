@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -196,5 +197,52 @@ func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
 	}
 	if gotErr != wantErr {
 		t.Fatalf("pending error = %p, want %p", gotErr, wantErr)
+	}
+}
+
+// Claude Code replays a thread only when error.details.error_code says
+// thread_not_found. A rebuilt error without it reads as a missing model.
+func TestWriteClaudeErrorResponseKeepsUpstreamErrorDetails(t *testing.T) {
+	const upstream = `{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested ` + "`previous_message_id`" + `.","details":{"error_code":"thread_not_found"}},"request_id":"req_123"}`
+	for _, streaming := range []bool{false, true} {
+		name := "JSON"
+		if streaming {
+			name = "committed SSE"
+		}
+		t.Run(name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+			msg := &interfaces.ErrorMessage{StatusCode: http.StatusNotFound, Error: errors.New(upstream)}
+			if streaming {
+				c.Header("Content-Type", "text/event-stream")
+				_, _ = c.Writer.Write([]byte("event: message_start\ndata: {}\n\n"))
+				c.Writer.Flush()
+				errs := make(chan *interfaces.ErrorMessage, 1)
+				errs <- msg
+				close(errs)
+				handler.forwardClaudeStream(c, c.Writer, func(error) {}, nil, errs)
+			} else {
+				handler.WriteErrorResponse(c, msg)
+			}
+			body := recorder.Body.String()
+			if streaming {
+				_, body, _ = strings.Cut(body, "event: error\ndata: ")
+				body = strings.TrimSpace(body)
+			}
+			if got := gjson.Get(body, "error.details.error_code").String(); got != "thread_not_found" {
+				t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, body)
+			}
+			if got := gjson.Get(body, "error.type").String(); got != "not_found_error" {
+				t.Fatalf("error.type = %q; body=%s", got, body)
+			}
+		})
+	}
+	// Errors without details keep the plain envelope.
+	plain := (&ClaudeCodeAPIHandler{}).toClaudeError(&interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New("bad request")})
+	if body, _ := json.Marshal(plain); strings.Contains(string(body), "details") {
+		t.Fatalf("plain error grew a details field: %s", body)
 	}
 }
