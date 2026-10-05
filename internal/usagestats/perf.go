@@ -3,6 +3,7 @@ package usagestats
 import (
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -18,9 +19,11 @@ const (
 	// minThroughputTokens skips short replies whose generation time is mostly
 	// noise.
 	minThroughputTokens = 16
-	perfRetention       = 15 * 24 * time.Hour
-	traceRetention      = time.Hour
-	maxTraces           = 4096
+	// perfRetention is how long hourly timing is kept. Older hours are rolled
+	// up into one bucket per credential per local day, kept forever.
+	perfRetention  = 35 * 24 * time.Hour
+	traceRetention = time.Hour
+	maxTraces      = 4096
 )
 
 // histogram counts values by log-spaced bucket index.
@@ -119,14 +122,30 @@ func roundMillis(value float64) int64 { return int64(math.Round(value)) }
 
 func roundTenth(value float64) float64 { return math.Round(value*10) / 10 }
 
-// perfBucket is one hour of request timing for one credential.
+// perfBucket is one hour, or one rolled up local day, of request timing for
+// one credential, with the token sums of the same requests.
 type perfBucket struct {
 	Requests   int64     `json:"requests"`
 	Failed     int64     `json:"failed"`
 	Failovers  int64     `json:"failovers,omitempty"`
+	Input      int64     `json:"input_tokens,omitempty"`
+	Output     int64     `json:"output_tokens,omitempty"`
+	CacheRead  int64     `json:"cache_read_tokens,omitempty"`
+	CacheWrite int64     `json:"cache_write_tokens,omitempty"`
 	TTFT       histogram `json:"ttft,omitempty"`
 	Latency    histogram `json:"latency,omitempty"`
 	Throughput histogram `json:"throughput,omitempty"`
+}
+
+func (b *perfBucket) addTokens(tokens Counters) {
+	b.Input += tokens.Input
+	b.Output += tokens.Output
+	b.CacheRead += tokens.CacheRead
+	b.CacheWrite += tokens.CacheWrite
+}
+
+func (b *perfBucket) hasTokens() bool {
+	return b.Input != 0 || b.Output != 0 || b.CacheRead != 0 || b.CacheWrite != 0
 }
 
 // validate repairs a bucket read from the stats file.
@@ -140,6 +159,10 @@ func (b *perfBucket) add(other *perfBucket) {
 	b.Requests += other.Requests
 	b.Failed += other.Failed
 	b.Failovers += other.Failovers
+	b.Input += other.Input
+	b.Output += other.Output
+	b.CacheRead += other.CacheRead
+	b.CacheWrite += other.CacheWrite
 	b.TTFT.merge(other.TTFT)
 	b.Latency.merge(other.Latency)
 	b.Throughput.merge(other.Throughput)
@@ -152,26 +175,157 @@ type traceState struct {
 	seen   time.Time
 }
 
-// Window is a range the dashboard can show performance for.
+// Window is a range the dashboard can show performance and usage for.
 type Window struct {
-	Key     string
-	Bucket  time.Duration
+	Key string
+	// Bucket is the usual bucket length: whole local hours below a day, or one
+	// local day. The "all" window switches to 7 local days on long histories.
+	Bucket time.Duration
+	// Buckets is the number of buckets. It is 0 for "all", which runs from the
+	// first local day with data to today.
 	Buckets int
 }
 
+const (
+	localDay = 24 * time.Hour
+	// allDailyDays is the longest history the "all" window shows in daily
+	// buckets. Longer ones use 7 day buckets so the payload stays bounded.
+	allDailyDays = 120
+	allWeekDays  = 7
+	// longRangeDays is the age the earliest data must reach before the
+	// dashboard offers the 180d range.
+	longRangeDays = 180
+)
+
 var windows = map[string]Window{
-	"24h": {Key: "24h", Bucket: time.Hour, Buckets: 24},
-	"7d":  {Key: "7d", Bucket: 6 * time.Hour, Buckets: 28},
-	"14d": {Key: "14d", Bucket: 12 * time.Hour, Buckets: 28},
+	"24h":  {Key: "24h", Bucket: time.Hour, Buckets: 24},
+	"7d":   {Key: "7d", Bucket: 6 * time.Hour, Buckets: 28},
+	"14d":  {Key: "14d", Bucket: 12 * time.Hour, Buckets: 28},
+	"30d":  {Key: "30d", Bucket: localDay, Buckets: 30},
+	"180d": {Key: "180d", Bucket: localDay, Buckets: longRangeDays},
+	"all":  {Key: "all", Bucket: localDay},
 }
 
 // DefaultWindow is the range used when the caller names none.
 const DefaultWindow = "24h"
 
-// LookupWindow returns the window for a range key such as "24h", "7d" or "14d".
+// LookupWindow returns the window for a range key: "24h", "7d", "14d", "30d",
+// "180d" or "all".
 func LookupWindow(key string) (Window, bool) {
 	window, ok := windows[key]
 	return window, ok
+}
+
+// ResolveWindow returns the window for a range key, or the default window
+// when the key is empty or unknown.
+func ResolveWindow(key string) Window {
+	if window, ok := windows[key]; ok {
+		return window
+	}
+	return windows[DefaultWindow]
+}
+
+// availableRanges lists the range keys the dashboard offers, in order. 180d
+// joins once earliest, the start of the oldest stored data, is at least 180
+// local calendar days before now. A zero earliest means no data.
+func availableRanges(now, earliest time.Time) []string {
+	ranges := []string{"24h", "7d", "30d"}
+	if !earliest.IsZero() && !earliest.After(now.AddDate(0, 0, -longRangeDays)) {
+		ranges = append(ranges, "180d")
+	}
+	return append(ranges, "all")
+}
+
+// daily reports whether the window's buckets are whole local days.
+func (w Window) daily() bool { return w.Bucket >= localDay }
+
+// span returns the window's bucket bounds (see localBounds) ending with the
+// bucket that holds now, and the usual bucket length. first is the start of
+// the earliest data; only "all" uses it, and zero means none.
+func (w Window) span(now, first time.Time) ([]time.Time, time.Duration) {
+	if !w.daily() {
+		return localBounds(now, int(w.Bucket/time.Hour), w.Buckets), w.Bucket
+	}
+	if w.Buckets > 0 {
+		return dayBounds(now, w.Buckets, 1), localDay
+	}
+	days := 1
+	if !first.IsZero() {
+		days = max(1, localDaysBetween(first, now)+1)
+	}
+	if days <= allDailyDays {
+		return dayBounds(now, days, 1), localDay
+	}
+	weeks := (days + allWeekDays - 1) / allWeekDays
+	return dayBounds(now, weeks, allWeekDays), allWeekDays * localDay
+}
+
+// dayBounds returns count+1 instants in now's location: the starts of count
+// runs of size local days, oldest first, the newest ending with today,
+// followed by the start of tomorrow. With size 1 it matches
+// localBounds(now, 24, count).
+func dayBounds(now time.Time, count, size int) []time.Time {
+	loc := now.Location()
+	bounds := make([]time.Time, count+1)
+	for i := range bounds {
+		bounds[i] = localDayStart(now.Year(), now.Month(), now.Day()+1-(count-i)*size, loc)
+	}
+	return bounds
+}
+
+// localDayStart is the first instant of a local date; day may overflow the
+// month as in time.Date. Noon is inside the date whatever the DST rules, and
+// the walk back from it stops where the date begins, so a skipped or repeated
+// midnight is handled the same way as in isBucketStart.
+func localDayStart(year int, month time.Month, day int, loc *time.Location) time.Time {
+	return bucketStart(time.Date(year, month, day, 12, 0, 0, 0, loc), loc, 24).In(loc)
+}
+
+// dateNoon returns noon on a "2006-01-02" date in loc: an instant inside that
+// local day, for placing a daily tally in day sized buckets.
+func dateNoon(date string, loc *time.Location) (time.Time, bool) {
+	day, errParse := time.Parse(dayLayout, date)
+	if errParse != nil {
+		return time.Time{}, false
+	}
+	return time.Date(day.Year(), day.Month(), day.Day(), 12, 0, 0, 0, loc), true
+}
+
+// dateStart returns the first instant of a "2006-01-02" date in loc.
+func dateStart(date string, loc *time.Location) (time.Time, bool) {
+	day, errParse := time.Parse(dayLayout, date)
+	if errParse != nil {
+		return time.Time{}, false
+	}
+	return localDayStart(day.Year(), day.Month(), day.Day(), loc), true
+}
+
+// earliestDateStart returns the first instant of the earliest valid
+// "2006-01-02" date in dates. Such dates sort as strings in calendar order, so
+// only the earliest one is converted.
+func earliestDateStart(dates []string, loc *time.Location) (time.Time, bool) {
+	earliest := ""
+	for _, date := range dates {
+		if earliest != "" && date >= earliest {
+			continue
+		}
+		if _, errParse := time.Parse(dayLayout, date); errParse == nil {
+			earliest = date
+		}
+	}
+	if earliest == "" {
+		return time.Time{}, false
+	}
+	return dateStart(earliest, loc)
+}
+
+// localDaysBetween counts the local calendar days from from's date to to's
+// date in to's location: 0 on the same date.
+func localDaysBetween(from, to time.Time) int {
+	from = from.In(to.Location())
+	fromDate := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC)
+	toDate := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC)
+	return int(toDate.Sub(fromDate) / localDay)
 }
 
 // slotStep is the grid every bucket boundary sits on. Every time zone in use
@@ -242,20 +396,17 @@ func boundsIndex(bounds []time.Time, at time.Time) (int, bool) {
 	return index, index >= 0 && index < len(bounds)-1
 }
 
-// bounds returns the window's bucket starts and the end of its newest bucket.
-// Buckets start on local hours that are a multiple of the bucket size, so they
-// line up with local midnight.
-func (w Window) bounds(now time.Time) []time.Time {
-	return localBounds(now, int(w.Bucket/time.Hour), w.Buckets)
-}
-
 // Performance is request timing over the selected range.
 type Performance struct {
 	Range string `json:"range"`
 	// BucketSeconds is the usual bucket length. A bucket that crosses a DST
 	// change is longer or shorter, so each series point carries its start.
-	BucketSeconds int64           `json:"bucket_seconds"`
-	Scopes        map[string]Perf `json:"scopes"`
+	BucketSeconds int64 `json:"bucket_seconds"`
+	// Ranges are the range keys the dashboard offers, and Since is the start
+	// of the earliest stored performance data.
+	Ranges []string        `json:"ranges"`
+	Since  *time.Time      `json:"since,omitempty"`
+	Scopes map[string]Perf `json:"scopes"`
 }
 
 // Perf is request timing for one scope: everything, one provider or one
@@ -297,14 +448,24 @@ type ThroughputBin struct {
 	Count int64   `json:"count"`
 }
 
-// PerfPoint is one bucket of the series.
+// PerfPoint is one bucket of the series. Latency is the full response time,
+// ThroughputP10 the slowest 10%, and the token fields are sums over the
+// bucket's requests.
 type PerfPoint struct {
 	Start         time.Time `json:"start"`
 	Requests      int64     `json:"requests"`
 	Failed        int64     `json:"failed"`
+	Failovers     int64     `json:"failovers"`
 	TTFTP50       int64     `json:"ttft_p50_ms"`
 	TTFTP90       int64     `json:"ttft_p90_ms"`
+	LatencyP50    int64     `json:"latency_p50_ms"`
+	LatencyP90    int64     `json:"latency_p90_ms"`
 	ThroughputP50 float64   `json:"throughput_p50"`
+	ThroughputP10 float64   `json:"throughput_p10"`
+	Input         int64     `json:"input_tokens"`
+	Output        int64     `json:"output_tokens"`
+	CacheRead     int64     `json:"cache_read_tokens"`
+	CacheWrite    int64     `json:"cache_write_tokens"`
 }
 
 // perfAccumulator gathers one scope's buckets before they become a Perf.
@@ -353,22 +514,124 @@ func (a *perfAccumulator) build(bounds []time.Time) Perf {
 			Start:         bounds[i],
 			Requests:      bucket.Requests,
 			Failed:        bucket.Failed,
+			Failovers:     bucket.Failovers,
 			TTFTP50:       roundMillis(bucket.TTFT.percentile(0.5, ttftBase)),
 			TTFTP90:       roundMillis(bucket.TTFT.percentile(0.9, ttftBase)),
+			LatencyP50:    roundMillis(bucket.Latency.percentile(0.5, ttftBase)),
+			LatencyP90:    roundMillis(bucket.Latency.percentile(0.9, ttftBase)),
 			ThroughputP50: roundTenth(bucket.Throughput.percentile(0.5, throughputBase)),
+			ThroughputP10: roundTenth(bucket.Throughput.percentile(0.1, throughputBase)),
+			Input:         bucket.Input,
+			Output:        bucket.Output,
+			CacheRead:     bucket.CacheRead,
+			CacheWrite:    bucket.CacheWrite,
 		}
 	}
 	return perf
 }
 
+// perfSinceLocked returns the start of the earliest stored performance data in
+// loc: the earliest hour, or the start of the earliest rolled up day.
+func (s *Store) perfSinceLocked(loc *time.Location) (time.Time, bool) {
+	var since time.Time
+	found := false
+	consider := func(at time.Time) {
+		if !found || at.Before(since) {
+			since, found = at, true
+		}
+	}
+	for _, buckets := range s.perf {
+		for hourUnix := range buckets {
+			consider(time.Unix(hourUnix, 0))
+		}
+	}
+	dates := make([]string, 0, len(s.perfDaily))
+	for _, days := range s.perfDaily {
+		for date := range days {
+			dates = append(dates, date)
+		}
+	}
+	if start, ok := earliestDateStart(dates, loc); ok {
+		consider(start)
+	}
+	if !found {
+		return time.Time{}, false
+	}
+	return since.In(loc), true
+}
+
+// SelectionScope is the performance scope that merges the credentials a
+// caller selected, and MaxSelectionIDs is the most ids a selection takes.
+const (
+	SelectionScope  = "selection"
+	MaxSelectionIDs = 64
+)
+
+// ParseSelection splits a comma separated list of credential ids, as sent in
+// ?scope=. It trims each id, drops empty ones and repeats, and keeps the first
+// MaxSelectionIDs distinct ids.
+func ParseSelection(raw string) []string {
+	var ids []string
+	seen := make(map[string]struct{})
+	for rest := raw; rest != "" && len(ids) < MaxSelectionIDs; {
+		var id string
+		id, rest, _ = strings.Cut(rest, ",")
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// knownSelectionLocked returns, as a set, the ids among the first
+// MaxSelectionIDs of ids that the tally has seen or that known lists. It
+// returns nil when none is left.
+func (s *Store) knownSelectionLocked(ids, known []string) map[string]struct{} {
+	listed := make(map[string]struct{}, len(known))
+	for _, id := range known {
+		listed[id] = struct{}{}
+	}
+	selection := make(map[string]struct{})
+	for _, id := range ids[:min(len(ids), MaxSelectionIDs)] {
+		_, inList := listed[id]
+		_, inHourly := s.hourly[id]
+		_, inDaily := s.accountDaily[id]
+		_, inPerf := s.perf[id]
+		_, inPerfDaily := s.perfDaily[id]
+		_, inProviders := s.authProviders[id]
+		if inList || inHourly || inDaily || inPerf || inPerfDaily || inProviders {
+			selection[id] = struct{}{}
+		}
+	}
+	if len(selection) == 0 {
+		return nil
+	}
+	return selection
+}
+
 // performanceLocked builds the performance view for window ending at now.
-func (s *Store) performanceLocked(now time.Time, window Window) Performance {
-	bounds := window.bounds(now)
+// Hourly buckets and daily rollups never hold the same request, so windows of
+// whole days read both without counting anything twice. Shorter buckets cannot
+// split a day, so they read only the hourly buckets, which cover the last 35
+// days. A non-empty selection adds the SelectionScope, built from the raw
+// buckets of those credentials the same way as the provider scopes, so its
+// percentiles come from the merged histograms.
+func (s *Store) performanceLocked(now time.Time, window Window, selection map[string]struct{}) Performance {
+	loc := now.Location()
+	since, hasData := s.perfSinceLocked(loc)
+	bounds, bucketLength := window.span(now, since)
+	count := len(bounds) - 1
 	scopes := make(map[string]*perfAccumulator)
 	scope := func(key string) *perfAccumulator {
 		acc := scopes[key]
 		if acc == nil {
-			acc = &perfAccumulator{series: make([]perfBucket, window.Buckets)}
+			acc = &perfAccumulator{series: make([]perfBucket, count)}
 			scopes[key] = acc
 		}
 		return acc
@@ -379,26 +642,53 @@ func (s *Store) performanceLocked(now time.Time, window Window) Performance {
 	for authID := range s.hourly {
 		scope(authID)
 	}
-	for authID, buckets := range s.perf {
+	if len(selection) > 0 {
+		scope(SelectionScope)
+	}
+	targetsFor := func(authID string) []*perfAccumulator {
 		provider := s.authProviders[authID]
 		if provider == "" {
 			provider = providerOf("", authID)
 		}
 		targets := []*perfAccumulator{scope("all"), scope(provider), scope(authID)}
+		if _, selected := selection[authID]; selected {
+			targets = append(targets, scope(SelectionScope))
+		}
+		return targets
+	}
+	addTo := func(targets []*perfAccumulator, at time.Time, bucket *perfBucket) {
+		index, ok := boundsIndex(bounds, at)
+		if !ok {
+			return
+		}
+		for _, target := range targets {
+			target.add(index, bucket)
+		}
+	}
+	for authID, buckets := range s.perf {
+		targets := targetsFor(authID)
 		for hourUnix, bucket := range buckets {
-			index, ok := boundsIndex(bounds, time.Unix(hourUnix, 0))
-			if !ok {
-				continue
-			}
-			for _, target := range targets {
-				target.add(index, bucket)
+			addTo(targets, time.Unix(hourUnix, 0), bucket)
+		}
+	}
+	if window.daily() {
+		for authID, days := range s.perfDaily {
+			targets := targetsFor(authID)
+			for date, bucket := range days {
+				if noon, ok := dateNoon(date, loc); ok {
+					addTo(targets, noon, bucket)
+				}
 			}
 		}
 	}
 	performance := Performance{
 		Range:         window.Key,
-		BucketSeconds: int64(window.Bucket / time.Second),
+		BucketSeconds: int64(bucketLength / time.Second),
+		Ranges:        availableRanges(now, since),
 		Scopes:        make(map[string]Perf, len(scopes)),
+	}
+	if hasData {
+		performance.Since = &since
 	}
 	for key, acc := range scopes {
 		performance.Scopes[key] = acc.build(bounds)
@@ -406,10 +696,49 @@ func (s *Store) performanceLocked(now time.Time, window Window) Performance {
 	return performance
 }
 
-// recordPerfLocked adds one attempt's timing to its credential's hour, keyed
-// by the start of that local hour (bucketStart with 1 hour), and counts a
-// failover when an inbound request that already failed on another credential
-// succeeds here.
+// rollUpPerfLocked moves hourly timing that started before cutoff into its
+// credential's local day, in cutoff's location, and reports whether it moved
+// any.
+func (s *Store) rollUpPerfLocked(cutoff time.Time) bool {
+	loc := cutoff.Location()
+	cutoffUnix := cutoff.Unix()
+	moved := false
+	for authID, buckets := range s.perf {
+		for hourUnix, bucket := range buckets {
+			if hourUnix >= cutoffUnix {
+				continue
+			}
+			date := time.Unix(hourUnix, 0).In(loc).Format(dayLayout)
+			s.perfDayLocked(authID, date).add(bucket)
+			delete(buckets, hourUnix)
+			moved = true
+		}
+		if len(buckets) == 0 {
+			delete(s.perf, authID)
+		}
+	}
+	return moved
+}
+
+// perfDayLocked returns the rolled up day of timing for a credential.
+func (s *Store) perfDayLocked(authID, date string) *perfBucket {
+	days := s.perfDaily[authID]
+	if days == nil {
+		days = make(map[string]*perfBucket)
+		s.perfDaily[authID] = days
+	}
+	bucket := days[date]
+	if bucket == nil {
+		bucket = &perfBucket{}
+		days[date] = bucket
+	}
+	return bucket
+}
+
+// recordPerfLocked adds one attempt's timing and tokens to its credential's
+// hour, keyed by the start of that local hour (bucketStart with 1 hour), and
+// counts a failover when an inbound request that already failed on another
+// credential succeeds here.
 func (s *Store) recordPerfLocked(authID, provider string, hourStart time.Time, record recordTiming) {
 	if provider != "" {
 		s.authProviders[authID] = provider
@@ -426,6 +755,7 @@ func (s *Store) recordPerfLocked(authID, provider string, hourStart time.Time, r
 		buckets[hour] = bucket
 	}
 	bucket.Requests++
+	bucket.addTokens(record.tokens)
 	if record.failed {
 		bucket.Failed++
 	} else {
@@ -438,8 +768,8 @@ func (s *Store) recordPerfLocked(authID, provider string, hourStart time.Time, r
 		// Only a reply streamed from upstream has a first token time that splits
 		// waiting from generating. A buffered reply's first byte comes after the
 		// whole body is ready.
-		if generation := record.latency - record.ttft; record.stream && record.ttft > 0 && generation > 0 && record.output >= minThroughputTokens {
-			bucket.Throughput.observe(float64(record.output)/generation.Seconds(), throughputBase)
+		if generation := record.latency - record.ttft; record.stream && record.ttft > 0 && generation > 0 && record.tokens.Output >= minThroughputTokens {
+			bucket.Throughput.observe(float64(record.tokens.Output)/generation.Seconds(), throughputBase)
 		}
 	}
 
@@ -505,5 +835,6 @@ type recordTiming struct {
 	failed  bool
 	ttft    time.Duration
 	latency time.Duration
-	output  int64
+	// tokens are the attempt's token counts.
+	tokens Counters
 }

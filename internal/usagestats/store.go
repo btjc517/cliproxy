@@ -1,12 +1,16 @@
 // Package usagestats keeps a small persisted tally of upstream usage per
-// credential and per hour, a daily tally per provider that is never pruned,
-// plus the credentials each client session used. It backs the /dashboard page
-// and the usage summary management endpoint.
+// credential and per hour, daily tallies per provider and per credential that
+// are never pruned, request timing per credential (hourly for 35 days, then
+// one rolled up bucket per local day), plus the credentials each client
+// session used. It backs the /dashboard page and the usage summary management
+// endpoint.
 package usagestats
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,7 +30,9 @@ const (
 	sessionRetention = 48 * time.Hour
 	maxSessions      = 500
 	flushInterval    = time.Minute
-	statsFileVersion = 2
+	// statsFileVersion 3 added the per-credential daily tally, the daily
+	// timing rollups and token sums in the timing buckets.
+	statsFileVersion = 3
 	dayLayout        = "2006-01-02"
 
 	// HistoryFileName is the read-only backfill that sits next to the stats
@@ -89,10 +95,14 @@ type fileState struct {
 	Hourly   map[string]map[int64]*Counters  `json:"hourly"`
 	Daily    map[string]map[string]*Counters `json:"daily,omitempty"`
 	Sessions map[string]*Session             `json:"sessions"`
-	// Perf is hourly request timing per credential.
-	Perf          map[string]map[int64]*perfBucket `json:"perf,omitempty"`
-	AuthProviders map[string]string                `json:"auth_providers,omitempty"`
-	SessionMeta   map[string]*sessionMeta          `json:"session_meta,omitempty"`
+	// Perf is hourly request timing per credential, and PerfDaily the older
+	// hours rolled up per credential and local day.
+	Perf          map[string]map[int64]*perfBucket  `json:"perf,omitempty"`
+	PerfDaily     map[string]map[string]*perfBucket `json:"perf_daily,omitempty"`
+	AuthProviders map[string]string                 `json:"auth_providers,omitempty"`
+	SessionMeta   map[string]*sessionMeta           `json:"session_meta,omitempty"`
+	// AccountDaily is usage per credential and local day.
+	AccountDaily map[string]map[string]*Counters `json:"account_daily,omitempty"`
 }
 
 // historyFile is the backfill written by the log collector. Days and machines
@@ -110,15 +120,31 @@ type Store struct {
 	hourly   map[string]map[int64]*Counters
 	daily    map[string]map[string]*Counters
 	sessions map[string]*Session
-	// perf is hourly request timing per credential; authProviders remembers
-	// each credential's provider for the provider scopes.
+	// accountDaily is usage per credential and local day, never pruned.
+	accountDaily map[string]map[string]*Counters
+	// perf is hourly request timing per credential and perfDaily the hours
+	// older than perfRetention rolled up per local day; a request is in one
+	// or the other. authProviders remembers each credential's provider for
+	// the provider scopes.
 	perf          map[string]map[int64]*perfBucket
+	perfDaily     map[string]map[string]*perfBucket
 	authProviders map[string]string
 	// traces follows recent inbound requests that had a failed attempt.
 	traces   map[string]*traceState
 	meta     map[string]*sessionMeta
 	backfill *historyFile
-	dirty    bool
+	// changes counts mutations and saved is the count the stats file holds;
+	// the tally needs saving while they differ.
+	changes uint64
+	saved   uint64
+	// persistOff stops every save after the stats file failed to load, so a
+	// near-empty tally never replaces it.
+	persistOff bool
+	// flushMu serializes whole flushes, from snapshot to rename, so an older
+	// snapshot never replaces a newer one. It is taken before mu.
+	flushMu sync.Mutex
+	// saveFile writes a snapshot to the stats file path.
+	saveFile func(path string, data []byte) error
 	nowFunc  func() time.Time
 	// machineName maps a client address to a short machine name. It must not
 	// block.
@@ -138,10 +164,13 @@ func newStore() *Store {
 		hourly:        make(map[string]map[int64]*Counters),
 		daily:         make(map[string]map[string]*Counters),
 		sessions:      make(map[string]*Session),
+		accountDaily:  make(map[string]map[string]*Counters),
 		perf:          make(map[string]map[int64]*perfBucket),
+		perfDaily:     make(map[string]map[string]*perfBucket),
 		authProviders: make(map[string]string),
 		traces:        make(map[string]*traceState),
 		meta:          make(map[string]*sessionMeta),
+		saveFile:      writeFileAtomic,
 		nowFunc:       time.Now,
 		machineName:   tailnetname.MachineName,
 	}
@@ -243,6 +272,7 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 	provider := providerOf(record.Provider, authID)
 	day := at.In(location).Format(dayLayout)
 	s.dailyBucketLocked(day, provider).add(delta)
+	s.accountDayLocked(authID, day).add(delta)
 	s.recordPerfLocked(authID, provider, hourStart, recordTiming{
 		traceID: strings.TrimSpace(record.TraceID),
 		at:      at,
@@ -250,7 +280,7 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 		failed:  record.Failed,
 		ttft:    record.TTFT,
 		latency: record.Latency,
-		output:  delta.Output,
+		tokens:  delta,
 	})
 
 	if sessionID := strings.TrimSpace(record.SessionID); sessionID != "" {
@@ -302,8 +332,11 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 		}
 		session.Counters.add(delta)
 	}
-	s.dirty = true
+	s.markDirtyLocked()
 }
+
+// markDirtyLocked records that the tally changed since the last save.
+func (s *Store) markDirtyLocked() { s.changes++ }
 
 func (s *Store) dailyBucketLocked(day, provider string) *Counters {
 	providers := s.daily[day]
@@ -315,6 +348,21 @@ func (s *Store) dailyBucketLocked(day, provider string) *Counters {
 	if bucket == nil {
 		bucket = &Counters{}
 		providers[provider] = bucket
+	}
+	return bucket
+}
+
+// accountDayLocked returns a credential's usage for one local day.
+func (s *Store) accountDayLocked(authID, day string) *Counters {
+	days := s.accountDaily[authID]
+	if days == nil {
+		days = make(map[string]*Counters)
+		s.accountDaily[authID] = days
+	}
+	bucket := days[day]
+	if bucket == nil {
+		bucket = &Counters{}
+		days[day] = bucket
 	}
 	return bucket
 }
@@ -365,6 +413,19 @@ type Summary struct {
 	History     History                   `json:"history"`
 	Range       string                    `json:"range"`
 	Performance Performance               `json:"performance"`
+	UsageRange  UsageRange                `json:"usage_range"`
+}
+
+// UsageRange is usage per credential over the selected range, in the same
+// buckets as the performance series. Accounts with no usage in the range are
+// left out, and Ranges are the range keys the dashboard offers for usage,
+// measured on the earliest history day.
+type UsageRange struct {
+	Range         string                `json:"range"`
+	BucketSeconds int64                 `json:"bucket_seconds"`
+	Starts        []time.Time           `json:"starts"`
+	Accounts      map[string][]Counters `json:"accounts"`
+	Ranges        []string              `json:"ranges"`
 }
 
 // History is the long view: one entry per day with usage, oldest first, from
@@ -386,7 +447,7 @@ type HistoryDay struct {
 }
 
 // AccountSummary holds one credential's totals, its last 48 hourly buckets
-// and its last 14 local days.
+// and its last 14 local days. Longer per-credential ranges are in UsageRange.
 type AccountSummary struct {
 	Today   Counters     `json:"today"`
 	Last24h Counters     `json:"last_24h"`
@@ -419,13 +480,21 @@ func (s *Store) Summary(sessionLimit int) Summary {
 
 // SummaryFor builds the dashboard view with performance over window.
 func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
+	return s.SummaryForSelection(sessionLimit, window, nil, nil)
+}
+
+// SummaryForSelection is SummaryFor plus a performance scope named
+// SelectionScope that merges the credentials in ids. Ids that the tally has
+// not seen and known does not list are ignored, and only the first
+// MaxSelectionIDs count. Without a known id there is no SelectionScope.
+func (s *Store) SummaryForSelection(sessionLimit int, window Window, ids, known []string) Summary {
 	now := s.nowFunc()
 	startOfDay := bucketStart(now, now.Location(), 24)
 	hourBounds := localBounds(now, 1, 48)
-	firstDay := startOfDay.AddDate(0, 0, -(accountDays - 1))
-	dayIndex := make(map[string]int, accountDays)
-	for i := 0; i < accountDays; i++ {
-		dayIndex[firstDay.AddDate(0, 0, i).Format(dayLayout)] = i
+	dayStarts := dayBounds(now, accountDays, 1)
+	dates := make([]string, accountDays)
+	for i := range dates {
+		dates[i] = dayStarts[i].Format(dayLayout)
 	}
 
 	s.mu.Lock()
@@ -445,15 +514,18 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 		for i := range hourly {
 			hourly[i].Start = hourBounds[i]
 		}
+		// The daily view reads the per-credential daily tally, which holds the
+		// same requests as the hourly buckets and outlives them.
 		daily := make([]DayBucket, accountDays)
+		days := s.accountDaily[authID]
 		for i := range daily {
-			daily[i].Date = firstDay.AddDate(0, 0, i).Format(dayLayout)
+			daily[i].Date = dates[i]
+			if counters := days[dates[i]]; counters != nil {
+				daily[i].Counters = *counters
+			}
 		}
 		for hourUnix, bucket := range buckets {
 			start := time.Unix(hourUnix, 0)
-			if index, ok := dayIndex[start.In(now.Location()).Format(dayLayout)]; ok {
-				daily[index].Counters.add(*bucket)
-			}
 			if !start.Before(startOfDay) {
 				account.Today.add(*bucket)
 			}
@@ -481,7 +553,8 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 	summary.Totals["last_7d"] = week
 	summary.History = s.historyLocked(now)
 	summary.Range = window.Key
-	summary.Performance = s.performanceLocked(now, window)
+	summary.Performance = s.performanceLocked(now, window, s.knownSelectionLocked(ids, known))
+	summary.UsageRange = s.usageRangeLocked(now, window, summary.History.Days)
 
 	sessions := make([]Session, 0, len(s.sessions))
 	for _, session := range s.sessions {
@@ -493,6 +566,56 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 	}
 	summary.Sessions = sessions
 	return summary
+}
+
+// usageRangeLocked builds per-credential usage for window ending at now. Day
+// sized buckets read the per-credential daily tally, shorter ones the hourly
+// buckets; both hold the same requests, so only one is read. days is the
+// history, which sets where "all" starts and whether 180d is offered.
+func (s *Store) usageRangeLocked(now time.Time, window Window, days []HistoryDay) UsageRange {
+	loc := now.Location()
+	dates := make([]string, len(days))
+	for i, day := range days {
+		dates[i] = day.Date
+	}
+	first, _ := earliestDateStart(dates, loc)
+	bounds, bucketLength := window.span(now, first)
+	count := len(bounds) - 1
+	usage := UsageRange{
+		Range:         window.Key,
+		BucketSeconds: int64(bucketLength / time.Second),
+		Starts:        bounds[:count],
+		Accounts:      make(map[string][]Counters),
+		Ranges:        availableRanges(now, first),
+	}
+	add := func(authID string, at time.Time, counters *Counters) {
+		index, ok := boundsIndex(bounds, at)
+		if !ok {
+			return
+		}
+		series := usage.Accounts[authID]
+		if series == nil {
+			series = make([]Counters, count)
+			usage.Accounts[authID] = series
+		}
+		series[index].add(*counters)
+	}
+	if window.daily() {
+		for authID, dates := range s.accountDaily {
+			for date, counters := range dates {
+				if noon, ok := dateNoon(date, loc); ok {
+					add(authID, noon, counters)
+				}
+			}
+		}
+		return usage
+	}
+	for authID, buckets := range s.hourly {
+		for hourUnix, counters := range buckets {
+			add(authID, time.Unix(hourUnix, 0), counters)
+		}
+	}
+	return usage
 }
 
 // sessionViewLocked copies a session for Summary and fills in the derived
@@ -585,37 +708,48 @@ func (s *Store) historyLocked(now time.Time) History {
 	return history
 }
 
+// hourlyCutoff is the oldest hour start the hourly usage buckets keep: the
+// earliest bucket start of every view read from them, and never later than
+// hourlyRetention before now. A window that crosses the change back from
+// summer time is an hour longer than its usual length.
+func hourlyCutoff(now time.Time) time.Time {
+	cutoff := now.Add(-hourlyRetention)
+	if first := localBounds(now, 1, 48)[0]; first.Before(cutoff) {
+		cutoff = first
+	}
+	for _, window := range windows {
+		if window.daily() {
+			continue
+		}
+		if bounds, _ := window.span(now, time.Time{}); bounds[0].Before(cutoff) {
+			cutoff = bounds[0]
+		}
+	}
+	return cutoff
+}
+
 func (s *Store) pruneLocked(now time.Time) {
-	hourCutoff := now.Add(-hourlyRetention).Unix()
+	hourCutoff := hourlyCutoff(now).Unix()
 	for authID, buckets := range s.hourly {
 		for hourUnix := range buckets {
 			if hourUnix < hourCutoff {
 				delete(buckets, hourUnix)
-				s.dirty = true
+				s.markDirtyLocked()
 			}
 		}
 		if len(buckets) == 0 {
 			delete(s.hourly, authID)
 		}
 	}
-	perfCutoff := now.Add(-perfRetention).Unix()
-	for authID, buckets := range s.perf {
-		for hourUnix := range buckets {
-			if hourUnix < perfCutoff {
-				delete(buckets, hourUnix)
-				s.dirty = true
-			}
-		}
-		if len(buckets) == 0 {
-			delete(s.perf, authID)
-		}
+	if s.rollUpPerfLocked(now.Add(-perfRetention)) {
+		s.markDirtyLocked()
 	}
 	s.pruneSessionMetaLocked(now)
 	sessionCutoff := now.Add(-sessionRetention)
 	for id, session := range s.sessions {
 		if session.LastSeen.Before(sessionCutoff) {
 			delete(s.sessions, id)
-			s.dirty = true
+			s.markDirtyLocked()
 		}
 	}
 	if len(s.sessions) > maxSessions {
@@ -627,52 +761,138 @@ func (s *Store) pruneLocked(now time.Time) {
 		for _, session := range sessions[maxSessions:] {
 			delete(s.sessions, session.ID)
 		}
-		s.dirty = true
+		s.markDirtyLocked()
 	}
 }
 
-// Flush writes the tally to disk when it changed since the last write.
+// Flush writes the tally to disk when it changed since the last save. Flushes
+// run one at a time, and the tally counts as saved only once the new file is
+// in place, so a failed write is retried by the next flush.
 func (s *Store) Flush() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
-	if s.path == "" || !s.dirty {
+	if s.path == "" || s.persistOff {
 		s.mu.Unlock()
 		return nil
 	}
 	s.pruneLocked(s.nowFunc())
+	if s.changes == s.saved {
+		s.mu.Unlock()
+		return nil
+	}
+	generation := s.changes
 	data, errMarshal := json.Marshal(fileState{
 		Version:       statsFileVersion,
 		Hourly:        s.hourly,
 		Daily:         s.daily,
 		Sessions:      s.sessions,
 		Perf:          s.perf,
+		PerfDaily:     s.perfDaily,
 		AuthProviders: s.authProviders,
 		SessionMeta:   s.meta,
+		AccountDaily:  s.accountDaily,
 	})
 	path := s.path
-	s.dirty = false
+	save := s.saveFile
 	s.mu.Unlock()
 	if errMarshal != nil {
 		return errMarshal
 	}
-
-	tmp := path + ".tmp"
-	if errWrite := os.WriteFile(tmp, data, 0o600); errWrite != nil {
-		return errWrite
+	// Records that arrive while the file is written raise changes past
+	// generation, so the tally stays unsaved until the next flush.
+	if errSave := save(path, data); errSave != nil {
+		return errSave
 	}
-	return os.Rename(tmp, path)
+	s.mu.Lock()
+	s.saved = generation
+	s.mu.Unlock()
+	return nil
+}
+
+// writeFileAtomic writes data to a temporary file next to path, syncs it and
+// renames it over path, so path holds either the old or the new data.
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	file, errOpen := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if errOpen != nil {
+		return errOpen
+	}
+	_, errWrite := file.Write(data)
+	if errWrite == nil {
+		errWrite = file.Sync()
+	}
+	if errClose := file.Close(); errWrite == nil {
+		errWrite = errClose
+	}
+	if errWrite == nil {
+		errWrite = os.Rename(tmp, path)
+	}
+	if errWrite != nil {
+		if errRemove := os.Remove(tmp); errRemove != nil && !os.IsNotExist(errRemove) {
+			log.Warnf("usagestats: remove %s: %v", filepath.Base(tmp), errRemove)
+		}
+	}
+	return errWrite
+}
+
+// failLoadLocked handles a stats file that exists but could not be read or
+// parsed. It copies the file aside first and then turns saving off for this
+// process, so the original is never replaced by a near-empty tally.
+func (s *Store) failLoadLocked(errLoad error) {
+	name := filepath.Base(s.path)
+	backup := s.path + ".corrupt-" + s.nowFunc().UTC().Format("20060102T150405.000000000Z")
+	errCopy := copyNewFile(s.path, backup)
+	s.persistOff = true
+	if errCopy != nil {
+		log.Errorf("usagestats: cannot load %s: %v; copying it aside failed: %v; usage stats will not be saved until restart", name, errLoad, errCopy)
+		return
+	}
+	log.Errorf("usagestats: cannot load %s: %v; copied it to %s; usage stats will not be saved until restart", name, errLoad, filepath.Base(backup))
+}
+
+// copyNewFile copies src to dst, which must not exist yet. A partial copy is
+// removed.
+func copyNewFile(src, dst string) error {
+	in, errOpen := os.Open(src)
+	if errOpen != nil {
+		return errOpen
+	}
+	defer func() {
+		if errClose := in.Close(); errClose != nil {
+			log.Warnf("usagestats: close %s: %v", filepath.Base(src), errClose)
+		}
+	}()
+	out, errCreate := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errCreate != nil {
+		return errCreate
+	}
+	_, errCopy := io.Copy(out, in)
+	if errCopy == nil {
+		errCopy = out.Sync()
+	}
+	if errClose := out.Close(); errCopy == nil {
+		errCopy = errClose
+	}
+	if errCopy != nil {
+		if errRemove := os.Remove(dst); errRemove != nil && !os.IsNotExist(errRemove) {
+			log.Warnf("usagestats: remove %s: %v", filepath.Base(dst), errRemove)
+		}
+	}
+	return errCopy
 }
 
 func (s *Store) loadLocked() {
 	data, errRead := os.ReadFile(s.path)
 	if errRead != nil {
 		if !os.IsNotExist(errRead) {
-			log.Warnf("usagestats: read %s: %v", filepath.Base(s.path), errRead)
+			s.failLoadLocked(fmt.Errorf("read: %w", errRead))
 		}
 		return
 	}
 	var state fileState
 	if errUnmarshal := json.Unmarshal(data, &state); errUnmarshal != nil {
-		log.Warnf("usagestats: parse %s: %v", filepath.Base(s.path), errUnmarshal)
+		s.failLoadLocked(fmt.Errorf("parse: %w", errUnmarshal))
 		return
 	}
 	for authID, buckets := range state.Hourly {
@@ -707,13 +927,35 @@ func (s *Store) loadLocked() {
 			}
 		}
 		if len(state.Hourly) > 0 {
-			s.dirty = true
+			s.markDirtyLocked()
 		}
 	}
 	for day, providers := range state.Daily {
 		for provider, bucket := range providers {
 			if bucket != nil {
 				s.dailyBucketLocked(day, provider).add(*bucket)
+			}
+		}
+	}
+	if state.AccountDaily == nil {
+		// Stats files from before the per-credential daily tally: rebuild it
+		// from the hourly buckets, which hold the same requests.
+		location := s.nowFunc().Location()
+		for authID, buckets := range state.Hourly {
+			for hour, bucket := range buckets {
+				if bucket == nil {
+					continue
+				}
+				day := time.Unix(hour, 0).In(location).Format(dayLayout)
+				s.accountDayLocked(authID, day).add(*bucket)
+				s.markDirtyLocked()
+			}
+		}
+	}
+	for authID, days := range state.AccountDaily {
+		for day, bucket := range days {
+			if bucket != nil {
+				s.accountDayLocked(authID, day).add(*bucket)
 			}
 		}
 	}
@@ -733,11 +975,28 @@ func (s *Store) loadLocked() {
 				continue
 			}
 			bucket.validate()
+			if state.Version < 3 && !bucket.hasTokens() {
+				// Timing buckets from before version 3 have no token sums. The
+				// hourly usage bucket with the same key holds the same requests.
+				if counters := state.Hourly[authID][hour]; counters != nil {
+					bucket.addTokens(*counters)
+					s.markDirtyLocked()
+				}
+			}
 			if existing := target[hour]; existing != nil {
 				existing.add(bucket)
 			} else {
 				target[hour] = bucket
 			}
+		}
+	}
+	for authID, days := range state.PerfDaily {
+		for day, bucket := range days {
+			if bucket == nil {
+				continue
+			}
+			bucket.validate()
+			s.perfDayLocked(authID, day).add(bucket)
 		}
 	}
 	for authID, provider := range state.AuthProviders {

@@ -260,7 +260,7 @@ func TestPerformanceSeriesBucketsPerRange(t *testing.T) {
 			t.Fatalf("%s: provider scopes claude %+v codex %+v", tc.key, perf.Scopes["claude"], perf.Scopes["codex"])
 		}
 	}
-	if _, ok := LookupWindow("30d"); ok {
+	if _, ok := LookupWindow("90d"); ok {
 		t.Fatal("unknown range accepted")
 	}
 }
