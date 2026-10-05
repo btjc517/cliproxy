@@ -23,13 +23,15 @@ type MeterSeries struct {
 	Start         time.Time `json:"start"`
 	StepSeconds   int64     `json:"step_seconds"`
 	WindowSeconds int64     `json:"window_seconds,omitempty"`
-	// Used is the used share in thousandths at the end of each step, or null
-	// before the first reading. The last step contains now.
+	// Used is the used share in thousandths at Start + i*step, or null before
+	// the first reading. The last point is at or before now; Utilization is now.
 	Used []*int `json:"used"`
 	// Utilization and ResetAt are the meter now, after any reset since the last reading.
 	Utilization float64   `json:"utilization"`
 	ResetAt     time.Time `json:"reset_at,omitempty"`
 	FirstAt     time.Time `json:"first_at"`
+	// LastAt is the latest reading; a meter with none for a while is idle.
+	LastAt time.Time `json:"last_at"`
 	// BurnPerHour is the recent fill rate the scorer uses, as a share per hour.
 	BurnPerHour *float64 `json:"burn_per_hour,omitempty"`
 	// Burned is the share used between BurnedSince and now, counting usage
@@ -92,13 +94,14 @@ func meterSeries(meter Meter, samples []MeterSample, now time.Time) MeterSeries 
 		Utilization:   effective.Utilization,
 		ResetAt:       effective.ResetAt,
 		FirstAt:       samples[0].At,
+		LastAt:        samples[len(samples)-1].At,
 	}
 	if !wasReset {
 		if rate, known := burnRate(samples, now, burnLookback); known {
 			series.BurnPerHour = &rate
 		}
 	}
-	series.Burned, series.BurnedSince = burnedSince(samples, now.Add(-burnedSpan))
+	series.Burned, series.BurnedSince = burnedSince(meter, samples, now.Add(-burnedSpan))
 
 	start := now.Add(-span).Truncate(step)
 	series.Start = start
@@ -107,11 +110,8 @@ func meterSeries(meter Meter, samples []MeterSample, now time.Time) MeterSeries 
 	next := 0
 	var last *MeterSample
 	for i := 0; i < steps; i++ {
-		end := start.Add(time.Duration(i+1) * step)
-		if end.After(now) {
-			end = now
-		}
-		for next < len(samples) && !samples[next].At.After(end) {
+		at := start.Add(time.Duration(i) * step)
+		for next < len(samples) && !samples[next].At.After(at) {
 			last = &samples[next]
 			next++
 		}
@@ -119,7 +119,7 @@ func meterSeries(meter Meter, samples []MeterSample, now time.Time) MeterSeries 
 			continue
 		}
 		used := last.Utilization
-		if resetBetween(meter, last.At, end) {
+		if resetBetween(meter, last.At, at) {
 			used = 0
 		}
 		value := int(math.Round(used * 1000))
@@ -157,21 +157,20 @@ func resetBetween(meter Meter, from, to time.Time) bool {
 	return to.Sub(from) >= meter.Window
 }
 
-// resetDrop is how far a reading must fall below the highest one since the
-// last reset to count as a reset. Replies that finish out of order report a
-// point or two lower than the one before; that is not a reset.
-const resetDrop = 0.03
-
 // burnedSince sums how much of the meter was used from since to the last
-// sample. After a reset the new reading counts in full. It returns the start
+// sample. After a reset, known from the meter's window or from a drop of more
+// than meterResetDrop, the new reading counts in full. It returns the start
 // actually covered: since, or the first reading.
-func burnedSince(samples []MeterSample, since time.Time) (float64, time.Time) {
+func burnedSince(meter Meter, samples []MeterSample, since time.Time) (float64, time.Time) {
 	begin := sort.Search(len(samples), func(i int) bool { return !samples[i].At.Before(since) })
 	covered := since
-	if begin > 0 {
-		// The reading just before the span is its baseline.
+	switch {
+	case begin < len(samples) && samples[begin].At.Equal(since):
+		// A reading exactly at the start is its own baseline.
+	case begin > 0:
+		// Otherwise the reading just before the span is the baseline.
 		begin--
-	} else if len(samples) > 0 {
+	case len(samples) > 0:
 		covered = samples[0].At
 	}
 	if begin >= len(samples) {
@@ -181,7 +180,7 @@ func burnedSince(samples []MeterSample, since time.Time) (float64, time.Time) {
 	for i := begin + 1; i < len(samples); i++ {
 		u := samples[i].Utilization
 		switch {
-		case u < high-resetDrop:
+		case u < high-meterResetDrop || resetBetween(meter, samples[i-1].At, samples[i].At):
 			total += u
 			high = u
 		case u > high:

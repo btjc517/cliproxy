@@ -117,10 +117,33 @@ func TestBurnedIgnoresRepliesThatFinishOutOfOrder(t *testing.T) {
 		{At: now.Add(-1 * time.Hour), Utilization: 0.01}, // a real reset
 		{At: now, Utilization: 0.03},
 	}
-	burned, since := burnedSince(samples, now.Add(-24*time.Hour))
+	burned, since := burnedSince(Meter{Name: "7d"}, samples, now.Add(-24*time.Hour))
 	// 0.14 to 0.16 is 0.02, then 0.01 and 0.02 after the reset.
 	if math.Abs(burned-0.05) > 1e-9 || !since.Equal(now.Add(-4*time.Hour)) {
 		t.Fatalf("burned %v since %s, want 0.05 since the first reading", burned, since)
+	}
+}
+
+func TestBurnedCountsAKnownResetAndAReadingAtTheStart(t *testing.T) {
+	now := routerTestNow
+	weekly := Meter{Name: "7d", Window: 7 * 24 * time.Hour, ResetAt: now.Add(-2*time.Hour + 7*24*time.Hour)}
+	// 10% before the 14:00 reset, 30% at the next reading: 30 points used since the reset.
+	samples := []MeterSample{
+		{At: now.Add(-3 * time.Hour), Utilization: 0.10},
+		{At: now.Add(-1 * time.Hour), Utilization: 0.30},
+	}
+	if burned, _ := burnedSince(weekly, samples, now.Add(-24*time.Hour)); math.Abs(burned-0.30) > 1e-9 {
+		t.Errorf("across a known reset burned %v, want 0.30", burned)
+	}
+	// A reading exactly at the start of the span is the baseline, not the one before it.
+	samples = []MeterSample{
+		{At: now.Add(-25 * time.Hour), Utilization: 0.10},
+		{At: now.Add(-24 * time.Hour), Utilization: 0.80},
+		{At: now, Utilization: 0.90},
+	}
+	burned, since := burnedSince(Meter{Name: "7d"}, samples, now.Add(-24*time.Hour))
+	if math.Abs(burned-0.10) > 1e-9 || !since.Equal(now.Add(-24*time.Hour)) {
+		t.Errorf("burned %v since %s, want 0.10 since a day ago", burned, since)
 	}
 }
 

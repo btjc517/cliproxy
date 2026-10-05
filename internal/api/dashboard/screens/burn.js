@@ -2,12 +2,14 @@
 // day with where it is heading, tokens and requests by account, and how fast
 // each account is using them.
 import {
-  S, esc, fmt, int, clock, day, weekdayTime, resetShort, logo, email, accounts, tokens, hourly,
+  S, esc, fmt, int, clock, day, weekdayTime, resetShort, logo, email, accounts, tokens, hourly, validTime,
   table, barChart, bindChart, tipRows, warnState, meterCell, menu, seg, icon, dayKey, isToday,
 } from "../core.js";
 import { ACCOUNT_COLORS } from "./common.js";
 
 const HOUR = 3600e3;
+const IDLE_AFTER = 90 * 60e3; // the router's burn lookback: no reading for this long is idle
+const ms = (iso) => Date.parse(validTime(iso)) || 0;
 
 // Account names for legends and tooltips; an email on both providers gets the provider added.
 function accountLabels() {
@@ -29,22 +31,24 @@ export function trajectory(ser, now = Date.now()) {
   if (!ser) return null;
   const leftNow = Math.max(0, 100 - (Number(ser.utilization) || 0) * 100);
   const perHour = ser.burn_per_hour != null ? Math.max(0, ser.burn_per_hour * 100) : null;
-  const since = Date.parse(ser.burned_since) || now;
+  const since = ms(ser.burned_since) || now;
   const coveredH = Math.max(0, (now - since) / HOUR);
   const burned = Math.max(0, (Number(ser.burned) || 0) * 100);
   // A weekly meter is projected at its average over the last day, idle hours
-  // included; a 5-hour meter at its recent rate, which is none when idle.
+  // included; a 5-hour meter at its recent rate, which is zero once it has
+  // had no reading for a while and unknown before that.
+  const idle = now - ms(ser.last_at) > IDLE_AFTER;
   let rate = null;
   if (ser.long) rate = coveredH >= 3 ? burned / coveredH : perHour;
-  else rate = perHour != null ? perHour : coveredH >= 1 ? 0 : null;
-  const reset = Date.parse(ser.reset_at) || 0;
+  else rate = perHour != null ? perHour : idle ? 0 : null;
+  const reset = ms(ser.reset_at);
   let runsOut = 0, leftAtReset = null;
   if (rate != null && reset > now) {
     const hours = (reset - now) / HOUR;
     if (rate > 0 && leftNow / rate < hours) runsOut = now + (leftNow / rate) * HOUR;
     leftAtReset = Math.max(0, leftNow - rate * hours);
   }
-  return { long: !!ser.long, leftNow, perHour, burned, since, coveredH, rate, reset, runsOut, leftAtReset };
+  return { long: !!ser.long, idle, leftNow, perHour, burned, since, coveredH, rate, reset, runsOut, leftAtReset };
 }
 
 export const pctRate = (v) => (v == null ? "–" : v > 0 && v < 1 ? v.toFixed(1).replace(/\.0$/, "") + "%" : Math.round(v) + "%");
@@ -52,7 +56,7 @@ export const pctRate = (v) => (v == null ? "–" : v > 0 && v < 1 ? v.toFixed(1)
 // The rate a projection uses: a share a day for a weekly meter, an hour for a 5-hour one.
 export function rateText(tr) {
   if (!tr || tr.rate == null) return "";
-  if (!tr.long && tr.perHour == null) return "Idle";
+  if (!tr.long && tr.perHour == null && tr.idle) return "Idle";
   return tr.long ? pctRate(tr.rate * 24) + " a day" : pctRate(tr.rate) + " an hour";
 }
 
@@ -81,6 +85,7 @@ function lineChart({ id, n, lines, nowX, height = 160, labels }) {
       d += `${pen ? "L" : "M"}${X(i)} ${Y(v)} `;
       pen = true;
     });
+    if (d && l.nowV != null) d += `L${X(nowX)} ${Y(l.nowV)}`;
     const p = l.proj && l.proj.length > 1 ? l.proj.map((q, k) => `${k ? "L" : "M"}${X(q.x)} ${Y(q.v)}`).join(" ") : "";
     return `${d ? `<path d="${d}" stroke="${l.color}" />` : ""}${p ? `<path d="${p}" stroke="${l.color}" stroke-dasharray="4 4" class="proj" />` : ""}`;
   }).join("");
@@ -151,12 +156,15 @@ export function allowanceChart({ key, ids, long }) {
     };
   }
   const step = list[0].ser.step_seconds * 1000;
-  const gridStart = Date.parse(list[0].ser.start);
-  // Start at the day (or hour) of the first reading while history is shorter than the grid.
-  let first = Math.min(...list.map((x) => Date.parse(x.ser.first_at) || gridStart));
-  first = Math.floor(first / HOUR) * HOUR;
-  if (long) for (let k = 0; k < 24 && clock(first) !== "00:00"; k++) first -= HOUR;
-  const offset = Math.max(0, Math.round((first - gridStart) / step));
+  const gridStart = ms(list[0].ser.start);
+  // Labels mark where the proxy's local day (week view) or 4-hour block
+  // (5-hour view) changes between grid points, so odd time zones still get them.
+  const block = (t) => (long ? dayKey(t) : dayKey(t) + Math.floor(Number(clock(t).slice(0, 2)) / 4));
+  // Start at the block of the first reading while history is shorter than the grid.
+  const firstAt = Math.min(...list.map((x) => ms(x.ser.first_at) || gridStart));
+  let first = gridStart + Math.max(0, Math.floor((firstAt - gridStart) / step)) * step;
+  while (first > gridStart && block(first - step) === block(first)) first -= step;
+  const offset = Math.round((first - gridStart) / step);
   const start = gridStart + offset * step;
   const nowX = (now - start) / step;
   let end = now + (long ? 24 * HOUR : 5 * HOUR);
@@ -181,15 +189,10 @@ export function allowanceChart({ key, ids, long }) {
   });
 
   const labels = [];
-  if (long) {
-    // Local midnights, named by the day that starts there.
-    for (let t = Math.ceil(start / HOUR) * HOUR; t <= end; t += HOUR) {
-      if (clock(t) === "00:00") labels.push({ i: xOf(t), text: day(t).split(" ").slice(0, 2).join(" ") });
-    }
-  } else {
-    for (let t = Math.ceil(start / HOUR) * HOUR; t <= end; t += HOUR) {
-      if (Number(clock(t).slice(0, 2)) % 4 === 0) labels.push({ i: xOf(t), text: clock(t) });
-    }
+  for (let i = 0; i < n; i++) {
+    const t = start + i * step;
+    if (block(t) === block(t - step)) continue;
+    labels.push({ i, text: long ? day(t).split(" ").slice(0, 2).join(" ") : clock(t).slice(0, 2) + ":00" });
   }
   const near = (i) => Math.abs(i - nowX) < (n - 1) * 0.06;
   const xl = labels.filter((l) => !near(l.i));
@@ -297,7 +300,7 @@ export function allowanceBurnTable(ids, long) {
       href,
       cells: [
         logo(a?.provider), email(a?.email || id), meterCell(tr.leftNow),
-        dayCell, tr.perHour == null ? `<span class="muted">Idle</span>` : pctRate(tr.perHour),
+        dayCell, tr.perHour == null ? `<span class="muted">${tr.idle ? "Idle" : "–"}</span>` : pctRate(tr.perHour),
         outlook(tr), tr.reset ? esc(resetShort(tr.reset)) : "",
       ],
     };
