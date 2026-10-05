@@ -6,6 +6,7 @@ export const S = {
   error: "",
   key: "",
   dataRange: "",     // window the loaded payload covers
+  dataScope: "",     // accounts merged into performance.scopes.selection, comma-joined
   ui: {},            // per-screen choices that survive a refresh
   hold: 0,           // >0 while a menu, drawer or hover would be lost by a re-render
 };
@@ -61,13 +62,46 @@ export function bindRangeTabs(root, screen) {
   });
 }
 
+// ---------- account selection ----------
+
+// The ids the chips pick under ui key `key`, when they leave some but not all
+// of the pressed provider's accounts; otherwise none.
+export function pickedIds(key) {
+  const prov = S.ui[key] || "all";
+  if (prov === "all") return [];
+  const all = accounts().filter((a) => a.provider === prov).map((a) => a.id);
+  const picked = (S.ui[key + "Pick"]?.[prov] || []).filter((id) => all.includes(id));
+  return picked.length > 0 && picked.length < all.length ? picked : [];
+}
+
+export const scopeParam = (ids) => [...ids].sort().join(",");
+
+// The selection the current screen needs merged by the backend, so its
+// percentiles stay exact. Only Overview and Performance show percentiles, and
+// only a backend that lists its ranges knows the scope parameter.
+export function wantScope() {
+  if (!Array.isArray(S.data?.summary?.performance?.ranges)) return "";
+  const a = location.hash.replace(/^#\/?/, "").split("/")[0];
+  const key = a === "performance" ? "pfProv" : !a || a === "overview" ? "ovProv" : "";
+  return key ? scopeParam(pickedIds(key)) : "";
+}
+
+// The backend's merged scope for exactly these accounts over this range, or null.
+export function selectionPerf(ids, range) {
+  if (S.dataRange !== range || !S.dataScope || S.dataScope !== scopeParam(ids)) return null;
+  return S.data?.summary?.performance?.scopes?.selection || null;
+}
+
 // ---------- per-viewer preferences (chart formats, Performance layout) ----------
+
+// Stored preferences are trusted only as plain objects.
+export const plainObject = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : null);
 
 let prefsCache = null;
 export function prefs() {
   if (prefsCache) return prefsCache;
-  try { prefsCache = JSON.parse(localStorage.getItem(PREFS_STORE) || "{}"); } catch (e) { prefsCache = {}; }
-  if (!prefsCache || typeof prefsCache !== "object") prefsCache = {};
+  try { prefsCache = plainObject(JSON.parse(localStorage.getItem(PREFS_STORE) || "{}")); } catch (e) { prefsCache = null; }
+  if (!prefsCache) prefsCache = {};
   return prefsCache;
 }
 export function setPref(key, value) {
@@ -77,9 +111,9 @@ export function setPref(key, value) {
   try { localStorage.setItem(PREFS_STORE, JSON.stringify(p)); } catch (e) { /* storage blocked */ }
 }
 // Every time chart is a line unless this viewer switched it to bars.
-export const chartFormat = (id) => (prefs().charts?.[id] === "bars" ? "bars" : "line");
+export const chartFormat = (id) => (plainObject(prefs().charts)?.[id] === "bars" ? "bars" : "line");
 export function setChartFormat(id, f) {
-  const charts = { ...(prefs().charts || {}) };
+  const charts = { ...(plainObject(prefs().charts) || {}) };
   if (f === "bars") charts[id] = "bars";
   else delete charts[id];
   setPref("charts", charts);
@@ -87,18 +121,21 @@ export function setChartFormat(id, f) {
 
 let started = 0, applied = 0;
 
-// Loads /dashboard/data for the current route. A reply that arrives after a
-// newer one, or after the route moved to another window, is dropped.
+// Loads /dashboard/data for the current route, with the picked accounts when
+// the screen needs them merged. A reply that arrives after a newer one, or
+// after the route moved to another window or selection, is dropped.
 export async function fetchData() {
   const want = wantRange();
+  const scope = wantScope();
   const my = ++started;
-  const res = await fetch("/dashboard/data?range=" + encodeURIComponent(want), { cache: "no-store" });
+  const res = await fetch("/dashboard/data?range=" + encodeURIComponent(want) + (scope ? "&scope=" + encodeURIComponent(scope) : ""), { cache: "no-store" });
   if (!res.ok) throw new Error("Could not read the proxy (" + res.status + ")");
   const data = await res.json();
-  if (my < applied || want !== wantRange()) return;
+  if (my < applied || want !== wantRange() || scope !== wantScope()) return;
   applied = my;
   S.data = data;
   S.dataRange = want;
+  S.dataScope = scope;
   S.readAt = Date.now();
 }
 

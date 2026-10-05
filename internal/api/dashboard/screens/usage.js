@@ -23,51 +23,80 @@ const RANGE_TEXT = { "24h": "Last 24 hours", "7d": "Last 7 days", "30d": "Last m
 
 // ---------- history ----------
 
-// Token totals by day, keyed YYYY-MM-DD: the proxy history for a provider,
-// or the picked accounts' own counters when only some are picked. Those are
-// the last 14 days, plus whatever daily usage_range the screen has loaded.
-function dayMap(sc) {
-  const out = new Map();
-  if (sc.some) {
-    const ur = S.data?.summary?.usage_range;
-    const daily = ur && Number(ur.bucket_seconds) === 86400 && Array.isArray(ur.starts) ? ur.starts.map((s) => dayKey(s)) : [];
-    const covered = new Set(daily);
-    for (const id of sc.ids) {
-      for (const d of S.data?.summary?.accounts?.[id]?.daily || []) {
-        if (!d.date || covered.has(d.date)) continue;
-        out.set(d.date, add(out.get(d.date) || EMPTY(), d));
-      }
-      (ur?.accounts?.[id] || []).forEach((b, i) => { if (daily[i]) out.set(daily[i], add(out.get(daily[i]) || EMPTY(), b)); });
-    }
-    return out;
-  }
-  for (const d of S.data?.summary?.history?.days || []) {
-    const t = EMPTY();
-    for (const [p, v] of Object.entries(d.providers || {})) if (sc.prov === "all" || p === sc.prov) add(t, v);
-    out.set(d.date, t);
-  }
-  return out;
-}
-
-function periods(map, sc) {
+// The History section's data. map: token totals by day (YYYY-MM-DD) for the
+// days known in full; known(day) says whether a day is known; sums: Today,
+// This week, This month and Lifetime, each null when the data cannot give it.
+function history(sc) {
   const today = dayKey(Date.now());
   const t = parseDay(today);
   const monday = new Date(t); monday.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7));
-  const first = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1));
-  const sums = { today: EMPTY(), week: EMPTY(), month: EMPTY(), life: EMPTY() };
-  for (const [k, v] of map) {
-    add(sums.life, v);
-    if (k === today) add(sums.today, v);
-    if (k >= keyOf(monday)) add(sums.week, v);
-    if (k >= keyOf(first)) add(sums.month, v);
+  const from = { today, week: keyOf(monday), month: keyOf(new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1))) };
+
+  if (!sc.some) {
+    // The proxy keeps every day per provider, so a missing day had no usage.
+    const map = new Map();
+    for (const d of S.data?.summary?.history?.days || []) {
+      const v = EMPTY();
+      for (const [p, x] of Object.entries(d.providers || {})) if (sc.prov === "all" || p === sc.prov) add(v, x);
+      map.set(d.date, v);
+    }
+    const sum = (k0) => { const v = EMPTY(); for (const [k, x] of map) if (k >= k0) add(v, x); return v; };
+    const sums = { today: sum(from.today), week: sum(from.week), month: sum(from.month), life: sum("") };
+    const hl = S.data?.summary?.history?.lifetime;
+    if (sc.prov === "all" && hl && tokens(hl) > tokens(sums.life)) sums.life = { ...EMPTY(), ...hl };
+    return { map, known: () => true, sums, partial: false };
   }
-  const hl = S.data?.summary?.history?.lifetime;
-  if (sc.prov === "all" && hl && tokens(hl) > tokens(sums.life)) sums.life = { ...EMPTY(), ...hl };
-  return sums;
+
+  // Picked accounts: only per-account data. Days are known from the last 14
+  // daily counters and from range buckets of a day or less; period totals can
+  // also come from range buckets of any size that start on the period's first day.
+  const ids = sc.ids;
+  const map = new Map();
+  const accts = S.data?.summary?.accounts || {};
+  const covered = new Set();
+  for (const a of Object.values(accts)) for (const d of a?.daily || []) if (d.date) covered.add(d.date);
+  for (const k of covered) map.set(k, EMPTY());
+  for (const id of ids) for (const d of accts[id]?.daily || []) if (d.date) add(map.get(d.date), d);
+
+  const ur = S.data?.summary?.usage_range;
+  const starts = Array.isArray(ur?.starts) ? ur.starts.map((x) => Date.parse(x)) : [];
+  const step = (Number(ur?.bucket_seconds) || 0) * 1000;
+  const bucket = (i) => { const v = EMPTY(); for (const id of ids) add(v, ur.accounts?.[id]?.[i]); return v; };
+  // A bucket that starts at midnight starts its day.
+  const startsDay = (i) => dayKey(starts[i] - 1) !== dayKey(starts[i]);
+  if (starts.length && step && step <= DAY) {
+    const byDay = new Map();
+    starts.forEach((x, i) => { const k = dayKey(x); byDay.set(k, add(byDay.get(k) || EMPTY(), bucket(i))); });
+    const first = dayKey(starts[0]);
+    for (const [k, v] of byDay) if (k > first || startsDay(0)) map.set(k, v);
+  }
+
+  const fromDays = (k0) => {
+    const v = EMPTY();
+    for (let k = k0; k <= today; k = keyOf(new Date(parseDay(k).getTime() + DAY))) {
+      if (!map.has(k)) return null;
+      add(v, map.get(k));
+    }
+    return v;
+  };
+  const fromBuckets = (k0) => {
+    const i = starts.findIndex((x, j) => dayKey(x) === k0 && startsDay(j));
+    if (i < 0) return null;
+    const v = EMPTY();
+    for (let j = i; j < starts.length; j++) add(v, bucket(j));
+    return v;
+  };
+  const period = (k0) => fromDays(k0) || fromBuckets(k0);
+  let life = null;
+  if (ur?.range === "all" && starts.length && S.dataRange === "all") {
+    life = EMPTY();
+    starts.forEach((x, i) => add(life, bucket(i)));
+  }
+  return { map, known: (k) => map.has(k), sums: { today: period(from.today), week: period(from.week), month: period(from.month), life }, partial: true };
 }
 
 // 53 weeks, Monday first, ending this week.
-function weeks(map) {
+function weeks(map, known) {
   const today = dayKey(Date.now());
   const t = parseDay(today);
   const monday = new Date(t); monday.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7));
@@ -78,7 +107,7 @@ function weeks(map) {
     for (let d = 0; d < 7; d++) {
       const dt = new Date(start); dt.setUTCDate(start.getUTCDate() + w * 7 + d);
       const k = keyOf(dt);
-      days.push({ k, v: map.get(k) || null, future: k > today });
+      days.push({ k, v: map.get(k) || null, future: k > today, unknown: k <= today && !known(k) });
     }
     cols.push(days);
   }
@@ -96,7 +125,7 @@ function heat(cols) {
   const lv = levels(cols);
   const grid = cols.map((w, wi) => `<div class="wk">${w.map((d, di) => {
     const v = d.v ? tokens(d.v) : 0;
-    return `<i class="${d.future ? "future" : "l" + lv(v)}" data-w="${wi}" data-d="${di}"></i>`;
+    return `<i class="${d.future ? "future" : d.unknown ? "na" : "l" + lv(v)}" data-w="${wi}" data-d="${di}"></i>`;
   }).join("")}</div>`).join("");
   let lastMonth = "", lastAt = -9;
   const months = cols.map((w, wi) => {
@@ -117,8 +146,12 @@ const breakdown = (t) => [
   { k: "New input", v: fmt(t.input_tokens) },
 ];
 
-function historySub(map, cols) {
-  const first = [...map.entries()].filter(([, v]) => tokens(v) > 0).map(([k]) => k).sort()[0];
+function historySub(h, cols) {
+  if (h.partial) {
+    const first = [...h.map.keys()].sort()[0];
+    return first ? `Daily from ${longDay(first)} for the picked accounts` : "No daily data for the picked accounts";
+  }
+  const first = [...h.map.entries()].filter(([, v]) => tokens(v) > 0).map(([k]) => k).sort()[0];
   if (!first) return "No activity yet";
   return first < cols[0][0].k ? "Every day of the last year" : `Every day since ${monthName(first)}`;
 }
@@ -270,13 +303,13 @@ export function view() {
 
   const tok = tokensSection(sc, range, colorOf);
 
-  const map = dayMap(sc);
-  const sums = periods(map, sc);
-  const cols = weeks(map);
-  const fig = (label, x) => `<div><span class="muted">${label}</span><span class="bignum"><span class="v">${fmt(tokens(x))}</span></span></div>`;
+  const hist = history(sc);
+  const sums = hist.sums;
+  const cols = weeks(hist.map, hist.known);
+  const fig = (label, x) => `<div><span class="muted">${label}</span><span class="bignum"><span class="v">${x ? fmt(tokens(x)) : "–"}</span></span></div>`;
   const scale = `<div class="scale">Less <i style="background:var(--surface-2)"></i><i style="background:color-mix(in srgb, var(--chart-1) 18%, transparent)"></i><i style="background:var(--chart-p50)"></i><i style="background:var(--chart-p90)"></i><i style="background:var(--chart-1)"></i><i style="background:var(--chart-p99)"></i> More</div>`;
   const historySec = `<div class="activity">
-    <div class="uhead"><div class="t"><b>History</b><span class="muted">${esc(historySub(map, cols))}</span></div></div>
+    <div class="uhead"><div class="t"><b>History</b><span class="muted">${esc(historySub(hist, cols))}</span></div></div>
     <div class="figsrow"><div class="four">${fig("Today", sums.today)}${fig("This week", sums.week)}${fig("This month", sums.month)}${fig("Lifetime", sums.life)}</div>${scale}</div>
     ${heat(cols)}
   </div>`;
@@ -314,7 +347,9 @@ export function view() {
           const host = wrap.parentElement;
           if (!tip) { tip = document.createElement("div"); tip.className = "tip"; tip.style.width = "232px"; host.appendChild(tip); S.hold++; }
           const x = d.v || EMPTY();
-          tip.innerHTML = `<div class="h"><span>${esc(longDay(d.k))}</span><span>${fmt(tokens(x))}</span></div>${tipRows(breakdown(x))}`;
+          tip.innerHTML = d.unknown
+            ? `<div class="h"><span>${esc(longDay(d.k))}</span><span>–</span></div><div class="s">No daily data for the picked accounts</div>`
+            : `<div class="h"><span>${esc(longDay(d.k))}</span><span>${fmt(tokens(x))}</span></div>${tipRows(breakdown(x))}`;
           const hr = host.getBoundingClientRect(), cr = cell.getBoundingClientRect();
           const left = Math.max(0, Math.min(cr.left - hr.left - 116 + 8, hr.width - 232));
           let y = cr.top - hr.top - tip.offsetHeight - 8;

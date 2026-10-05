@@ -4,7 +4,7 @@
 import {
   S, esc, int, fmt, ms, icon, logo, email, status, warnState, perf, rate, rateText, pctText, tokens, cacheReuse, sumUsage, tipRows,
   table, menu, closeMenu, timeChart, bindChart, chartFormat, setChartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle,
-  prefs, setPref, rangeTabs, bindRangeTabs, screenRange,
+  prefs, setPref, plainObject, rangeTabs, bindRangeTabs, screenRange,
 } from "../core.js";
 import { providerTabs, bindProviderTabs, accountChips, scopeOf, perfFor, readAt, gapNote, legendHtml } from "./common.js";
 
@@ -28,13 +28,14 @@ const CHECK = `<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true
 
 // ---------- the viewer's layout ----------
 
+// The stored layout, cleaned: known metrics only, each once, missing ones at the end.
 function layout() {
-  const p = prefs().performance || {};
+  const p = plainObject(prefs().performance) || {};
   const known = METRICS.map((m) => m.id);
-  const saved = Array.isArray(p.order) ? p.order.filter((id) => known.includes(id)) : [];
+  const saved = Array.isArray(p.order) ? [...new Set(p.order.filter((id) => known.includes(id)))] : [];
   const order = [...saved, ...known.filter((id) => !saved.includes(id))];
   const on = new Set(Array.isArray(p.on) ? p.on.filter((id) => known.includes(id)) : DEFAULT_ON);
-  return { order, on, table: !!p.table };
+  return { order, on, table: p.table === true };
 }
 function saveLayout(l) { setPref("performance", { order: l.order, on: [...l.on], table: l.table }); }
 
@@ -315,7 +316,7 @@ function customise(anchor) {
     if (focusId) box.querySelector(`[data-row="${focusId}"]`)?.focus();
   };
   anchor.classList.add("on");
-  menu(anchor, [{ html: `<div data-pop></div>`, mount: (el) => draw(el) }], { width: 280, cls: "pop", gap: 6, onClose: () => { anchor.classList.remove("on"); rerender(); } });
+  menu(anchor, [{ html: `<div data-pop></div>`, mount: (el) => draw(el) }], { width: 280, cls: "pop", gap: 6, onClose: () => anchor.classList.remove("on") });
 }
 
 export function view() {

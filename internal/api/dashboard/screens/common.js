@@ -3,7 +3,7 @@
 import {
   S, esc, fmt, int, ms, pctText, rateText, clock, day, seen, icon, logo, tabs, table, figure, timeChart, bindChart, tipRows,
   accounts, hourly, tokens, cacheReuse, perf, sumUsage, names, sessionTitle, sessionHref, warnState,
-  chartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle, whenShort,
+  chartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle, whenShort, wantScope, selectionPerf,
 } from "../core.js";
 
 export const PROVIDERS = [
@@ -12,7 +12,11 @@ export const PROVIDERS = [
   { id: "codex", label: "Codex" },
 ];
 
-const rerender = () => window.dispatchEvent(new Event("dash:render"));
+// Redraws, then loads again when the picked accounts need a new merged scope.
+const rerender = () => {
+  window.dispatchEvent(new Event("dash:render"));
+  if (S.data && wantScope() !== S.dataScope) window.dispatchEvent(new Event("dash:refresh"));
+};
 
 export function providerTabs(key, counts) {
   const active = S.ui[key] || "all";
@@ -65,35 +69,31 @@ export function bindProviderTabs(root, key) {
 
 // ---------- performance for a set of accounts ----------
 
-const PCT_KEYS = ["ttft_p50_ms", "ttft_p90_ms", "latency_p50_ms", "latency_p90_ms", "throughput_p50", "throughput_p10"];
 const SUM_KEYS = ["requests", "failed", "failovers", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"];
 
 // The stored scope when the accounts match one (all, a provider, one
-// account). Otherwise the accounts combined: counts add up, and percentiles
-// are a request-weighted mean of each account's, which is close but not exact.
+// account), or the backend's merged selection for the picked accounts.
+// Percentiles cannot be combined from per-account percentiles, so until the
+// selection arrives (or on a backend without it) counts and tokens are added
+// up here and every percentile is left out, which shows as "–".
 export function perfFor(sc, range = "24h") {
   if (sc.prov === "all") return perf("all", range);
   if (!sc.some) return perf(sc.prov, range);
+  const sel = selectionPerf(sc.ids, range);
+  if (sel) return sel;
   if (sc.ids.length === 1) return perf(sc.ids[0], range);
   const list = sc.ids.map((id) => perf(id, range)).filter(Boolean);
   if (!list.length) return null;
   const has = (k, o) => o && Object.prototype.hasOwnProperty.call(o, k);
-  const wmean = (rows, f) => {
-    let w = 0, s = 0;
-    for (const r of rows) { const v = Number(f(r)) || 0, n = Number(r.requests) || 0; if (v > 0 && n > 0) { s += v * n; w += n; } }
-    return w ? s / w : 0;
-  };
-  const pct = (k) => ({ p50: wmean(list, (p) => p[k]?.p50), p90: wmean(list, (p) => p[k]?.p90), p99: wmean(list, (p) => p[k]?.p99), p10: wmean(list, (p) => p[k]?.p10) });
   const len = Math.max(0, ...list.map((p) => (p.series || []).length));
   const series = [];
   for (let i = 0; i < len; i++) {
     const pts = list.map((p) => { const s = p.series || []; return s[s.length - len + i]; }).filter(Boolean);
     const b = { start: pts[0]?.start };
     for (const k of SUM_KEYS) if (pts.some((x) => has(k, x))) b[k] = pts.reduce((t, x) => t + (Number(x[k]) || 0), 0);
-    for (const k of PCT_KEYS) if (pts.some((x) => has(k, x))) b[k] = wmean(pts, (x) => x[k]);
     series.push(b);
   }
-  const out = { requests: 0, failed: 0, ttft_ms: pct("ttft_ms"), latency_ms: pct("latency_ms"), throughput: pct("throughput"), series };
+  const out = { requests: 0, failed: 0, ttft_ms: null, latency_ms: null, throughput: null, series, partial: true };
   for (const p of list) { out.requests += Number(p.requests) || 0; out.failed += Number(p.failed) || 0; }
   if (list.some((p) => has("failovers", p))) out.failovers = list.reduce((t, p) => t + (Number(p.failovers) || 0), 0);
   return out;
@@ -168,6 +168,8 @@ function buildChart({ chartId, ids, p, stackBy, metric }) {
   const nm = names();
   const format = chartFormat(chartId);
   if (metric === "ttft" || metric === "throughput") {
+    // Picked accounts whose merged percentiles have not arrived: nothing exact to draw.
+    if (p?.partial) return { series: [], html: `<div class="nochart" style="height:160px">–</div>`, tip: () => "" };
     const series = (p?.series || []).slice(-24);
     if (!series.length) return { series: [], html: `<div class="empty">No timing data yet. It fills in as requests arrive.</div>`, tip: () => "" };
     const isT = metric === "ttft";

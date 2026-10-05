@@ -1,4 +1,4 @@
-// Overview timeline: each account's weekly allowance left over a 31-day
+// Overview timeline: each account's weekly allowance left over a 30-day
 // window that starts at the start of yesterday. History comes from the
 // allowance series, the rest is projected at the current burn: the weekly
 // cycle repeats from each reset until the plan ends.
@@ -9,7 +9,7 @@ import { allowanceSeries, trajectory } from "./burn.js";
 import { ACCOUNT_COLORS } from "./common.js";
 
 const HOUR = 3600e3, WEEK = 7 * 864e5;
-const DAYS = 31;          // yesterday, today and 29 days ahead
+const DAYS = 30;          // yesterday, today and 28 days ahead
 const STEP = 30 * 60e3;   // availability is sampled every half hour
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -71,7 +71,7 @@ function model(a, now, fr) {
   const tr = trajectory(ser, now);
   const p = plan(a);
   const m = { a, st, kind: st.kind, plan: p, pts: [], outs: [], resets: [], now: null, drawEnd: 0 };
-  m.endDay = p.ends ? midnight(p.ends) : Infinity;
+  // The plan runs through the whole of its last day: this is its one end boundary.
   m.endAt = p.ends ? midnight(addDays(p.ends, 1)) : Infinity;
   if (st.kind === "off" || st.kind === "blocked" || st.kind === "error") return m;
 
@@ -95,9 +95,11 @@ function model(a, now, fr) {
   }
   if (run) m.outs.push(run);
 
-  // The projection: down at the current rate, back to 100% at each reset.
+  // The projection: down at the current rate, back to 100% at each weekly
+  // reset. A retry time only decides when the account can be used again
+  // (see available), it never refills the week.
   const rate = w?.notStarted ? 0 : tr && tr.rate != null ? tr.rate : w?.burn || 0; // percent an hour
-  let R = st.kind === "usedup" ? st.until || w?.reset || 0 : w?.reset || tr?.reset || 0;
+  let R = w?.reset || tr?.reset || 0;
   if (w?.notStarted || R <= now) R = 0;
   m.now = v0;
   m.pts.push({ t: now, v: v0 });
@@ -111,8 +113,8 @@ function model(a, now, fr) {
       m.outs.push([out, stop]);
     }
     m.pts.push({ t: stop, v: Math.max(0, v - (rate * (stop - t0)) / HOUR) });
-    // A reset refills the week, unless it falls on or after the plan's last day.
-    if (!R || stop !== R || R >= m.endDay) { m.drawEnd = stop; break; }
+    // A reset refills the week, unless the plan has ended by then.
+    if (!R || stop !== R || R >= m.endAt) { m.drawEnd = stop; break; }
     m.resets.push(R);
     m.pts.push({ t: R, v: 100 });
     t0 = R; v = 100; R += WEEK;
@@ -140,11 +142,14 @@ function valueAt(m, t) {
   return b.t === a.t ? b.v : a.v + ((b.v - a.v) * (t - a.t)) / (b.t - a.t);
 }
 
-// Can the account take a session at time t?
+// Can the account take a session at time t? From now on, an account that is
+// resting or unavailable stays out until its known recovery time, and for the
+// whole window when there is none.
 function available(m, t, now) {
   const k = m.kind;
   if (k === "off" || k === "blocked" || k === "error" || t >= m.endAt) return false;
-  if (t >= now && (k === "usedup" || k === "limited") && m.st.until && t < m.st.until) return false;
+  if (t >= now && k === "limited" && !(m.st.until && t >= m.st.until)) return false;
+  if (t >= now && k === "usedup" && m.st.until && t < m.st.until) return false;
   if (k === "noreading") return true;
   const v = valueAt(m, t);
   if (v == null) return t < now ? k === "ready" : false;
@@ -215,13 +220,16 @@ function rowHtml(m, color, fr, now) {
     const cur = m.outs.find(([a, b]) => a <= now && b > now);
     const next = m.outs.find(([a]) => a > now && a < fr.end);
     if (cur) over += warnLab(nowX, k === "usedup" ? "Used up" : "Out now");
-    else if (next) over += warnLab(fr.x(next[0]), "Out " + (next[0] - now < 6 * 864e5 ? weekdayTime(next[0]) : day(next[0])));
+    else {
+      if (k === "limited") over += warnLab(nowX, m.st.text || "Unavailable");
+      if (next) over += warnLab(fr.x(next[0]), "Out " + (next[0] - now < 6 * 864e5 ? weekdayTime(next[0]) : day(next[0])));
+    }
     const r = m.resets.find((t) => t > now && t < fr.end);
     if (r) over += lab(fr.x(r), `${icon("reset", 12)}<span>Resets ${esc(r - now < 6 * 864e5 ? weekdayTime(r) : day(r) + " " + clock(r))}</span>`);
   }
-  if (m.plan.ends && m.endDay < fr.end) {
-    const at = m.pts.length ? m.drawEnd : Math.max(now, m.endDay);
-    if (at >= fr.start && at < fr.end) over += lab(fr.x(at), `Plan ends ${esc(planDay(m.plan.ends))}`);
+  if (m.plan.ends && m.endAt <= fr.end) {
+    const at = Math.max(now, m.endAt);
+    if (at >= fr.start && at <= fr.end) over += lab(fr.x(at), `Plan ends ${esc(planDay(m.plan.ends))}`);
   }
   for (const r of renewals(m.plan, fr)) {
     const x = fr.x(midnight(r));

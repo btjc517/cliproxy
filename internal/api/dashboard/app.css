@@ -458,6 +458,7 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .heat i.l4 { background: var(--chart-1); }
 .heat i.l5 { background: var(--chart-p99); }
 .heat i.future { background: transparent; }
+.heat i.na { background: transparent; box-shadow: inset 0 0 0 1px var(--hairline); }
 .heat i.hot { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--fg); }
 .heatx { position: relative; height: 16px; color: var(--muted-fg); margin-top: 8px; min-width: max-content; }
 .heatx span { position: absolute; white-space: nowrap; }
