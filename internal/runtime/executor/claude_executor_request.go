@@ -1647,7 +1647,8 @@ func isClaudeOAuthToken(apiKey string) bool {
 }
 
 type claudeMCPAliasOptions struct {
-	secret string
+	secret              string
+	inheritedReverseMap map[string]string
 }
 
 func resolveClaudeMCPAliasOptions(ctx context.Context) claudeMCPAliasOptions {
@@ -1662,9 +1663,24 @@ func resolveClaudeMCPAliasOptions(ctx context.Context) claudeMCPAliasOptions {
 }
 
 // prepareClaudeOAuthToolNamesForUpstream applies one request-local MCP symbol
-// table across every Claude OAuth request path.
+// table across every Claude OAuth request path. Thread continuations seed this
+// table with the snapshot belonging to their previous response.
 func prepareClaudeOAuthToolNamesForUpstream(body []byte, mcpAliases claudeMCPAliasOptions) ([]byte, map[string]string) {
 	return remapOAuthToolNamesWithOptions(body, mcpAliases)
+}
+
+// prepareClaudeOAuthThreadToolNamesForUpstream also handles native thread deltas.
+func prepareClaudeOAuthThreadToolNamesForUpstream(body, original []byte, options claudeMCPAliasOptions) ([]byte, map[string]string, error) {
+	if gjson.GetBytes(original, "thread.type").String() == "continue" && !gjson.GetBytes(body, "tools").Exists() {
+		previousID := gjson.GetBytes(original, "thread.previous_message_id").String()
+		names, ok := helps.LoadClaudeThreadToolNames(options.secret, previousID)
+		if !ok {
+			return nil, nil, claudeMCPAliasRestoreError{statusErr{code: http.StatusBadRequest, msg: "Claude thread tool mappings are unavailable. Start a fresh thread with the full conversation and tool definitions."}}
+		}
+		options.inheritedReverseMap = names
+	}
+	remapped, reverseMap := prepareClaudeOAuthToolNamesForUpstream(body, options)
+	return remapped, reverseMap, nil
 }
 
 func restoreClaudeOAuthToolNamesFromResponse(body []byte, reverseMap map[string]string) ([]byte, error) {
@@ -1686,7 +1702,7 @@ func restoreClaudeOAuthToolNamesFromStreamLine(line []byte, reverseMap map[strin
 // The returned map is keyed on the upstream name and maps to the client-supplied
 // original name. Callers MUST pass this map to the reverse
 // functions so only aliases allocated for this request are restored on the
-// response. A global reverse map would mix symbols from unrelated callers.
+// response. An unscoped global reverse map would mix symbols from unrelated callers.
 func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 	return remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "cpa-claude-mcp-default-caller"})
 }
@@ -1730,6 +1746,18 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 	forwardMap := make(map[string]string)
 	protectedNames := make(map[string]bool)
 	reservedNames := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+	// Only thread continuations without a tools field inherit a prior snapshot.
+	// Explicit tools, including an empty list, remain authoritative.
+	if !tools.Exists() {
+		for alias, original := range mcpAliases.inheritedReverseMap {
+			reverseMap[alias] = original
+			reservedNames[alias] = true
+			reservedNames[original] = true
+			if alias != original {
+				forwardMap[original] = alias
+			}
+		}
+	}
 	if tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			name := tool.Get("name").String()
@@ -2019,6 +2047,18 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 	forwardMap := make(map[string]string)
 	protectedNames := make(map[string]bool)
 	reservedNames := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+	// Only thread continuations without a tools field inherit a prior snapshot.
+	// Explicit tools, including an empty list, remain authoritative.
+	if !tools.Exists() {
+		for alias, original := range mcpAliases.inheritedReverseMap {
+			reverseMap[alias] = original
+			reservedNames[alias] = true
+			reservedNames[original] = true
+			if alias != original {
+				forwardMap[original] = alias
+			}
+		}
+	}
 	if tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			name := tool.Get("name").String()

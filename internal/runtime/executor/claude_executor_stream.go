@@ -257,9 +257,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForTranslation := body
 	bodyForUpstream := body
 	var oauthToolNamesReverseMap map[string]string
+	var threadToolNamesCaller string
 	if fp.MCPAlias && cloaked {
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx)
-		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, mcpAliases)
+		bodyForUpstream, oauthToolNamesReverseMap, err = prepareClaudeOAuthThreadToolNamesForUpstream(bodyForUpstream, originalPayload, mcpAliases)
+		if err != nil {
+			return nil, err
+		}
+		threadType := gjson.GetBytes(originalPayload, "thread.type").String()
+		if threadType == "create" || threadType == "continue" {
+			threadToolNamesCaller = mcpAliases.secret
+		}
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
 	if fp.ApplyCLIIdentity {
@@ -438,6 +446,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				line = e.restoreResponseModel(restoredLine, req.Model)
 				event.Write(line)
 				event.WriteByte('\n')
+				if upstreamCompleted {
+					helps.StoreClaudeThreadToolNames(threadToolNamesCaller, upstreamMessageID, oauthToolNamesReverseMap)
+				}
 				if len(bytes.TrimSpace(line)) == 0 {
 					if !flushEvent() {
 						emitCancellation(ctx.Err())
@@ -508,6 +519,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 			}
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			if upstreamCompleted {
+				helps.StoreClaudeThreadToolNames(threadToolNamesCaller, upstreamMessageID, oauthToolNamesReverseMap)
+			}
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
