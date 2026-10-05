@@ -98,7 +98,7 @@ func (s *RoutingState) Dashboard(auths []*Auth, now time.Time) RouterView {
 				Long:              meterIsLong(meter),
 			}
 			if !wasReset {
-				if rate, known := burnRate(account.History[meter.Name], now, burnLookback); known {
+				if rate, known := burnRate(account.History[meter.Name], now, meterBurnLookback(meter)); known {
 					meterView.BurnPerHour = &rate
 				}
 			}

@@ -480,6 +480,19 @@ func (s *RoutingState) activeSessions(now time.Time) map[string]int {
 // reset.
 const meterResetDrop = 0.03
 
+// longBurnLookback is the burn window for weekly-class meters. They report
+// whole points and move about half a point an hour, so 90 minutes of samples
+// often shows no rise at all.
+const longBurnLookback = 6 * time.Hour
+
+// meterBurnLookback returns how far back burnRate should look for a meter.
+func meterBurnLookback(meter *Meter) time.Duration {
+	if meterIsLong(meter) {
+		return longBurnLookback
+	}
+	return burnLookback
+}
+
 // burnRate estimates how fast a meter is filling, as utilization per hour,
 // from samples taken since the last reset within the lookback period. The rise
 // is measured to the highest reading, so a late, lower reply does not shrink

@@ -97,7 +97,7 @@ func meterSeries(meter Meter, samples []MeterSample, now time.Time) MeterSeries 
 		LastAt:        samples[len(samples)-1].At,
 	}
 	if !wasReset {
-		if rate, known := burnRate(samples, now, burnLookback); known {
+		if rate, known := burnRate(samples, now, meterBurnLookback(&meter)); known {
 			series.BurnPerHour = &rate
 		}
 	}

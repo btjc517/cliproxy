@@ -166,8 +166,9 @@ func TestMeterHistoryBeforeTheFirstReadingIsUnknown(t *testing.T) {
 	if math.Abs(week.Burned-0.05) > 1e-9 || !week.BurnedSince.Equal(now.Add(-5*time.Hour)) {
 		t.Errorf("burned %v since %s, want 0.05 since the first reading", week.Burned, week.BurnedSince)
 	}
-	// An idle meter has no recent rate.
-	if week.BurnPerHour != nil {
-		t.Errorf("burn per hour = %v, want none after an hour idle", *week.BurnPerHour)
+	// A weekly meter moves in whole points, so its rate looks back six hours:
+	// an hour without a new point is not idle. 5 points in 4 hours.
+	if week.BurnPerHour == nil || math.Abs(*week.BurnPerHour-0.0125) > 1e-9 {
+		t.Errorf("burn per hour = %v, want 0.0125 over the six-hour window", week.BurnPerHour)
 	}
 }

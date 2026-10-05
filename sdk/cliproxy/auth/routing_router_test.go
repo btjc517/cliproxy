@@ -223,6 +223,41 @@ func TestBurnRateIgnoresOutOfOrderReadings(t *testing.T) {
 	}
 }
 
+// TestWeeklyBurnUsesLongerLookback covers a weekly meter that moves one point
+// every two hours: 90 minutes of samples show no rise, six hours do.
+func TestWeeklyBurnUsesLongerLookback(t *testing.T) {
+	state := newTestRoutingState(routerTestNow)
+	seat := routerTestAuth("a-seat", "claude", "seat@example.com")
+	setMeter(state, seat.ID, "claude", Meter{Name: "7d", Utilization: 0.20, ResetAt: routerTestNow.Add(5 * 24 * time.Hour)})
+	setMeter(state, seat.ID, "claude", Meter{Name: "5h", Utilization: 0.30, ResetAt: routerTestNow.Add(2 * time.Hour)})
+	var weekly, short []MeterSample
+	for minutes := 360; minutes >= 0; minutes -= 10 {
+		at := routerTestNow.Add(-time.Duration(minutes) * time.Minute)
+		weekly = append(weekly, MeterSample{At: at, Utilization: 0.17 + float64((360-minutes)/120)*0.01})
+		short = append(short, MeterSample{At: at, Utilization: 0.30})
+	}
+	state.accounts[seat.ID].History["7d"] = weekly
+	state.accounts[seat.ID].History["5h"] = short
+
+	view := state.Dashboard([]*Auth{seat}, routerTestNow)
+	for _, meter := range view.Accounts[seat.ID].Meters {
+		burn := -1.0
+		if meter.BurnPerHour != nil {
+			burn = *meter.BurnPerHour
+		}
+		switch meter.Name {
+		case "7d":
+			if burn < 0.004 || burn > 0.006 {
+				t.Fatalf("weekly burn = %v, want about 0.005 an hour over six hours", burn)
+			}
+		case "5h":
+			if burn != 0 {
+				t.Fatalf("5-hour burn = %v, want 0 over the last 90 minutes", burn)
+			}
+		}
+	}
+}
+
 // TestScoredSelectorPrefersAllowanceAtRisk is the case soonest-reset gets
 // wrong: 3% left that resets in 6 hours is worth less than 80% left that
 // resets in 2 days.
