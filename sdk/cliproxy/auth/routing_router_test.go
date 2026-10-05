@@ -206,6 +206,23 @@ func TestBurnRateUsesSamplesSinceTheLastReset(t *testing.T) {
 	}
 }
 
+// TestBurnRateIgnoresOutOfOrderReadings covers replies that finish out of
+// order: a reading one point below the one before is not a reset, so the rate
+// still spans the whole hour.
+func TestBurnRateIgnoresOutOfOrderReadings(t *testing.T) {
+	samples := []MeterSample{
+		{At: routerTestNow.Add(-60 * time.Minute), Utilization: 0.40},
+		{At: routerTestNow.Add(-40 * time.Minute), Utilization: 0.42},
+		{At: routerTestNow.Add(-39 * time.Minute), Utilization: 0.41},
+		{At: routerTestNow.Add(-5 * time.Minute), Utilization: 0.50},
+		{At: routerTestNow, Utilization: 0.49},
+	}
+	rate, known := burnRate(samples, routerTestNow, burnLookback)
+	if !known || rate < 0.099 || rate > 0.101 {
+		t.Fatalf("rate = %v known=%v, want 0.1 an hour from 0.40 to the 0.50 high", rate, known)
+	}
+}
+
 // TestScoredSelectorPrefersAllowanceAtRisk is the case soonest-reset gets
 // wrong: 3% left that resets in 6 hours is worth less than 80% left that
 // resets in 2 days.
