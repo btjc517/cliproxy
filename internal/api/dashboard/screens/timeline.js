@@ -359,13 +359,13 @@ export function timeline(accts) {
       }
     });
     // Hover: date, time and percent left under the pointer.
-    let tip = null, guide = null, held = false;
+    let tip = null, guide = null, holding = false;
     const clear = () => {
       if (tip) tip.remove();
       if (guide) guide.remove();
       tip = guide = null;
-      if (held) S.hold = Math.max(0, S.hold - 1);
-      held = false;
+      if (holding) S.hold = Math.max(0, S.hold - 1);
+      holding = false;
     };
     tl.querySelectorAll("[data-tl-row]").forEach((area, idx) => {
       const m = rows[idx];
@@ -374,7 +374,7 @@ export function timeline(accts) {
         const t = fr.at((e.clientX - ar.left) / ar.width);
         const v = valueAt(m, t);
         if (v == null) return clear();
-        if (!held) { S.hold++; held = true; }
+        if (!holding) { S.hold++; holding = true; }
         if (!guide) { guide = document.createElement("i"); guide.className = "tl-guide"; }
         if (guide.parentElement !== area) area.appendChild(guide);
         guide.style.left = e.clientX - ar.left + "px";
