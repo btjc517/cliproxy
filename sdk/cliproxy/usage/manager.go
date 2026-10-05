@@ -370,7 +370,8 @@ func (m *Manager) Stop() {
 
 // StopAndWait stops accepting records and waits until every record queued
 // before the stop has reached the plugins, or until ctx ends. It returns
-// ctx.Err() when ctx ends first.
+// ctx.Err() when ctx ends first. A plugin must not call it from HandleUsage:
+// the dispatcher would wait for itself until ctx ends. Use Stop there.
 func (m *Manager) StopAndWait(ctx context.Context) error {
 	if m == nil {
 		return nil

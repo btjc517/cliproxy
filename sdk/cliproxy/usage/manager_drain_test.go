@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 )
 
 // gatedPlugin blocks inside the first delivery until gate is closed, so a test
@@ -51,18 +52,29 @@ func startBlocked(t *testing.T, records int) (*Manager, *gatedPlugin) {
 }
 
 func TestStopAndWaitDeliversEveryQueuedRecord(t *testing.T) {
-	m, plugin := startBlocked(t, 3)
-	result := make(chan int, 1)
-	go func() {
-		if err := m.StopAndWait(context.Background()); err != nil {
-			t.Errorf("StopAndWait() error = %v, want nil", err)
+	synctest.Test(t, func(t *testing.T) {
+		m, plugin := startBlocked(t, 3)
+		result := make(chan int, 1)
+		go func() {
+			if err := m.StopAndWait(context.Background()); err != nil {
+				t.Errorf("StopAndWait() error = %v, want nil", err)
+			}
+			result <- plugin.count()
+		}()
+		// Every goroutine is now blocked: the dispatcher inside the plugin, and
+		// StopAndWait either waiting or already returned.
+		synctest.Wait()
+		select {
+		case <-result:
+			close(plugin.gate) // let the dispatcher finish so the bubble can end
+			t.Fatalf("StopAndWait returned while a queued record was still held in a plugin")
+		default:
 		}
-		result <- plugin.count()
-	}()
-	close(plugin.gate)
-	if got := <-result; got != 3 {
-		t.Fatalf("records delivered when StopAndWait returned = %d, want 3", got)
-	}
+		close(plugin.gate)
+		if got := <-result; got != 3 {
+			t.Fatalf("records delivered when StopAndWait returned = %d, want 3", got)
+		}
+	})
 }
 
 func TestStopAndWaitWaitsWhileAPluginIsBusy(t *testing.T) {
