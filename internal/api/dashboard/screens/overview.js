@@ -4,6 +4,14 @@ import {
   providerTitle, sessions, isToday,
 } from "../core.js";
 import { providerTabs, bindProviderTabs, readAt, usageStrip, sessionTable } from "./common.js";
+import { allowanceSeries, trajectory } from "./burn.js";
+
+// A warning when the account's weekly allowance runs out before it resets, at this rate.
+function runningOut(acct) {
+  const tr = trajectory(allowanceSeries(acct.id, true));
+  if (!tr || !tr.runsOut) return "";
+  return warnState("Runs out " + (isToday(tr.runsOut) ? clock(tr.runsOut) : resetShort(tr.runsOut)), "sm");
+}
 
 function planEnding(acct, reset) {
   const p = plan(acct);
@@ -35,7 +43,7 @@ function accountColumn(acct, isNext) {
     if (week && week.notStarted) l1 = `<span class="t">New week</span>`;
     else l1 = week ? `<span class="t">${Math.round(left(week))}% left</span>` : `<span class="t muted">No reading yet</span>`;
     if (isNext) l1 += pill("Next");
-    end = planEnding(acct, week?.reset);
+    end = runningOut(acct) || planEnding(acct, week?.reset);
     l2 += reset(week?.reset);
   }
   return `<div class="acctcol"><div class="l1">${l1}${end ? `<span class="end">${end}</span>` : ""}</div><div class="l2">${l2}</div></div>`;

@@ -4,6 +4,7 @@ import {
   hourly, clock, table, menu, seg, barChart, bindChart, tipRows,
 } from "../core.js";
 import { providerTabs, bindProviderTabs, readAt } from "./common.js";
+import { overTime } from "./burn.js";
 
 const RANGES = [
   { id: "today", label: "Today", window: "today", days: 1 },
@@ -158,6 +159,7 @@ export function view() {
   const sums = periods(map, prov);
   const cols = weeks(map);
   const weekly = grain !== "daily" ? weeklyChart(cols, grain === "cumulative") : null;
+  const ot = overTime(accounts().filter((a) => prov === "all" || a.provider === prov).map((a) => a.id));
 
   const fig = (label, u) => `<div><span class="muted">${label}</span><span class="bignum"><span class="v">${fmt(tokens(u))}</span></span></div>`;
   const scale = `<div class="scale">Less <i style="background:var(--surface-2)"></i><i style="background:color-mix(in srgb, var(--chart-1) 18%, transparent)"></i><i style="background:var(--chart-p50)"></i><i style="background:var(--chart-p90)"></i><i style="background:var(--chart-1)"></i><i style="background:var(--chart-p99)"></i> More</div>`;
@@ -212,6 +214,7 @@ export function view() {
         <div class="figsrow"><div class="four">${fig("Today", sums.today)}${fig("This week", sums.week)}${fig("This month", sums.month)}${fig("Lifetime", sums.life)}</div>${grain === "daily" ? scale : ""}</div>
         ${grain === "daily" ? heat(cols) : weekly.html}
       </div>
+      ${ot.html}
       <div class="sec last">
         <div class="sech">${seg([{ id: "account", label: "By account" }, { id: "day", label: "By day" }], by, "data-by", "bare")}<span class="muted">${esc(range.label)}</span></div>
         ${tableHtml}
@@ -225,6 +228,7 @@ export function view() {
     mount(root) {
       const rerender = () => window.dispatchEvent(new Event("dash:render"));
       bindProviderTabs(root, "usProv");
+      ot.mount(root);
       root.querySelectorAll("[data-grain]").forEach((b) => { b.onclick = () => { S.ui.usGrain = b.dataset.grain; rerender(); }; });
       root.querySelectorAll("[data-by]").forEach((b) => { b.onclick = () => { S.ui.usBy = b.dataset.by; rerender(); }; });
       root.querySelectorAll(".reusecol").forEach((c) => { c.style.paddingLeft = "24px"; });

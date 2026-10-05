@@ -1,11 +1,19 @@
 // Account details: limits and plan, the last 24 hours, its active sessions.
 import {
   S, esc, icon, logo, accountById, status, limits, left, plan, planDay, planDaysAway, inDays, resetLong, clock,
-  modeMenu, planMenu, modeTitle, sessions, warnState,
+  modeMenu, planMenu, modeTitle, sessions, warnState, seg,
 } from "../core.js";
 import { usageStrip, sessionTable } from "./common.js";
+import { allowanceChart, allowanceSeries, trajectory, outlook, rateText } from "./burn.js";
 
-function limitBlock(title, item, st) {
+// "12% a day · Lasts to reset", or the warning when it runs out first.
+function burnLine(tr) {
+  if (!tr) return "";
+  const rate = rateText(tr);
+  return `<div class="sub">${rate ? esc(rate) + `<span class="dot">·</span>` : ""}${outlook(tr, { short: true })}</div>`;
+}
+
+function limitBlock(title, item, st, tr) {
   if (!item) {
     return `<div class="lim"><span class="muted">${title}</span><div class="bignum"><span class="v muted">–</span></div><div class="bar6"></div><div class="sub">No reading yet</div></div>`;
   }
@@ -18,7 +26,7 @@ function limitBlock(title, item, st) {
   return `<div class="lim"><span class="muted">${title}</span>
     <div class="bignum"><span class="v">${usedUp ? "Used up" : Math.round(p) + "%"}</span>${usedUp ? "" : `<span class="u">left</span>`}</div>
     <div class="bar6"><i style="width:${Math.round(p)}%"></i></div>
-    <div class="sub">${reset ? icon("reset", 14) + esc(resetLong(reset)) : "&nbsp;"}</div></div>`;
+    <div class="sub">${reset ? icon("reset", 14) + esc(resetLong(reset)) : "&nbsp;"}</div>${usedUp ? "" : burnLine(tr)}</div>`;
 }
 
 function planBlock(a) {
@@ -46,6 +54,8 @@ export function view(ctx) {
   const st = status(a);
   const lim = limits(a);
   const strip = usageStrip({ key: "acMetric", ids: [a.id], scope: a.id, stackBy: "none", legend: false });
+  const long = (S.ui.acWindow || "week") === "week";
+  const allowance = allowanceChart({ key: "acAllowance", ids: [a.id], long });
   const mine = sessions().filter((s) => (s.auth_ids || []).includes(a.id));
   const active = mine.filter((s) => Date.now() - Date.parse(s.last_seen) < 10 * 60e3);
   const stateLine = st.kind === "blocked" || st.kind === "error" ? `<div class="banner">${esc(st.text)}${st.detail && st.detail !== st.text ? ": " + esc(st.detail) : ""}</div>` : "";
@@ -60,7 +70,11 @@ export function view(ctx) {
     </div>
     <div class="body">
       ${stateLine}
-      <div class="limits">${limitBlock("Week", lim.week, st)}${limitBlock("5 hours", lim.short, st)}${planBlock(a)}</div>
+      <div class="limits">${limitBlock("Week", lim.week, st, trajectory(allowanceSeries(a.id, true)))}${limitBlock("5 hours", lim.short, st, trajectory(allowanceSeries(a.id, false)))}${planBlock(a)}</div>
+      <div class="activity">
+        <div class="head"><b>Allowance left</b>${seg([{ id: "week", label: "Week" }, { id: "5h", label: "5 hours" }], long ? "week" : "5h", "data-ac-window", "bare")}</div>
+        ${allowance.html}
+      </div>
       ${strip.html}
       <div class="sec last">
         <div class="sech">
@@ -74,6 +88,8 @@ export function view(ctx) {
     html,
     mount(root) {
       strip.mount(root);
+      allowance.mount(root);
+      root.querySelectorAll("[data-ac-window]").forEach((b) => { b.onclick = () => { S.ui.acWindow = b.dataset.acWindow; window.dispatchEvent(new Event("dash:render")); }; });
       root.querySelector("[data-mode]").onclick = (e) => modeMenu(e.currentTarget, a);
       root.querySelector("[data-more]").onclick = (e) => planMenu(e.currentTarget, a);
       const setPlan = root.querySelector("[data-plan]");
