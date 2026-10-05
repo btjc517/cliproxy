@@ -5,18 +5,85 @@ export const S = {
   readAt: 0,         // when it arrived
   error: "",
   key: "",
-  range: "24h",      // window chosen on the Performance screen
-  dataRange: "",     // window the loaded performance data covers
+  dataRange: "",     // window the loaded payload covers
   ui: {},            // per-screen choices that survive a refresh
   hold: 0,           // >0 while a menu, drawer or hover would be lost by a re-render
 };
 
 const KEY_STORE = "cliproxy-dashboard-key";
 const THEME_STORE = "cliproxy-dashboard-theme";
+const PREFS_STORE = "cliproxy-dashboard-prefs";
 try { S.key = localStorage.getItem(KEY_STORE) || ""; } catch (e) { /* storage blocked */ }
 
-// Only the Performance screen picks a window; every other screen shows 24 hours.
-export const wantRange = () => (location.hash.startsWith("#/performance") ? S.range : "24h");
+// ---------- time ranges ----------
+
+export const RANGE_LABELS = { "24h": "24 hours", "7d": "7 days", "30d": "1 month", "180d": "6 months", all: "All time" };
+const RANGE_DEFAULT = { usage: "7d", performance: "24h" };
+const RANGE_KEY = { usage: "usRange", performance: "pfRange" };
+
+// The ranges the backend says it can serve, in order. A backend without the
+// list knows only the original two.
+export function offeredRanges(screen) {
+  const list = screen === "usage" ? S.data?.summary?.usage_range?.ranges : S.data?.summary?.performance?.ranges;
+  const keys = Array.isArray(list) ? list.filter((k) => RANGE_LABELS[k]) : [];
+  return keys.length ? keys : ["24h", "7d"];
+}
+
+// The range a screen shows: its own choice while the backend offers it, else its default.
+export function screenRange(screen) {
+  const offered = offeredRanges(screen);
+  const pick = S.ui[RANGE_KEY[screen]];
+  if (pick && offered.includes(pick)) return pick;
+  const d = RANGE_DEFAULT[screen];
+  return offered.includes(d) ? d : offered[0];
+}
+
+// Usage and Performance each load their own range; every other screen shows 24 hours.
+export function wantRange() {
+  const h = location.hash;
+  if (h.startsWith("#/performance")) return screenRange("performance");
+  if (h.startsWith("#/usage")) return screenRange("usage");
+  return "24h";
+}
+
+export function rangeTabs(screen) {
+  const cur = screenRange(screen);
+  return `<div class="tabs" role="tablist" aria-label="Time range">${offeredRanges(screen).map((k) => `<button class="tab ${k === cur ? "on" : ""}" data-range="${k}" role="tab" aria-selected="${k === cur}">${esc(RANGE_LABELS[k])}</button>`).join("")}</div>`;
+}
+
+export function bindRangeTabs(root, screen) {
+  root.querySelectorAll("[data-range]").forEach((b) => {
+    b.onclick = () => {
+      S.ui[RANGE_KEY[screen]] = b.dataset.range;
+      window.dispatchEvent(new Event("dash:render"));
+      window.dispatchEvent(new Event("dash:refresh"));
+    };
+  });
+}
+
+// ---------- per-viewer preferences (chart formats, Performance layout) ----------
+
+let prefsCache = null;
+export function prefs() {
+  if (prefsCache) return prefsCache;
+  try { prefsCache = JSON.parse(localStorage.getItem(PREFS_STORE) || "{}"); } catch (e) { prefsCache = {}; }
+  if (!prefsCache || typeof prefsCache !== "object") prefsCache = {};
+  return prefsCache;
+}
+export function setPref(key, value) {
+  const p = prefs();
+  if (value === undefined) delete p[key];
+  else p[key] = value;
+  try { localStorage.setItem(PREFS_STORE, JSON.stringify(p)); } catch (e) { /* storage blocked */ }
+}
+// Every time chart is a line unless this viewer switched it to bars.
+export const chartFormat = (id) => (prefs().charts?.[id] === "bars" ? "bars" : "line");
+export function setChartFormat(id, f) {
+  const charts = { ...(prefs().charts || {}) };
+  if (f === "bars") charts[id] = "bars";
+  else delete charts[id];
+  setPref("charts", charts);
+}
 
 let started = 0, applied = 0;
 
@@ -176,6 +243,9 @@ const P = {
   close: "M6 18 18 6M6 6l12 12",
   external: "M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25",
   key: "M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z",
+  line: "M3 17.25 8.25 12l3.75 3.75 9-9",
+  table: "M6 4.5h12a2.25 2.25 0 0 1 2.25 2.25v10.5A2.25 2.25 0 0 1 18 19.5H6a2.25 2.25 0 0 1-2.25-2.25V6.75A2.25 2.25 0 0 1 6 4.5ZM3.75 9.75h16.5M3.75 14.625h16.5M9.75 9.75v9.75",
+  card: "M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z",
 };
 
 export function icon(name, size = 16, color = "var(--icon)") {
@@ -469,10 +539,10 @@ export function acctBadge(acct, nextId) {
   return "";
 }
 
-export function meterCell(pctLeft) {
+export function meterCell(pctLeft, color = "") {
   if (pctLeft == null) return "";
   const p = Math.max(0, Math.min(100, pctLeft));
-  return `<span class="metercell"><span class="meter"><i style="width:${p}%"></i></span><span class="${p <= 0 ? "muted" : ""}">${Math.round(p)}%</span></span>`;
+  return `<span class="metercell"><span class="meter"><i style="width:${p}%${color ? ";background:" + color : ""}"></i></span><span class="${p <= 0 ? "muted" : ""}">${Math.round(p)}%</span></span>`;
 }
 
 export function tabs(items, active, attr = "data-tab") {
@@ -505,17 +575,41 @@ export function figure(label, value, unit = "", opts = {}) {
   return `<${tag} class="fig ${opts.on ? "on" : ""} ${opts.metric ? "" : "static"}" ${opts.metric ? `data-metric="${esc(opts.metric)}"` : ""}><span class="l">${esc(label)}</span><span class="v">${value}${unit ? `<span class="u">${esc(unit)}</span>` : ""}</span>${opts.sub ? `<span class="muted">${opts.sub}</span>` : ""}</${tag}>`;
 }
 
-// Stacked bar chart. series: [{key, color, label}], cols: [{values: {key: n}, tip: html}], labels: [{i, text}]
-export function barChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], dense = false }) {
-  const totals = cols.map((c) => series.reduce((s, x) => s + (Number(c.values[x.key]) || 0), 0));
-  const max = niceMax(Math.max(0, ...totals));
+// ---------- time charts: lines by default, bars on request ----------
+
+// Shared axes for both forms: three y labels, gridlines at the top and middle.
+function chartFrame({ id, format, n, height, top, yfmt, plotHtml, xl, dense }) {
+  return `<div class="chart ${format === "bars" ? "" : "linechart"}" data-chart="${esc(id)}" data-format="${format}" data-n="${n}">
+    <div class="yax" style="height:${height}px"><span>${esc(yfmt(top))}</span><span>${esc(yfmt(top / 2))}</span><span>0</span></div>
+    <div class="plotwrap">
+      <div class="plot ${dense ? "dense" : ""}" style="height:${height}px">
+        <div class="grid" style="top:0"></div><div class="grid" style="top:${Math.round(height / 2)}px"></div>
+        ${plotHtml}
+      </div>
+      <div class="xax">${xl}</div>
+    </div>
+  </div>`;
+}
+
+const num = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
+
+// Stacked bar chart. series: [{key, color, label}], cols: [{values: {key: n}}], labels: [{i, text}].
+// overlay: each series is drawn from the baseline behind the smaller ones (percentiles), not stacked.
+export function barChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], dense = false, overlay = false, max = null }) {
   const n = cols.length;
-  const colsHtml = cols.map((c, i) => {
-    let segs = "";
+  const vals = cols.map((c) => series.map((s) => (s.gaps && c.empty ? 0 : num(c.values[s.key]) || 0)));
+  const totals = vals.map((v) => (overlay ? Math.max(0, ...v) : v.reduce((a, b) => a + b, 0)));
+  const top = max != null ? max : niceMax(Math.max(0, ...totals));
+  const colsHtml = vals.map((v, i) => {
+    let segs = "", below = 0;
+    const parts = series.map((s, k) => {
+      const h = overlay ? Math.max(0, v[k] - below) : v[k];
+      if (overlay) below = Math.max(below, v[k]);
+      return h;
+    });
     for (let k = series.length - 1; k >= 0; k--) {
-      const v = Number(c.values[series[k].key]) || 0;
-      if (!v) continue;
-      const h = Math.max(1, Math.round((v / max) * height));
+      if (!parts[k]) continue;
+      const h = Math.max(1, Math.round((Math.min(parts[k], top) / top) * height));
       segs += `<i style="height:${h}px;background:${series[k].color}"></i>`;
     }
     return `<div class="col" data-i="${i}">${segs}</div>`;
@@ -526,16 +620,63 @@ export function barChart({ id, series, cols, height = 140, yfmt = fmt, labels = 
     const left = l.i === 0 ? "0" : l.i === n - 1 ? "100%" : (pos * 100).toFixed(2) + "%";
     return `<span class="${cls}" style="left:${left}">${esc(l.text)}</span>`;
   }).join("");
-  return `<div class="chart" data-chart="${esc(id)}">
-    <div class="yax" style="height:${height}px"><span>${esc(yfmt(max))}</span><span>${esc(yfmt(max / 2))}</span><span>0</span></div>
-    <div class="plotwrap">
-      <div class="plot ${dense ? "dense" : ""}" style="height:${height}px">
-        <div class="grid" style="top:0"></div><div class="grid" style="top:${height / 2}px"></div>
-        ${colsHtml}
-      </div>
-      <div class="xax">${xl}</div>
-    </div>
-  </div>`;
+  return chartFrame({ id, format: "bars", n, height, top, yfmt, plotHtml: colsHtml, xl, dense });
+}
+
+// Values each line chart drew, for the hover dots.
+const drawn = new Map();
+
+// Line chart on the same axes. A series with `gaps` skips buckets marked
+// empty (no requests, so no latency to draw) and bridges them with a dotted
+// muted segment; other series draw every bucket, zeros included.
+// For a chart that runs past now (allowance left), nowX is now's fractional
+// grid index: each series then ends at {nowX, nowV} with its dot there, and
+// `proj` ([{x, v}], x fractional) is drawn dashed after it.
+function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], max = null, nowX = null }) {
+  const n = cols.length;
+  const vals = series.map((s) => cols.map((c) => (s.gaps && c.empty ? null : num(c.values[s.key]))));
+  const top = max != null ? max : niceMax(Math.max(0, ...vals.flat().filter((v) => v != null)));
+  const xf = (i) => (n > 1 ? i / (n - 1) : 0.5);
+  const X = (i) => (xf(i) * 1000).toFixed(2);
+  const Y = (v) => (height - (Math.max(0, Math.min(top, v)) / top) * height).toFixed(2);
+  const dot = (cls, x, v, color) => `<i class="${cls}" style="left:${(xf(x) * 100).toFixed(2)}%;top:${Y(v)}px;background:${color}"></i>`;
+  let paths = "", dots = "";
+  series.forEach((s, k) => {
+    const v = vals[k];
+    let solid = "", bridge = "", prev = -1;
+    for (let i = 0; i < n; i++) {
+      if (v[i] == null) continue;
+      if (prev === i - 1 && prev >= 0) solid += `L${X(i)} ${Y(v[i])} `;
+      else {
+        if (prev >= 0 && s.gaps) bridge += `M${X(prev)} ${Y(v[prev])} L${X(i)} ${Y(v[i])} `;
+        solid += `M${X(i)} ${Y(v[i])} `;
+      }
+      // A reading with no neighbour would draw nothing; give it a dot.
+      if (i < n - 1 && (i === 0 || v[i - 1] == null) && v[i + 1] == null && nowX == null) dots += dot("pt", i, v[i], s.color);
+      prev = i;
+    }
+    if (nowX != null && s.nowV != null) {
+      if (solid) solid += `L${X(nowX)} ${Y(s.nowV)}`;
+      dots += dot("nowdot", nowX, s.nowV, s.color);
+    } else if (nowX == null && n && v[n - 1] != null) dots += dot("nowdot", n - 1, v[n - 1], s.color);
+    if (bridge) paths += `<path class="bridge" d="${bridge}" />`;
+    if (solid) paths += `<path d="${solid}" stroke="${s.color}" />`;
+    if (s.proj && s.proj.length > 1) paths += `<path class="proj" d="${s.proj.map((q, j) => `${j ? "L" : "M"}${X(q.x)} ${Y(q.v)}`).join(" ")}" stroke="${s.color}" stroke-dasharray="4 4" />`;
+  });
+  drawn.set(id, { vals, colors: series.map((s) => s.color), top, height, n });
+  const xl = labels.map((l) => {
+    const pos = xf(l.i);
+    const cls = pos <= 0.02 ? "first" : pos >= 0.98 ? "last" : "";
+    return `<span class="${cls}" style="left:${(pos * 100).toFixed(2)}%">${esc(l.text)}</span>`;
+  }).join("");
+  const nowLine = nowX != null ? `<div class="nowline" style="left:${(xf(nowX) * 100).toFixed(2)}%"></div>` : "";
+  const svg = `<svg viewBox="0 0 1000 ${height}" preserveAspectRatio="none" width="100%" height="${height}" aria-hidden="true">${paths}</svg>`;
+  return chartFrame({ id, format: "line", n, height, top, yfmt, plotHtml: nowLine + svg + dots, xl });
+}
+
+// A time chart in the viewer's chosen form. Same options as barChart.
+export function timeChart(o) {
+  return o.format === "bars" ? barChart(o) : lineChart(o);
 }
 
 export function niceMax(v) {
@@ -545,41 +686,148 @@ export function niceMax(v) {
   return 10 * exp;
 }
 
-// Hover tooltips for a chart rendered by barChart; tipFor(i) returns the html.
+// Hover for timeChart and barChart. tipFor(i) returns the tooltip html, or
+// {html, small} for a one-line note, or "" for nothing.
 export function bindChart(root, id, tipFor) {
   const chart = root.querySelector(`[data-chart="${id}"]`);
   if (!chart) return;
   const plot = chart.querySelector(".plot");
-  let tip = null, hot = null;
+  const n = Number(chart.dataset.n) || 0;
+  const line = chart.dataset.format !== "bars";
+  let tip = null, guide = null, hot = null, marks = [], held = false, cur = -1;
   const clear = () => {
     chart.classList.remove("hovering");
     if (hot) hot.classList.remove("hot");
-    hot = null;
+    for (const m of marks) m.remove();
     if (tip) tip.remove();
-    tip = null;
-    S.hold = Math.max(0, S.hold - 1);
+    if (guide) guide.remove();
+    hot = tip = guide = null;
+    marks = [];
+    cur = -1;
+    if (held) S.hold = Math.max(0, S.hold - 1);
+    held = false;
   };
   plot.addEventListener("mousemove", (e) => {
-    const col = e.target.closest(".col");
-    if (!col || col === hot) return;
-    const html = tipFor(Number(col.dataset.i));
-    if (!html) return;
-    if (!hot) S.hold++;
-    if (hot) hot.classList.remove("hot");
-    hot = col;
-    col.classList.add("hot");
-    chart.classList.add("hovering");
-    if (!tip) { tip = document.createElement("div"); tip.className = "tip"; plot.appendChild(tip); }
+    if (!n) return;
+    const pr = plot.getBoundingClientRect();
+    const f = (e.clientX - pr.left) / pr.width;
+    const i = Math.max(0, Math.min(n - 1, line ? Math.round(f * (n - 1)) : Math.floor(f * n)));
+    if (i === cur) return;
+    const res = tipFor(i);
+    if (!res) return clear();
+    cur = i;
+    const small = typeof res === "object" && res.small;
+    const html = typeof res === "object" ? res.html : res;
+    if (!held) { S.hold++; held = true; }
+    let gx;
+    if (line) {
+      gx = n > 1 ? (i / (n - 1)) * pr.width : pr.width / 2;
+      if (!guide) { guide = document.createElement("div"); guide.className = "guide"; plot.appendChild(guide); }
+      guide.style.left = gx + "px";
+      for (const m of marks) m.remove();
+      marks = [];
+      const d = drawn.get(id);
+      if (d) d.vals.forEach((v, k) => {
+        if (v[i] == null) return;
+        const m = document.createElement("i");
+        m.className = "hdot";
+        m.style.cssText = `left:${gx}px;top:${d.height - (Math.max(0, Math.min(d.top, v[i])) / d.top) * d.height}px;background:${d.colors[k]}`;
+        plot.appendChild(m);
+        marks.push(m);
+      });
+    } else {
+      const col = plot.querySelector(`.col[data-i="${i}"]`);
+      if (hot) hot.classList.remove("hot");
+      hot = col;
+      if (col) col.classList.add("hot");
+      chart.classList.add("hovering");
+      const cr = col ? col.getBoundingClientRect() : pr;
+      gx = cr.left - pr.left + cr.width / 2;
+    }
+    if (!tip) { tip = document.createElement("div"); plot.appendChild(tip); }
+    tip.className = small ? "tip sm" : "tip";
     tip.innerHTML = html;
-    const pr = plot.getBoundingClientRect(), cr = col.getBoundingClientRect();
-    const w = 280;
-    let x = cr.left - pr.left - w - 12;
-    if (x < 0) x = cr.right - pr.left + 12;
-    if (x + w > pr.width) x = Math.max(0, pr.width - w);
+    const w = tip.offsetWidth;
+    let x;
+    if (small) x = Math.max(0, Math.min(gx - w / 2, pr.width - w));
+    else {
+      x = gx - w - 12;
+      if (x < 0) x = gx + 12;
+      if (x + w > pr.width) x = Math.max(0, pr.width - w);
+    }
     tip.style.left = x + "px";
-    tip.style.top = "-14px";
+    tip.style.top = small ? "14px" : "-14px";
   });
-  plot.addEventListener("mouseleave", () => { if (hot) clear(); });
+  plot.addEventListener("mouseleave", clear);
+}
+
+// Line or bars switch for one chart; the choice is remembered per viewer.
+export function formatToggle(id) {
+  const f = chartFormat(id);
+  const b = (v, path, label) => `<button class="${f === v ? "on" : ""}" data-fmt="${esc(id)}" data-v="${v}" aria-label="${label}" aria-pressed="${f === v}" title="${label}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="${path}" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
+  return `<div class="fmtseg" role="group" aria-label="Chart type">${b("line", P.line, "Line chart")}${b("bars", P.usage, "Bar chart")}</div>`;
+}
+
+export function bindFormatToggles(root, after) {
+  root.querySelectorAll("[data-fmt]").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      setChartFormat(btn.dataset.fmt, btn.dataset.v);
+      if (after) after(); else window.dispatchEvent(new Event("dash:render"));
+    };
+  });
+}
+
+// ---------- time axis labels and bucket names ----------
+
+const DAY_MS = 864e5;
+const dayShort = (t) => day(t).split(" ").slice(0, 2).join(" "); // "Mon 28"
+const dayMonth = (t) => day(t).split(" ").slice(1).join(" ");     // "28 Sep"
+
+// X labels for buckets starting at `starts` (ms), each `step` ms long. Hours
+// get a "Now" at the right; days and weeks end on their date.
+export function timeLabels(starts, step) {
+  const n = starts.length;
+  let out = [];
+  if (!n) return out;
+  const span = starts[n - 1] - starts[0] + step;
+  if (step < DAY_MS && span <= 30 * 3600e3) {
+    starts.forEach((t, i) => { const c = clock(t); if (i < n - 2 && c.endsWith(":00") && Number(c.slice(0, 2)) % 4 === 0) out.push({ i, text: c }); });
+  } else if (step < DAY_MS) {
+    starts.forEach((t, i) => { if (i < n - 2 && dayKey(t) !== dayKey(i ? starts[i - 1] : t - step)) out.push({ i, text: dayShort(t) }); });
+  } else if (n <= 10) {
+    starts.forEach((t, i) => out.push({ i, text: dayShort(t) }));
+  } else if (step < 7 * DAY_MS && n <= 62) {
+    const every = Math.ceil(n / 7);
+    starts.forEach((t, i) => { if ((n - 1 - i) % every === 0) out.push({ i, text: dayMonth(t) }); });
+  } else {
+    starts.forEach((t, i) => { const m = day(t).split(" ")[2]; if (!i || m !== day(starts[i - 1]).split(" ")[2]) out.push({ i, text: m }); });
+  }
+  if (out.length > 8) {
+    const every = Math.ceil(out.length / 8);
+    out = out.filter((l, k) => k % every === 0);
+  }
+  if (step < DAY_MS) {
+    out = out.filter((l) => n - 1 - l.i >= Math.max(2, n * 0.06));
+    out.push({ i: n - 1, text: "Now" });
+  }
+  return out;
+}
+
+// "Mon 5 Oct 14:00 to 15:00", "Mon 5 Oct", or "Mon 28 Sep to Sun 4 Oct".
+export function bucketTitle(starts, i, step) {
+  const t = starts[i];
+  const next = starts[i + 1];
+  const name = (x) => (isToday(x) ? "Today" : day(x));
+  if (step < DAY_MS) return `${name(t)} ${clock(t)} to ${next ? clock(next) : "now"}`;
+  if (step < 7 * DAY_MS) return name(t);
+  return `${day(t)} to ${day((next || t + step) - 1)}`;
+}
+
+// "19:00", "Mon 18:00" or "Mon 28 Sep": short enough for a one-line note.
+export function whenShort(t, step) {
+  if (step >= DAY_MS) return day(t);
+  return isToday(t) ? clock(t) : dayShort(t).split(" ")[0] + " " + clock(t);
 }
 
 export function tipRows(rows) {
@@ -591,18 +839,21 @@ export function tipRows(rows) {
 let openMenu = null;
 export function closeMenu() {
   if (!openMenu) return;
-  openMenu.el.remove();
-  document.removeEventListener("mousedown", openMenu.away, true);
-  document.removeEventListener("keydown", openMenu.esc, true);
+  const m = openMenu;
   openMenu = null;
+  m.el.remove();
+  document.removeEventListener("mousedown", m.away, true);
+  document.removeEventListener("keydown", m.esc, true);
   S.hold = Math.max(0, S.hold - 1);
+  if (m.onClose) m.onClose();
 }
 
 // Opens a menu under `anchor`. items: [{a, b, on, danger, run}] or "sep" or {html, mount}.
+// opts: width, alignLeft, cls (extra class), gap (px below the anchor), onClose.
 export function menu(anchor, items, opts = {}) {
   closeMenu();
   const el = document.createElement("div");
-  el.className = "menu";
+  el.className = "menu" + (opts.cls ? " " + opts.cls : "");
   el.style.width = (opts.width || 248) + "px";
   el.innerHTML = items.map((it, i) => {
     if (it === "sep") return `<div class="sep"></div>`;
@@ -614,8 +865,9 @@ export function menu(anchor, items, opts = {}) {
   const w = el.offsetWidth, h = el.offsetHeight;
   let x = opts.alignLeft ? r.left : r.right - w;
   x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
-  let y = r.bottom + 4;
-  if (y + h > window.innerHeight - 8) y = Math.max(8, r.top - h - 4);
+  const gap = opts.gap ?? 4;
+  let y = r.bottom + gap;
+  if (y + h > window.innerHeight - 8) y = Math.max(8, r.top - h - gap);
   el.style.left = x + "px";
   el.style.top = y + "px";
   el.addEventListener("click", (e) => {
@@ -630,7 +882,7 @@ export function menu(anchor, items, opts = {}) {
   const escKey = (e) => { if (e.key === "Escape") closeMenu(); };
   document.addEventListener("mousedown", away, true);
   document.addEventListener("keydown", escKey, true);
-  openMenu = { el, away, esc: escKey };
+  openMenu = { el, away, esc: escKey, onClose: opts.onClose };
   S.hold++;
   return el;
 }

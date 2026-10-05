@@ -1,7 +1,7 @@
 // Account details: limits and plan, the last 24 hours, its active sessions.
 import {
   S, esc, icon, logo, accountById, status, limits, left, plan, planDay, planDaysAway, inDays, resetLong, clock,
-  modeMenu, planMenu, modeTitle, sessions, warnState, seg,
+  modeMenu, planMenu, modeTitle, sessions, warnState, seg, perf,
 } from "../core.js";
 import { usageStrip, sessionTable } from "./common.js";
 import { allowanceChart, allowanceSeries, trajectory, outlook, rateText } from "./burn.js";
@@ -53,7 +53,7 @@ export function view(ctx) {
   }
   const st = status(a);
   const lim = limits(a);
-  const strip = usageStrip({ key: "acMetric", ids: [a.id], scope: a.id, stackBy: "none", legend: false });
+  const strip = usageStrip({ key: "acMetric", chart: "account", ids: [a.id], p: perf(a.id), stackBy: "none", legend: false });
   const long = (S.ui.acWindow || "week") === "week";
   const allowance = allowanceChart({ key: "acAllowance", ids: [a.id], long });
   const mine = sessions().filter((s) => (s.auth_ids || []).includes(a.id));
