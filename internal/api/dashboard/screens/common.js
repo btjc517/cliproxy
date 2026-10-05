@@ -1,8 +1,9 @@
-// Pieces shared by several screens: provider tabs, the usage figure strip
-// with its hourly chart, and session rows.
+// Pieces shared by several screens: provider tabs and account chips, the
+// usage figure strip with its hourly chart, and session rows.
 import {
-  S, esc, fmt, int, ms, pctText, rateText, clock, day, seen, icon, logo, tabs, table, figure, barChart, bindChart, tipRows,
+  S, esc, fmt, int, ms, pctText, rateText, clock, day, seen, icon, logo, tabs, table, figure, timeChart, bindChart, tipRows,
   accounts, hourly, tokens, cacheReuse, perf, sumUsage, names, sessionTitle, sessionHref, warnState,
+  chartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle, whenShort, wantScope, selectionPerf,
 } from "../core.js";
 
 export const PROVIDERS = [
@@ -11,17 +12,104 @@ export const PROVIDERS = [
   { id: "codex", label: "Codex" },
 ];
 
+// Redraws, then loads again when the picked accounts need a new merged scope.
+const rerender = () => {
+  window.dispatchEvent(new Event("dash:render"));
+  if (S.data && wantScope() !== S.dataScope) window.dispatchEvent(new Event("dash:refresh"));
+};
+
 export function providerTabs(key, counts) {
   const active = S.ui[key] || "all";
   const items = PROVIDERS.map((p) => ({ ...p, n: counts ? counts[p.id] : undefined }));
   return tabs(items, active, `data-prov="${key}" data-tab`);
 }
 
+// The accounts a screen shows: those of the provider tab, narrowed to the
+// picked account chips. None picked and all picked both mean all of them.
+export function scopeOf(key) {
+  const prov = S.ui[key] || "all";
+  const all = accounts().filter((a) => prov === "all" || a.provider === prov);
+  const picked = prov === "all" ? [] : (S.ui[key + "Pick"]?.[prov] || []).filter((id) => all.some((a) => a.id === id));
+  const some = picked.length > 0 && picked.length < all.length;
+  const shown = some ? all.filter((a) => picked.includes(a.id)) : all;
+  return { prov, all, shown, ids: shown.map((a) => a.id), picked, some };
+}
+
+// The second row under the bar on Claude or Codex: one chip per account.
+export function accountChips(key) {
+  const sc = scopeOf(key);
+  if (sc.prov === "all" || !sc.all.length) return "";
+  const on = new Set(sc.picked);
+  const chips = sc.all.map((a) => `<button class="chip ${on.has(a.id) ? "on" : ""}" data-chip="${esc(key)}" data-id="${esc(a.id)}" aria-pressed="${on.has(a.id)}">${esc(a.email)}</button>`).join("");
+  const m = sc.all.length;
+  const end = sc.some
+    ? `<span class="muted nowrap">${sc.shown.length} of ${m} accounts</span><button class="btn showall" data-chipall="${esc(key)}">Show all</button>`
+    : `<span class="muted nowrap">Showing all ${m} ${m === 1 ? "account" : "accounts"}</span>`;
+  return `<div class="chips"><div class="chiplist">${chips}</div><div class="chipsel">${end}</div></div>`;
+}
+
 export function bindProviderTabs(root, key) {
   root.querySelectorAll(`[data-prov="${key}"]`).forEach((b) => {
-    b.onclick = () => { S.ui[key] = b.dataset.tab; window.dispatchEvent(new Event("dash:render")); };
+    b.onclick = () => { S.ui[key] = b.dataset.tab; rerender(); };
   });
+  const store = () => (S.ui[key + "Pick"] = S.ui[key + "Pick"] || {});
+  root.querySelectorAll(`[data-chip="${key}"]`).forEach((b) => {
+    b.onclick = () => {
+      const prov = S.ui[key];
+      const cur = new Set(store()[prov] || []);
+      if (cur.has(b.dataset.id)) cur.delete(b.dataset.id);
+      else cur.add(b.dataset.id);
+      store()[prov] = [...cur];
+      rerender();
+    };
+  });
+  const all = root.querySelector(`[data-chipall="${key}"]`);
+  if (all) all.onclick = () => { store()[S.ui[key]] = []; rerender(); };
 }
+
+// ---------- performance for a set of accounts ----------
+
+const SUM_KEYS = ["requests", "failed", "failovers", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"];
+
+// The stored scope for all accounts or a whole provider. When the chips pick
+// some but not all accounts, even just one, percentiles come only from the
+// backend's merged selection. Until it arrives (or on a backend without it)
+// counts and tokens are added up here and every percentile is left out,
+// which shows as "–".
+export function perfFor(sc, range = "24h") {
+  if (sc.prov === "all") return perf("all", range);
+  if (!sc.some) return perf(sc.prov, range);
+  const sel = selectionPerf(sc.ids, range);
+  if (sel) return sel;
+  const list = sc.ids.map((id) => perf(id, range)).filter(Boolean);
+  if (!list.length) return null;
+  const has = (k, o) => o && Object.prototype.hasOwnProperty.call(o, k);
+  const len = Math.max(0, ...list.map((p) => (p.series || []).length));
+  const series = [];
+  for (let i = 0; i < len; i++) {
+    const pts = list.map((p) => { const s = p.series || []; return s[s.length - len + i]; }).filter(Boolean);
+    const b = { start: pts[0]?.start };
+    for (const k of SUM_KEYS) if (pts.some((x) => has(k, x))) b[k] = pts.reduce((t, x) => t + (Number(x[k]) || 0), 0);
+    series.push(b);
+  }
+  const out = { requests: 0, failed: 0, ttft_ms: null, latency_ms: null, throughput: null, series, partial: true };
+  for (const p of list) { out.requests += Number(p.requests) || 0; out.failed += Number(p.failed) || 0; }
+  if (list.some((p) => has("failovers", p))) out.failovers = list.reduce((t, p) => t + (Number(p.failovers) || 0), 0);
+  return out;
+}
+
+// A one-line note for a bucket inside a stretch with no requests.
+export function gapNote(starts, i, step, has) {
+  if (has(i)) return null;
+  let a = i, b = i;
+  while (a > 0 && !has(a - 1)) a--;
+  while (b < starts.length - 1 && !has(b + 1)) b++;
+  if (step >= 864e5) return { small: true, html: a === b ? `No requests ${esc(day(starts[a]))}` : `No requests ${esc(day(starts[a]))} to ${esc(day(starts[b]))}` };
+  const end = b + 1 < starts.length ? esc(whenShort(starts[b + 1], step)) : "now";
+  return { small: true, html: `No requests ${esc(whenShort(starts[a], step))} to ${end}` };
+}
+
+export const legendHtml = (items) => items.map((l) => `<span><i style="background:${l.color}"></i>${esc(l.label)}</span>`).join("");
 
 export function readAt(prefix = "Read") {
   return S.readAt ? `${prefix} ${clock(S.readAt)}` : "";
@@ -40,11 +128,11 @@ const METRICS = [
   { id: "failure", label: "Failure rate" },
 ];
 
-// ids: accounts in scope; scope: performance scope key; stackBy: "provider" | "account" | "none"
-export function usageStrip({ key, ids, scope, stackBy, legend = true }) {
+// ids: accounts in scope; p: their performance over 24 hours (perfFor);
+// stackBy: "provider" | "account" | "none"; chart: the id its line or bars choice is kept under.
+export function usageStrip({ key, chart: chartId, ids, p, stackBy, legend = true }) {
   const metric = S.ui[key] || "requests";
   const u = sumUsage(ids, "last_24h");
-  const p = perf(scope);
   const values = {
     requests: int(u.requests),
     tokens: fmt(tokens(u)),
@@ -55,63 +143,55 @@ export function usageStrip({ key, ids, scope, stackBy, legend = true }) {
   };
   const figs = METRICS.map((m) => figure(m.label, esc(values[m.id]), m.id === "throughput" && values.throughput !== "–" ? "tokens/s" : "", { metric: m.id, on: m.id === metric })).join("");
 
-  const chart = buildChart({ key, ids, scope, stackBy, metric });
-  const leg = legend && chart.series.length > 1 ? `<div class="legend">${chart.series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("")}</div>` : "";
-  const html = `<div class="figs">
-    <div class="figrow"><div class="figtabs">${figs}</div>${leg}</div>
+  const chart = buildChart({ chartId, ids, p, stackBy, metric });
+  const leg = legend && chart.series.length > 1 ? `<div class="legend">${legendHtml(chart.series)}</div>` : "";
+  const tools = chart.drawn ? `<div class="ctools">${formatToggle(chartId)}</div>` : "";
+  const html = `<div class="figs chartbox">
+    <div class="figrow"><div class="figtabs">${figs}</div><div class="figend">${leg}${tools}</div></div>
     ${chart.html}
   </div>`;
   const mount = (root) => {
     root.querySelectorAll(`.figs [data-metric]`).forEach((b) => {
-      b.onclick = () => { S.ui[key] = b.dataset.metric; window.dispatchEvent(new Event("dash:render")); };
+      b.onclick = () => { S.ui[key] = b.dataset.metric; rerender(); };
     });
-    bindChart(root, key, chart.tip);
+    bindFormatToggles(root.querySelector(".figs") || root);
+    bindChart(root, chartId, chart.tip);
   };
   return { html, mount };
 }
 
-function hourLabel(start) {
-  const end = Date.parse(start) + 3600e3;
-  return `${day(start).split(" ")[0]} ${clock(start)} to ${clock(end)}`;
-}
+const HOUR = 3600e3;
 
-function xLabels(starts) {
-  const n = starts.length;
-  const out = [];
-  starts.forEach((s, i) => {
-    if (i >= n - 2) return;
-    const h = Number(clock(s).slice(0, 2));
-    if (h % 4 === 0) out.push({ i, text: clock(s) });
-  });
-  out.push({ i: n - 1, text: "Now" });
-  return out;
-}
-
-function buildChart({ key, ids, scope, stackBy, metric }) {
+function buildChart({ chartId, ids, p, stackBy, metric }) {
   const all = accounts().filter((a) => ids.includes(a.id));
   const nm = names();
+  const format = chartFormat(chartId);
   if (metric === "ttft" || metric === "throughput") {
-    const p = perf(scope);
+    // Picked accounts whose merged percentiles have not arrived: nothing exact to draw.
+    if (p?.partial) return { series: [], html: `<div class="nochart" style="height:160px">–</div>`, tip: () => "" };
     const series = (p?.series || []).slice(-24);
     if (!series.length) return { series: [], html: `<div class="empty">No timing data yet. It fills in as requests arrive.</div>`, tip: () => "" };
     const isT = metric === "ttft";
     const ser = isT
-      ? [{ key: "p50", color: "var(--chart-1)", label: "Median" }, { key: "p90", color: "var(--chart-p50)", label: "p90" }]
-      : [{ key: "p50", color: "var(--chart-1)", label: "Median" }];
-    const cols = series.map((b) => ({ values: isT ? { p50: b.ttft_p50_ms, p90: Math.max(0, (b.ttft_p90_ms || 0) - (b.ttft_p50_ms || 0)) } : { p50: b.throughput_p50 } }));
-    const html = barChart({ id: key, series: ser, cols, yfmt: isT ? (v) => (v ? ms(v) : "0") : (v) => (v ? Math.round(v) + "/s" : "0"), labels: xLabels(series.map((b) => b.start)) });
+      ? [{ key: "p50", color: "var(--chart-1)", label: "Median", gaps: true }, { key: "p90", color: "var(--chart-p50)", label: "p90", gaps: true }]
+      : [{ key: "p50", color: "var(--chart-1)", label: "Median", gaps: true }];
+    const starts = series.map((b) => Date.parse(b.start));
+    const cols = series.map((b) => ({ empty: !b.requests, values: isT ? { p50: b.ttft_p50_ms, p90: b.ttft_p90_ms } : { p50: b.throughput_p50 } }));
+    const html = timeChart({ id: chartId, format, series: ser, cols, overlay: true, yfmt: isT ? (v) => (v ? ms(v) : "0") : (v) => (v ? Math.round(v) + "/s" : "0"), labels: timeLabels(starts, HOUR) });
     const tip = (i) => {
       const b = series[i];
-      if (!b || !b.requests) return "";
+      if (!b) return "";
+      if (!b.requests) return gapNote(starts, i, HOUR, (k) => !!series[k].requests) || "";
       const rows = isT
         ? [{ k: "Median", v: ms(b.ttft_p50_ms), color: "var(--chart-1)" }, { k: "p90", v: ms(b.ttft_p90_ms), color: "var(--chart-p50)" }]
         : [{ k: "Median", v: Math.round(b.throughput_p50) + " tokens/s", color: "var(--chart-1)" }];
-      return `<div class="h"><span>${esc(hourLabel(b.start))}</span><span>${int(b.requests)}</span></div>${tipRows([...rows, "hr", { k: "Failed", v: int(b.failed), cls: b.failed ? "warn" : "" }])}`;
+      return `<div class="h"><span>${esc(bucketTitle(starts, i, HOUR))}</span><span>${int(b.requests)}</span></div>${tipRows([...rows, "hr", { k: "Failed", v: int(b.failed), cls: b.failed ? "warn" : "" }])}`;
     };
-    return { series: ser, html, tip };
+    return { series: ser, html, tip, drawn: true };
   }
 
-  const { per, starts } = hourly(ids, 24);
+  const { per, starts: rawStarts } = hourly(ids, 24);
+  const starts = rawStarts.map((s) => Date.parse(s));
   let ser;
   if (stackBy === "provider") {
     ser = [{ key: "claude", color: "var(--chart-1)", label: "Claude" }, { key: "codex", color: "var(--chart-p50)", label: "Codex" }];
@@ -136,13 +216,15 @@ function buildChart({ key, ids, scope, stackBy, metric }) {
     }
     return { start: s, byAcct, sum };
   });
+  if (!buckets.length) return { series: [], html: `<div class="empty">No requests in the last 24 hours.</div>`, tip: () => "" };
   let cols;
   if (metric === "cache") {
-    ser = [{ key: "one", color: "var(--chart-1)", label: "" }];
-    cols = buckets.map((b) => ({ values: { one: cacheReuse(b.sum) || 0 } }));
+    ser = [{ key: "one", color: "var(--chart-1)", label: "", gaps: true }];
+    cols = buckets.map((b) => ({ empty: cacheReuse(b.sum) == null, values: { one: cacheReuse(b.sum) } }));
   } else {
     cols = buckets.map((b) => {
       const v = {};
+      for (const s of ser) v[s.key] = 0;
       for (const a of all) {
         const k = stackBy === "provider" ? a.provider : stackBy === "account" ? a.id : "one";
         v[k] = (v[k] || 0) + val(b.byAcct[a.id]);
@@ -151,10 +233,11 @@ function buildChart({ key, ids, scope, stackBy, metric }) {
     });
   }
   const yfmt = metric === "cache" ? (v) => Math.round(v) + "%" : (v) => fmt(v);
-  const html = barChart({ id: key, series: ser, cols, yfmt, labels: xLabels(starts) });
+  const html = timeChart({ id: chartId, format, series: ser, cols, yfmt, max: metric === "cache" ? 100 : null, labels: timeLabels(starts, HOUR) });
   const tip = (i) => {
     const b = buckets[i];
-    if (!b || !b.sum.requests) return "";
+    if (!b) return "";
+    if (!b.sum.requests) return metric === "cache" ? gapNote(starts, i, HOUR, (k) => !!buckets[k].sum.requests) || "" : "";
     const total = metric === "cache" ? pctText(cacheReuse(b.sum)) : metric === "tokens" ? fmt(tokens(b.sum)) : metric === "failure" ? int(b.sum.failed) : int(b.sum.requests);
     const rows = [];
     all.forEach((a, idx) => {
@@ -167,9 +250,9 @@ function buildChart({ key, ids, scope, stackBy, metric }) {
     if (metric !== "failure") foot.push({ k: "Failed", v: int(b.sum.failed), cls: b.sum.failed ? "warn" : "" });
     if (metric !== "cache") foot.push({ k: "Cache reuse", v: pctText(cacheReuse(b.sum)) });
     if (metric === "cache") foot.push({ k: "Requests", v: int(b.sum.requests) });
-    return `<div class="h"><span>${esc(hourLabel(b.start))}</span><span>${esc(total)}</span></div>${tipRows(rows.length > 1 || stackBy !== "none" ? [...rows, "hr", ...foot] : foot)}`;
+    return `<div class="h"><span>${esc(bucketTitle(starts, i, HOUR))}</span><span>${esc(total)}</span></div>${tipRows(rows.length > 1 || stackBy !== "none" ? [...rows, "hr", ...foot] : foot)}`;
   };
-  return { series: ser, html, tip };
+  return { series: ser, html, tip, drawn: true };
 }
 
 // ---------- sessions table ----------

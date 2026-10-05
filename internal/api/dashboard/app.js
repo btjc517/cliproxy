@@ -1,5 +1,5 @@
 // Shell, router and data polling for the dashboard.
-import { S, esc, icon, applyTheme, closeMenu, fetchData, wantRange } from "./core.js";
+import { S, esc, icon, applyTheme, closeMenu, fetchData, wantRange, wantScope } from "./core.js";
 import * as overview from "./screens/overview.js";
 import * as accounts from "./screens/accounts.js";
 import * as account from "./screens/account.js";
@@ -110,11 +110,18 @@ window.addEventListener("hashchange", () => {
   S.hold = 0;
   render();
   document.getElementById("main").querySelector(".body")?.scrollTo(0, 0);
-  if (S.data && wantRange() !== S.dataRange) load();
+  if (S.data && (wantRange() !== S.dataRange || wantScope() !== S.dataScope)) load();
 });
 window.addEventListener("dash:refresh", load);
 window.addEventListener("dash:render", render);
-setInterval(() => { if (pending && S.hold === 0) render(); }, 500);
+// A held render waits while a button is pressed: replacing the screen between
+// mousedown and click would swallow the click. The click runs in the same task
+// as pointerup, so the flag clears just after it.
+let pressed = false;
+document.addEventListener("pointerdown", () => { pressed = true; }, true);
+document.addEventListener("pointerup", () => setTimeout(() => { pressed = false; }, 0), true);
+document.addEventListener("pointercancel", () => { pressed = false; }, true);
+setInterval(() => { if (pending && S.hold === 0 && !pressed) render(); }, 500);
 setInterval(load, 15000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 

@@ -3,8 +3,9 @@ import {
   S, esc, icon, logo, pill, warnState, accounts, status, limits, left, queue, plan, planDay, planDaysAway, resetShort, clock,
   providerTitle, sessions, isToday,
 } from "../core.js";
-import { providerTabs, bindProviderTabs, readAt, usageStrip, sessionTable } from "./common.js";
+import { providerTabs, bindProviderTabs, accountChips, scopeOf, perfFor, readAt, usageStrip, sessionTable } from "./common.js";
 import { allowanceSeries, trajectory } from "./burn.js";
+import { timeline } from "./timeline.js";
 
 // A warning when the account's weekly allowance runs out before it resets, at this rate.
 function runningOut(acct) {
@@ -49,9 +50,11 @@ function accountColumn(acct, isNext) {
   return `<div class="acctcol"><div class="l1">${l1}${end ? `<span class="end">${end}</span>` : ""}</div><div class="l2">${l2}</div></div>`;
 }
 
-function allowanceGroup(provider) {
+// keep: the account ids the chips leave on screen.
+function allowanceGroup(provider, keep) {
   const q = queue(provider);
-  const list = [...q.order, ...q.rest];
+  const order = q.order.filter((a) => keep.has(a.id));
+  const list = [...order, ...q.rest.filter((a) => keep.has(a.id))];
   if (!list.length) return "";
   const segs = list.map((a) => {
     const st = status(a);
@@ -62,7 +65,7 @@ function allowanceGroup(provider) {
   return `<div class="grp" style="flex-grow:${list.length}">
     <div style="display:flex;flex-direction:column;gap:4px">
       <div class="figlabel">${logo(provider, "sm")}<span>${providerTitle(provider)}, weekly allowance</span></div>
-      <div class="bignum"><span class="v">${q.order.length} of ${list.length}</span><span class="u">accounts available</span></div>
+      <div class="bignum"><span class="v">${order.length} of ${list.length}</span><span class="u">accounts available</span></div>
     </div>
     <div class="segbar">${segs}</div>
     <div class="acctcols">${list.map((a) => accountColumn(a, q.next && a.id === q.next.id)).join("")}</div>
@@ -70,20 +73,23 @@ function allowanceGroup(provider) {
 }
 
 export function view() {
-  const prov = S.ui.ovProv || "all";
-  const accts = accounts().filter((a) => prov === "all" || a.provider === prov);
-  const ids = accts.map((a) => a.id);
-  const groups = (prov === "all" ? ["claude", "codex"] : [prov]).map(allowanceGroup).filter(Boolean).join("");
-  const strip = usageStrip({ key: "ovMetric", ids, scope: prov, stackBy: prov === "all" ? "provider" : "account" });
+  const sc = scopeOf("ovProv");
+  const prov = sc.prov;
+  const keep = new Set(sc.ids);
+  const groups = (prov === "all" ? ["claude", "codex"] : [prov]).map((p) => allowanceGroup(p, keep)).filter(Boolean).join("");
+  const tl = timeline(sc.shown);
+  const strip = usageStrip({ key: "ovMetric", chart: "overview", ids: sc.ids, p: perfFor(sc), stackBy: prov === "all" ? "provider" : "account" });
 
-  const all = sessions().filter((s) => prov === "all" || s.provider === prov);
+  const all = sessions().filter((s) => (prov === "all" || s.provider === prov) && (!sc.some || (s.auth_ids || []).some((id) => keep.has(id))));
   const active = all.filter((s) => Date.now() - Date.parse(s.last_seen) < 10 * 60e3);
   const today = all.filter((s) => isToday(s.last_seen)).length;
 
   const html = `
     <div class="bar">${providerTabs("ovProv")}<span class="muted nowrap">${esc(readAt("Live, read"))}</span></div>
+    ${accountChips("ovProv")}
     <div class="body">
       ${groups ? `<div class="allow">${groups}</div>` : `<div class="empty">No accounts signed in.</div>`}
+      ${tl.html}
       ${strip.html}
       <div class="sec last">
         <div class="sech">
@@ -97,6 +103,7 @@ export function view() {
     html,
     mount(root) {
       bindProviderTabs(root, "ovProv");
+      tl.mount(root);
       strip.mount(root);
     },
   };

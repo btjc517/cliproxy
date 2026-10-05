@@ -4,7 +4,7 @@ import {
   S, esc, int, icon, logo, email, pill, warnState, accounts, status, limits, left, queue, plan, planDay, day,
   meterCell, table, modeMenu, planMenu, modeTitle, MODES, api, setMode, toast, fetchData,
 } from "../core.js";
-import { providerTabs, bindProviderTabs } from "./common.js";
+import { providerTabs, bindProviderTabs, accountChips, scopeOf } from "./common.js";
 
 function nextIds() {
   return new Set(["claude", "codex"].map((p) => queue(p).next?.id).filter(Boolean));
@@ -36,10 +36,11 @@ function weekCells(a) {
 }
 
 export function view(ctx) {
-  const prov = S.ui.acProv || "all";
+  const sc = scopeOf("acProv");
+  const keep = new Set(sc.ids);
   const all = accounts();
   const ordered = ["claude", "codex"].flatMap((p) => { const q = queue(p); return [...q.order, ...q.rest]; });
-  const list = ordered.filter((a) => prov === "all" || a.provider === prov);
+  const list = ordered.filter((a) => keep.has(a.id));
   const next = nextIds();
   const counts = { all: all.length, claude: all.filter((a) => a.provider === "claude").length, codex: all.filter((a) => a.provider === "codex").length };
   const cols = [
@@ -71,6 +72,7 @@ export function view(ctx) {
   });
   const html = `
     <div class="bar">${providerTabs("acProv", counts)}<a class="btn" href="#/accounts/add">${icon("plus", 14, "var(--fg)")}Add account</a></div>
+    ${accountChips("acProv")}
     <div class="body">
       ${table(cols, rows, { empty: "No accounts signed in yet." })}
       <div class="tfoot">${list.length} of ${all.length}</div>
