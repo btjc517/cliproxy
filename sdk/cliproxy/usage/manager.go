@@ -312,6 +312,9 @@ type Manager struct {
 	cond   *sync.Cond
 	queue  []queueItem
 	closed bool
+	// done is closed when the dispatcher has delivered the last queued record
+	// after Stop. It stays nil until Start runs.
+	done chan struct{}
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
@@ -334,26 +337,60 @@ func (m *Manager) Start(ctx context.Context) {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		var workerCtx context.Context
-		workerCtx, m.cancel = context.WithCancel(ctx)
-		go m.run(workerCtx)
+		workerCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		m.mu.Lock()
+		m.cancel = cancel
+		m.done = done
+		m.mu.Unlock()
+		go func() {
+			defer close(done)
+			m.run(workerCtx)
+		}()
 	})
 }
 
-// Stop stops the dispatcher and drains the queue.
+// Stop stops accepting records. The dispatcher still delivers the records
+// already queued, in the background; use StopAndWait to wait for that.
 func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
 	m.stopOnce.Do(func() {
-		if m.cancel != nil {
-			m.cancel()
-		}
 		m.mu.Lock()
+		cancel := m.cancel
 		m.closed = true
 		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		m.cond.Broadcast()
 	})
+}
+
+// StopAndWait stops accepting records and waits until every record queued
+// before the stop has reached the plugins, or until ctx ends. It returns
+// ctx.Err() when ctx ends first.
+func (m *Manager) StopAndWait(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.Stop()
+	m.mu.Lock()
+	done := m.done
+	m.mu.Unlock()
+	if done == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Register appends a plugin to the delivery list.
@@ -483,3 +520,7 @@ func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
+
+// StopDefaultAndWait stops the default manager and waits for its queued
+// records to reach the plugins, or for ctx to end.
+func StopDefaultAndWait(ctx context.Context) error { return DefaultManager().StopAndWait(ctx) }

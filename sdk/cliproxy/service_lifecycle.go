@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/usagestats"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -358,7 +359,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usage.StopDefault()
+		finishUsage(ctx, usage.StopDefaultAndWait, usagestats.Default().Flush)
 		if errFlush := coreauth.DefaultRoutingState().Flush(); errFlush != nil {
 			log.Warnf("routing state flush on shutdown failed: %v", errFlush)
 		}
@@ -367,6 +368,26 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 	})
 	return shutdownErr
+}
+
+// usageDrainTimeout bounds how long shutdown waits for queued usage records,
+// in case a plugin blocks.
+const usageDrainTimeout = 10 * time.Second
+
+// finishUsage stops the usage queue, waits for the records already in it to
+// reach the plugins (drain), and then saves the usage stats (flush). The API
+// server saved them once already when it stopped, but records still queued at
+// that point were only counted afterwards, so without this second save they
+// were lost.
+func finishUsage(ctx context.Context, drain func(context.Context) error, flush func() error) {
+	drainCtx, cancel := context.WithTimeout(ctx, usageDrainTimeout)
+	defer cancel()
+	if errDrain := drain(drainCtx); errDrain != nil {
+		log.Warnf("usage queue did not drain before shutdown: %v", errDrain)
+	}
+	if errFlush := flush(); errFlush != nil {
+		log.Warnf("usage stats flush on shutdown failed: %v", errFlush)
+	}
 }
 
 func (s *Service) ensureAuthDir() error {
