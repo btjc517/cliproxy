@@ -162,9 +162,14 @@ export function allowanceChart({ key, ids, long }) {
   const block = (t) => (long ? dayKey(t) : dayKey(t) + Math.floor(Number(clock(t).slice(0, 2)) / 4));
   // Start at the block of the first reading while history is shorter than the grid.
   const firstAt = Math.min(...list.map((x) => ms(x.ser.first_at) || gridStart));
-  let first = gridStart + Math.max(0, Math.floor((firstAt - gridStart) / step)) * step;
-  while (first > gridStart && block(first - step) === block(first)) first -= step;
-  const offset = Math.round((first - gridStart) / step);
+  let offset = 0;
+  if (firstAt > gridStart) {
+    // The first grid point inside the first reading's block.
+    const b = block(firstAt);
+    offset = Math.floor((firstAt - gridStart) / step);
+    if (block(gridStart + offset * step) !== b) offset++;
+    while (offset > 0 && block(gridStart + (offset - 1) * step) === b) offset--;
+  }
   const start = gridStart + offset * step;
   const nowX = (now - start) / step;
   let end = now + (long ? 24 * HOUR : 5 * HOUR);
