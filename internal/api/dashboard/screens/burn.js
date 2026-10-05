@@ -4,7 +4,7 @@ import {
   S, esc, clock, day, weekdayTime, resetShort, logo, email, accounts, validTime, limits, left,
   table, timeChart, bindChart, tipRows, warnState, meterCell, dayKey, isToday, status,
 } from "../core.js";
-import { ACCOUNT_COLORS } from "./common.js";
+import { accountColor } from "./common.js";
 
 const HOUR = 3600e3;
 const IDLE_AFTER = 90 * 60e3; // the router's burn lookback: no reading for this long is idle
@@ -74,7 +74,7 @@ export function outlook(tr, { short = false } = {}) {
 export function allowanceChart({ key, ids, long, colorOf = null }) {
   const nm = accountLabels();
   const now = Date.now();
-  const list = ids.map((id, idx) => ({ id, ser: allowanceSeries(id, long), color: colorOf ? colorOf(id, idx) : ACCOUNT_COLORS[idx % ACCOUNT_COLORS.length] })).filter((x) => x.ser);
+  const list = ids.map((id, idx) => ({ id, ser: allowanceSeries(id, long), color: colorOf ? colorOf(id, idx) : accountColor(id) })).filter((x) => x.ser);
   // A single line gets the main chart colour, not the pale one its place in the list would give it.
   if (list.length === 1 && !colorOf) list[0].color = "var(--chart-1)";
   if (!list.length) {

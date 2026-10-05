@@ -117,6 +117,16 @@ export function readAt(prefix = "Read") {
 
 export const ACCOUNT_COLORS = ["var(--chart-1)", "var(--chart-p90)", "var(--chart-p50)", "var(--chart-p99)", "#A3A3A3", "#6E9EEF"];
 
+// One colour per account on every screen. Accounts take the colours in a
+// fixed order (provider, then email, then id), never in the order a screen
+// lists them, which follows the router queue and changes.
+export function accountColor(id) {
+  const order = accounts().slice().sort((a, b) =>
+    String(a.provider).localeCompare(String(b.provider)) || String(a.email).localeCompare(String(b.email)) || String(a.id).localeCompare(String(b.id)));
+  const i = order.findIndex((a) => a.id === id);
+  return ACCOUNT_COLORS[Math.max(0, i) % ACCOUNT_COLORS.length];
+}
+
 // ---------- usage figures and the 24-hour chart ----------
 
 const METRICS = [
@@ -196,7 +206,7 @@ function buildChart({ chartId, ids, p, stackBy, metric }) {
   if (stackBy === "provider") {
     ser = [{ key: "claude", color: "var(--chart-1)", label: "Claude" }, { key: "codex", color: "var(--chart-p50)", label: "Codex" }];
   } else if (stackBy === "account") {
-    ser = all.map((a, i) => ({ key: a.id, color: ACCOUNT_COLORS[i % ACCOUNT_COLORS.length], label: nm[a.id] }));
+    ser = all.map((a) => ({ key: a.id, color: accountColor(a.id), label: nm[a.id] }));
   } else {
     ser = [{ key: "one", color: "var(--chart-1)", label: "" }];
   }
@@ -240,10 +250,10 @@ function buildChart({ chartId, ids, p, stackBy, metric }) {
     if (!b.sum.requests) return metric === "cache" ? gapNote(starts, i, HOUR, (k) => !!buckets[k].sum.requests) || "" : "";
     const total = metric === "cache" ? pctText(cacheReuse(b.sum)) : metric === "tokens" ? fmt(tokens(b.sum)) : metric === "failure" ? int(b.sum.failed) : int(b.sum.requests);
     const rows = [];
-    all.forEach((a, idx) => {
+    all.forEach((a) => {
       const x = b.byAcct[a.id];
       if (!x || !x.requests) return;
-      const color = stackBy === "provider" ? (a.provider === "claude" ? "var(--chart-1)" : "var(--chart-p50)") : ACCOUNT_COLORS[idx % ACCOUNT_COLORS.length];
+      const color = stackBy === "provider" ? (a.provider === "claude" ? "var(--chart-1)" : "var(--chart-p50)") : accountColor(a.id);
       rows.push({ k: nm[a.id], v: metric === "tokens" ? fmt(tokens(x)) : metric === "failure" ? int(x.failed) : int(x.requests), color });
     });
     const foot = [];
