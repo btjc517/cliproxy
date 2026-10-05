@@ -88,14 +88,16 @@ var dashboardAccountFields = []string{
 // routing settings, each credential's state, quota snapshot and plan, and the
 // usage summary with performance and per-credential usage over the range
 // named by ?range= (24h, 7d, 14d, 30d, 180d or all). A missing or unknown
-// range falls back to 24h, which summary.range reports. The caller is
-// responsible for restricting who may reach it.
+// range falls back to 24h, which summary.range reports. ?scope= takes comma
+// separated credential ids and adds a "selection" performance scope that
+// merges them. The caller is responsible for restricting who may reach it.
 func (h *Handler) GetDashboardData(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
 	window := usagestats.ResolveWindow(strings.TrimSpace(c.Query("range")))
+	selection := usagestats.ParseSelection(c.Query("scope"))
 	now := time.Now()
 	accounts := make([]gin.H, 0)
 	var auths []*coreauth.Auth
@@ -140,6 +142,6 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 		"accounts":  accounts,
 		"router":    router,
 		"allowance": coreauth.DefaultRoutingState().MeterHistory(authIDs, now),
-		"summary":   usagestats.Default().SummaryFor(100, window),
+		"summary":   usagestats.Default().SummaryForSelection(100, window, selection, authIDs),
 	})
 }

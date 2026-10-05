@@ -3,6 +3,7 @@ package usagestats
 import (
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -559,12 +560,69 @@ func (s *Store) perfSinceLocked(loc *time.Location) (time.Time, bool) {
 	return since.In(loc), true
 }
 
+// SelectionScope is the performance scope that merges the credentials a
+// caller selected, and MaxSelectionIDs is the most ids a selection takes.
+const (
+	SelectionScope  = "selection"
+	MaxSelectionIDs = 64
+)
+
+// ParseSelection splits a comma separated list of credential ids, as sent in
+// ?scope=. It trims each id, drops empty ones and repeats, and keeps the first
+// MaxSelectionIDs distinct ids.
+func ParseSelection(raw string) []string {
+	var ids []string
+	seen := make(map[string]struct{})
+	for rest := raw; rest != "" && len(ids) < MaxSelectionIDs; {
+		var id string
+		id, rest, _ = strings.Cut(rest, ",")
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// knownSelectionLocked returns, as a set, the ids among the first
+// MaxSelectionIDs of ids that the tally has seen or that known lists. It
+// returns nil when none is left.
+func (s *Store) knownSelectionLocked(ids, known []string) map[string]struct{} {
+	listed := make(map[string]struct{}, len(known))
+	for _, id := range known {
+		listed[id] = struct{}{}
+	}
+	selection := make(map[string]struct{})
+	for _, id := range ids[:min(len(ids), MaxSelectionIDs)] {
+		_, inList := listed[id]
+		_, inHourly := s.hourly[id]
+		_, inDaily := s.accountDaily[id]
+		_, inPerf := s.perf[id]
+		_, inPerfDaily := s.perfDaily[id]
+		_, inProviders := s.authProviders[id]
+		if inList || inHourly || inDaily || inPerf || inPerfDaily || inProviders {
+			selection[id] = struct{}{}
+		}
+	}
+	if len(selection) == 0 {
+		return nil
+	}
+	return selection
+}
+
 // performanceLocked builds the performance view for window ending at now.
 // Hourly buckets and daily rollups never hold the same request, so windows of
 // whole days read both without counting anything twice. Shorter buckets cannot
 // split a day, so they read only the hourly buckets, which cover the last 35
-// days.
-func (s *Store) performanceLocked(now time.Time, window Window) Performance {
+// days. A non-empty selection adds the SelectionScope, built from the raw
+// buckets of those credentials the same way as the provider scopes, so its
+// percentiles come from the merged histograms.
+func (s *Store) performanceLocked(now time.Time, window Window, selection map[string]struct{}) Performance {
 	loc := now.Location()
 	since, hasData := s.perfSinceLocked(loc)
 	bounds, bucketLength := window.span(now, since)
@@ -584,12 +642,19 @@ func (s *Store) performanceLocked(now time.Time, window Window) Performance {
 	for authID := range s.hourly {
 		scope(authID)
 	}
+	if len(selection) > 0 {
+		scope(SelectionScope)
+	}
 	targetsFor := func(authID string) []*perfAccumulator {
 		provider := s.authProviders[authID]
 		if provider == "" {
 			provider = providerOf("", authID)
 		}
-		return []*perfAccumulator{scope("all"), scope(provider), scope(authID)}
+		targets := []*perfAccumulator{scope("all"), scope(provider), scope(authID)}
+		if _, selected := selection[authID]; selected {
+			targets = append(targets, scope(SelectionScope))
+		}
+		return targets
 	}
 	addTo := func(targets []*perfAccumulator, at time.Time, bucket *perfBucket) {
 		index, ok := boundsIndex(bounds, at)

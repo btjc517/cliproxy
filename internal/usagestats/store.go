@@ -480,6 +480,14 @@ func (s *Store) Summary(sessionLimit int) Summary {
 
 // SummaryFor builds the dashboard view with performance over window.
 func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
+	return s.SummaryForSelection(sessionLimit, window, nil, nil)
+}
+
+// SummaryForSelection is SummaryFor plus a performance scope named
+// SelectionScope that merges the credentials in ids. Ids that the tally has
+// not seen and known does not list are ignored, and only the first
+// MaxSelectionIDs count. Without a known id there is no SelectionScope.
+func (s *Store) SummaryForSelection(sessionLimit int, window Window, ids, known []string) Summary {
 	now := s.nowFunc()
 	startOfDay := bucketStart(now, now.Location(), 24)
 	hourBounds := localBounds(now, 1, 48)
@@ -545,7 +553,7 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 	summary.Totals["last_7d"] = week
 	summary.History = s.historyLocked(now)
 	summary.Range = window.Key
-	summary.Performance = s.performanceLocked(now, window)
+	summary.Performance = s.performanceLocked(now, window, s.knownSelectionLocked(ids, known))
 	summary.UsageRange = s.usageRangeLocked(now, window, summary.History.Days)
 
 	sessions := make([]Session, 0, len(s.sessions))
