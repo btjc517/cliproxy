@@ -86,22 +86,16 @@ var dashboardAccountFields = []string{
 
 // GetDashboardData returns what the /dashboard page renders: this server,
 // routing settings, each credential's state, quota snapshot and plan, and the
-// usage summary with performance over the range named by ?range= (24h, 7d or
-// 14d). The caller is responsible for restricting who may reach it.
+// usage summary with performance and per-credential usage over the range
+// named by ?range= (24h, 7d, 14d, 30d, 180d or all). A missing or unknown
+// range falls back to 24h, which summary.range reports. The caller is
+// responsible for restricting who may reach it.
 func (h *Handler) GetDashboardData(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	rangeKey := strings.TrimSpace(c.Query("range"))
-	if rangeKey == "" {
-		rangeKey = usagestats.DefaultWindow
-	}
-	window, okWindow := usagestats.LookupWindow(rangeKey)
-	if !okWindow {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "range must be 24h, 7d or 14d"})
-		return
-	}
+	window := usagestats.ResolveWindow(strings.TrimSpace(c.Query("range")))
 	now := time.Now()
 	accounts := make([]gin.H, 0)
 	var auths []*coreauth.Auth

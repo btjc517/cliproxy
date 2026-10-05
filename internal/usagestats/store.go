@@ -1,7 +1,9 @@
 // Package usagestats keeps a small persisted tally of upstream usage per
-// credential and per hour, a daily tally per provider that is never pruned,
-// plus the credentials each client session used. It backs the /dashboard page
-// and the usage summary management endpoint.
+// credential and per hour, daily tallies per provider and per credential that
+// are never pruned, request timing per credential (hourly for 35 days, then
+// one rolled up bucket per local day), plus the credentials each client
+// session used. It backs the /dashboard page and the usage summary management
+// endpoint.
 package usagestats
 
 import (
@@ -26,7 +28,9 @@ const (
 	sessionRetention = 48 * time.Hour
 	maxSessions      = 500
 	flushInterval    = time.Minute
-	statsFileVersion = 2
+	// statsFileVersion 3 added the per-credential daily tally, the daily
+	// timing rollups and token sums in the timing buckets.
+	statsFileVersion = 3
 	dayLayout        = "2006-01-02"
 
 	// HistoryFileName is the read-only backfill that sits next to the stats
@@ -89,10 +93,14 @@ type fileState struct {
 	Hourly   map[string]map[int64]*Counters  `json:"hourly"`
 	Daily    map[string]map[string]*Counters `json:"daily,omitempty"`
 	Sessions map[string]*Session             `json:"sessions"`
-	// Perf is hourly request timing per credential.
-	Perf          map[string]map[int64]*perfBucket `json:"perf,omitempty"`
-	AuthProviders map[string]string                `json:"auth_providers,omitempty"`
-	SessionMeta   map[string]*sessionMeta          `json:"session_meta,omitempty"`
+	// Perf is hourly request timing per credential, and PerfDaily the older
+	// hours rolled up per credential and local day.
+	Perf          map[string]map[int64]*perfBucket  `json:"perf,omitempty"`
+	PerfDaily     map[string]map[string]*perfBucket `json:"perf_daily,omitempty"`
+	AuthProviders map[string]string                 `json:"auth_providers,omitempty"`
+	SessionMeta   map[string]*sessionMeta           `json:"session_meta,omitempty"`
+	// AccountDaily is usage per credential and local day.
+	AccountDaily map[string]map[string]*Counters `json:"account_daily,omitempty"`
 }
 
 // historyFile is the backfill written by the log collector. Days and machines
@@ -110,9 +118,14 @@ type Store struct {
 	hourly   map[string]map[int64]*Counters
 	daily    map[string]map[string]*Counters
 	sessions map[string]*Session
-	// perf is hourly request timing per credential; authProviders remembers
-	// each credential's provider for the provider scopes.
+	// accountDaily is usage per credential and local day, never pruned.
+	accountDaily map[string]map[string]*Counters
+	// perf is hourly request timing per credential and perfDaily the hours
+	// older than perfRetention rolled up per local day; a request is in one
+	// or the other. authProviders remembers each credential's provider for
+	// the provider scopes.
 	perf          map[string]map[int64]*perfBucket
+	perfDaily     map[string]map[string]*perfBucket
 	authProviders map[string]string
 	// traces follows recent inbound requests that had a failed attempt.
 	traces   map[string]*traceState
@@ -138,7 +151,9 @@ func newStore() *Store {
 		hourly:        make(map[string]map[int64]*Counters),
 		daily:         make(map[string]map[string]*Counters),
 		sessions:      make(map[string]*Session),
+		accountDaily:  make(map[string]map[string]*Counters),
 		perf:          make(map[string]map[int64]*perfBucket),
+		perfDaily:     make(map[string]map[string]*perfBucket),
 		authProviders: make(map[string]string),
 		traces:        make(map[string]*traceState),
 		meta:          make(map[string]*sessionMeta),
@@ -243,6 +258,7 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 	provider := providerOf(record.Provider, authID)
 	day := at.In(location).Format(dayLayout)
 	s.dailyBucketLocked(day, provider).add(delta)
+	s.accountDayLocked(authID, day).add(delta)
 	s.recordPerfLocked(authID, provider, hourStart, recordTiming{
 		traceID: strings.TrimSpace(record.TraceID),
 		at:      at,
@@ -250,7 +266,7 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 		failed:  record.Failed,
 		ttft:    record.TTFT,
 		latency: record.Latency,
-		output:  delta.Output,
+		tokens:  delta,
 	})
 
 	if sessionID := strings.TrimSpace(record.SessionID); sessionID != "" {
@@ -319,6 +335,21 @@ func (s *Store) dailyBucketLocked(day, provider string) *Counters {
 	return bucket
 }
 
+// accountDayLocked returns a credential's usage for one local day.
+func (s *Store) accountDayLocked(authID, day string) *Counters {
+	days := s.accountDaily[authID]
+	if days == nil {
+		days = make(map[string]*Counters)
+		s.accountDaily[authID] = days
+	}
+	bucket := days[day]
+	if bucket == nil {
+		bucket = &Counters{}
+		days[day] = bucket
+	}
+	return bucket
+}
+
 // providerOf names the provider for the daily tally. Auth file names start
 // with the provider ("claude-", "codex-"), which covers records that carry
 // no provider and the hourly buckets seeded from an older stats file.
@@ -365,6 +396,19 @@ type Summary struct {
 	History     History                   `json:"history"`
 	Range       string                    `json:"range"`
 	Performance Performance               `json:"performance"`
+	UsageRange  UsageRange                `json:"usage_range"`
+}
+
+// UsageRange is usage per credential over the selected range, in the same
+// buckets as the performance series. Accounts with no usage in the range are
+// left out, and Ranges are the range keys the dashboard offers for usage,
+// measured on the earliest history day.
+type UsageRange struct {
+	Range         string                `json:"range"`
+	BucketSeconds int64                 `json:"bucket_seconds"`
+	Starts        []time.Time           `json:"starts"`
+	Accounts      map[string][]Counters `json:"accounts"`
+	Ranges        []string              `json:"ranges"`
 }
 
 // History is the long view: one entry per day with usage, oldest first, from
@@ -386,7 +430,7 @@ type HistoryDay struct {
 }
 
 // AccountSummary holds one credential's totals, its last 48 hourly buckets
-// and its last 14 local days.
+// and its last 14 local days. Longer per-credential ranges are in UsageRange.
 type AccountSummary struct {
 	Today   Counters     `json:"today"`
 	Last24h Counters     `json:"last_24h"`
@@ -422,10 +466,10 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 	now := s.nowFunc()
 	startOfDay := bucketStart(now, now.Location(), 24)
 	hourBounds := localBounds(now, 1, 48)
-	firstDay := startOfDay.AddDate(0, 0, -(accountDays - 1))
-	dayIndex := make(map[string]int, accountDays)
-	for i := 0; i < accountDays; i++ {
-		dayIndex[firstDay.AddDate(0, 0, i).Format(dayLayout)] = i
+	dayStarts := dayBounds(now, accountDays, 1)
+	dates := make([]string, accountDays)
+	for i := range dates {
+		dates[i] = dayStarts[i].Format(dayLayout)
 	}
 
 	s.mu.Lock()
@@ -445,15 +489,18 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 		for i := range hourly {
 			hourly[i].Start = hourBounds[i]
 		}
+		// The daily view reads the per-credential daily tally, which holds the
+		// same requests as the hourly buckets and outlives them.
 		daily := make([]DayBucket, accountDays)
+		days := s.accountDaily[authID]
 		for i := range daily {
-			daily[i].Date = firstDay.AddDate(0, 0, i).Format(dayLayout)
+			daily[i].Date = dates[i]
+			if counters := days[dates[i]]; counters != nil {
+				daily[i].Counters = *counters
+			}
 		}
 		for hourUnix, bucket := range buckets {
 			start := time.Unix(hourUnix, 0)
-			if index, ok := dayIndex[start.In(now.Location()).Format(dayLayout)]; ok {
-				daily[index].Counters.add(*bucket)
-			}
 			if !start.Before(startOfDay) {
 				account.Today.add(*bucket)
 			}
@@ -482,6 +529,7 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 	summary.History = s.historyLocked(now)
 	summary.Range = window.Key
 	summary.Performance = s.performanceLocked(now, window)
+	summary.UsageRange = s.usageRangeLocked(now, window, summary.History.Days)
 
 	sessions := make([]Session, 0, len(s.sessions))
 	for _, session := range s.sessions {
@@ -493,6 +541,56 @@ func (s *Store) SummaryFor(sessionLimit int, window Window) Summary {
 	}
 	summary.Sessions = sessions
 	return summary
+}
+
+// usageRangeLocked builds per-credential usage for window ending at now. Day
+// sized buckets read the per-credential daily tally, shorter ones the hourly
+// buckets; both hold the same requests, so only one is read. days is the
+// history, which sets where "all" starts and whether 180d is offered.
+func (s *Store) usageRangeLocked(now time.Time, window Window, days []HistoryDay) UsageRange {
+	loc := now.Location()
+	dates := make([]string, len(days))
+	for i, day := range days {
+		dates[i] = day.Date
+	}
+	first, _ := earliestDateStart(dates, loc)
+	bounds, bucketLength := window.span(now, first)
+	count := len(bounds) - 1
+	usage := UsageRange{
+		Range:         window.Key,
+		BucketSeconds: int64(bucketLength / time.Second),
+		Starts:        bounds[:count],
+		Accounts:      make(map[string][]Counters),
+		Ranges:        availableRanges(now, first),
+	}
+	add := func(authID string, at time.Time, counters *Counters) {
+		index, ok := boundsIndex(bounds, at)
+		if !ok {
+			return
+		}
+		series := usage.Accounts[authID]
+		if series == nil {
+			series = make([]Counters, count)
+			usage.Accounts[authID] = series
+		}
+		series[index].add(*counters)
+	}
+	if window.daily() {
+		for authID, dates := range s.accountDaily {
+			for date, counters := range dates {
+				if noon, ok := dateNoon(date, loc); ok {
+					add(authID, noon, counters)
+				}
+			}
+		}
+		return usage
+	}
+	for authID, buckets := range s.hourly {
+		for hourUnix, counters := range buckets {
+			add(authID, time.Unix(hourUnix, 0), counters)
+		}
+	}
+	return usage
 }
 
 // sessionViewLocked copies a session for Summary and fills in the derived
@@ -598,17 +696,8 @@ func (s *Store) pruneLocked(now time.Time) {
 			delete(s.hourly, authID)
 		}
 	}
-	perfCutoff := now.Add(-perfRetention).Unix()
-	for authID, buckets := range s.perf {
-		for hourUnix := range buckets {
-			if hourUnix < perfCutoff {
-				delete(buckets, hourUnix)
-				s.dirty = true
-			}
-		}
-		if len(buckets) == 0 {
-			delete(s.perf, authID)
-		}
+	if s.rollUpPerfLocked(now.Add(-perfRetention)) {
+		s.dirty = true
 	}
 	s.pruneSessionMetaLocked(now)
 	sessionCutoff := now.Add(-sessionRetention)
@@ -645,8 +734,10 @@ func (s *Store) Flush() error {
 		Daily:         s.daily,
 		Sessions:      s.sessions,
 		Perf:          s.perf,
+		PerfDaily:     s.perfDaily,
 		AuthProviders: s.authProviders,
 		SessionMeta:   s.meta,
+		AccountDaily:  s.accountDaily,
 	})
 	path := s.path
 	s.dirty = false
@@ -717,6 +808,28 @@ func (s *Store) loadLocked() {
 			}
 		}
 	}
+	if state.AccountDaily == nil {
+		// Stats files from before the per-credential daily tally: rebuild it
+		// from the hourly buckets, which hold the same requests.
+		location := s.nowFunc().Location()
+		for authID, buckets := range state.Hourly {
+			for hour, bucket := range buckets {
+				if bucket == nil {
+					continue
+				}
+				day := time.Unix(hour, 0).In(location).Format(dayLayout)
+				s.accountDayLocked(authID, day).add(*bucket)
+				s.dirty = true
+			}
+		}
+	}
+	for authID, days := range state.AccountDaily {
+		for day, bucket := range days {
+			if bucket != nil {
+				s.accountDayLocked(authID, day).add(*bucket)
+			}
+		}
+	}
 	for id, session := range state.Sessions {
 		if session != nil && s.sessions[id] == nil {
 			s.sessions[id] = loadedSession(id, session)
@@ -733,11 +846,28 @@ func (s *Store) loadLocked() {
 				continue
 			}
 			bucket.validate()
+			if state.Version < 3 && !bucket.hasTokens() {
+				// Timing buckets from before version 3 have no token sums. The
+				// hourly usage bucket with the same key holds the same requests.
+				if counters := state.Hourly[authID][hour]; counters != nil {
+					bucket.addTokens(*counters)
+					s.dirty = true
+				}
+			}
 			if existing := target[hour]; existing != nil {
 				existing.add(bucket)
 			} else {
 				target[hour] = bucket
 			}
+		}
+	}
+	for authID, days := range state.PerfDaily {
+		for day, bucket := range days {
+			if bucket == nil {
+				continue
+			}
+			bucket.validate()
+			s.perfDayLocked(authID, day).add(bucket)
 		}
 	}
 	for authID, provider := range state.AuthProviders {
