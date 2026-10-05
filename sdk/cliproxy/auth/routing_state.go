@@ -474,30 +474,39 @@ func (s *RoutingState) activeSessions(now time.Time) map[string]int {
 	return cache.ActiveSessionsByAuth(now.Add(-activeSessionWindow))
 }
 
+// meterResetDrop is how far a reading must fall below the highest reading
+// since the last reset to count as a reset. Responses finish out of order, so
+// a reading can arrive a point below one taken moments earlier; that is not a
+// reset.
+const meterResetDrop = 0.03
+
 // burnRate estimates how fast a meter is filling, as utilization per hour,
-// from samples taken since the last reset within the lookback period. It
-// reports false when there is too little history.
+// from samples taken since the last reset within the lookback period. The rise
+// is measured to the highest reading, so a late, lower reply does not shrink
+// it. It reports false when there is too little history.
 func burnRate(samples []MeterSample, now time.Time, lookback time.Duration) (float64, bool) {
 	start := -1
-	for i := len(samples) - 1; i >= 0; i-- {
-		if now.Sub(samples[i].At) > lookback {
-			break
+	high := 0.0
+	for i, sample := range samples {
+		if now.Sub(sample.At) > lookback {
+			continue
 		}
-		if i < len(samples)-1 && samples[i].Utilization > samples[i+1].Utilization {
-			// The meter dropped between these samples, so it reset there.
-			break
+		if start < 0 || sample.Utilization < high-meterResetDrop {
+			start, high = i, sample.Utilization
+			continue
 		}
-		start = i
+		if sample.Utilization > high {
+			high = sample.Utilization
+		}
 	}
 	if start < 0 || start == len(samples)-1 {
 		return 0, false
 	}
-	first, last := samples[start], samples[len(samples)-1]
-	elapsed := last.At.Sub(first.At)
+	elapsed := samples[len(samples)-1].At.Sub(samples[start].At)
 	if elapsed < 10*time.Minute {
 		return 0, false
 	}
-	return (last.Utilization - first.Utilization) / elapsed.Hours(), true
+	return (high - samples[start].Utilization) / elapsed.Hours(), true
 }
 
 // recordDecision stores one shadow comparison.
