@@ -149,6 +149,7 @@ svg { display: block; flex-shrink: 0; }
 .nav a { height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: 6px; font-size: 13px; }
 .nav a:hover { background: var(--nav-hover); }
 .nav a.on { background: var(--nav-on); }
+.navlabel { height: 28px; margin-top: 14px; padding: 0 8px; display: flex; align-items: center; font-size: 12px; font-weight: 500; color: var(--muted-fg); }
 .side .spacer { flex: 1; }
 .host { height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 8px; font-size: 13px; }
 .main { flex: 1 1 0; min-width: 0; background: var(--panel); border: 1px solid var(--hairline); border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; position: relative; }
@@ -452,6 +453,7 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
   .nav { flex-direction: row; overflow-x: auto; scrollbar-width: none; gap: 2px; }
   .nav::-webkit-scrollbar { display: none; }
   .nav a { flex-shrink: 0; height: 32px; }
+  .navlabel { display: none; }
   .side .spacer, .side .host { display: none; }
   .side .foot { display: contents; }
   .main { margin: 0 8px; border-radius: 12px; overflow: visible; }

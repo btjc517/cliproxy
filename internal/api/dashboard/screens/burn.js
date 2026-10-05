@@ -147,8 +147,9 @@ function bindLine(root, id, n, tipFor) {
 export function allowanceChart({ key, ids, long }) {
   const nm = accountLabels();
   const now = Date.now();
-  const colorOf = (idx) => (ids.length === 1 ? "var(--chart-1)" : ACCOUNT_COLORS[idx % ACCOUNT_COLORS.length]);
-  const list = ids.map((id, idx) => ({ id, ser: allowanceSeries(id, long), color: colorOf(idx) })).filter((x) => x.ser);
+  const list = ids.map((id, idx) => ({ id, ser: allowanceSeries(id, long), color: ACCOUNT_COLORS[idx % ACCOUNT_COLORS.length] })).filter((x) => x.ser);
+  // A single line gets the main chart colour, not the pale one its place in the list would give it.
+  if (list.length === 1) list[0].color = "var(--chart-1)";
   if (!list.length) {
     return {
       html: `<div class="empty">No allowance readings yet. The proxy reads them from each reply, so they appear once ${ids.length === 1 ? "this account is" : "an account is"} used.</div>`,
