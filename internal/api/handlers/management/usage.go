@@ -134,11 +134,18 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 		}
 	}
 	router := coreauth.DefaultRoutingState().Dashboard(auths, now)
+	authIDs := make([]string, 0, len(auths))
+	for _, auth := range auths {
+		if auth != nil {
+			authIDs = append(authIDs, auth.ID)
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"server":   h.dashboardServer(c, now),
-		"routing":  routing,
-		"accounts": accounts,
-		"router":   router,
-		"summary":  usagestats.Default().SummaryFor(100, window),
+		"server":    h.dashboardServer(c, now),
+		"routing":   routing,
+		"accounts":  accounts,
+		"router":    router,
+		"allowance": coreauth.DefaultRoutingState().MeterHistory(authIDs, now),
+		"summary":   usagestats.Default().SummaryFor(100, window),
 	})
 }
