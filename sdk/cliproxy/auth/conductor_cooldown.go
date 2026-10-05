@@ -1940,7 +1940,7 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	if err == nil || statusCodeFromResult(err) != http.StatusNotFound {
 		return false
 	}
-	return clienterror.IsItemNotPersisted(err.Message)
+	return clienterror.IsItemNotPersisted(err.Message) || clienterror.IsClaudeThreadStateMissing(err.Message)
 }
 
 func isRequestScopedResultError(err *Error) bool {

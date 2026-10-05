@@ -1480,6 +1480,12 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		HTTPStatus: http.StatusNotFound,
 		Message:    requestScopedNotFoundMessage,
 	}
+	// Anthropic's thread continuation whose stored state is gone. Cooling the
+	// credential here made every other request on it fail with auth_unavailable.
+	claudeThreadMissingErr := &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested ` + "`previous_message_id`" + `. Replay the full conversation with ` + "`thread: {\"type\": \"create\"}`" + ` to start a new Thread."}}`,
+	}
 	tests := []struct {
 		name               string
 		provider           string
@@ -1509,6 +1515,8 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		{name: "streaming invalid request type behind bad gateway", stream: true, err: invalidRequestTypeErr, wantStatus: http.StatusBadGateway},
 		{name: "non-streaming item not persisted", err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
 		{name: "streaming item not persisted", stream: true, err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
+		{name: "non-streaming claude thread state missing", provider: "claude", err: claudeThreadMissingErr, wantStatus: http.StatusNotFound},
+		{name: "streaming claude thread state missing", provider: "claude", stream: true, err: claudeThreadMissingErr, wantStatus: http.StatusNotFound},
 		{name: "streaming item not persisted after payload", stream: true, streamAfterPayload: true, err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
 	}
 

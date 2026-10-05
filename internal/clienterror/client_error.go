@@ -100,7 +100,7 @@ func IsRequestFault(status int, err error) bool {
 	if hasRequestFaultBody(err) {
 		return true
 	}
-	if err != nil && IsItemNotPersisted(err.Error()) {
+	if err != nil && (IsItemNotPersisted(err.Error()) || IsClaudeThreadStateMissing(err.Error())) {
 		return true
 	}
 	switch status {
@@ -127,6 +127,17 @@ func IsItemNotPersisted(message string) bool {
 	return strings.Contains(lower, "item with id") &&
 		strings.Contains(lower, "not found") &&
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
+}
+
+// IsClaudeThreadStateMissing matches Anthropic's 404 for a thread continuation
+// whose stored state is gone: it expired, or another request already continued
+// the same response, for example a request the proxy dropped on restart. Only
+// the client can recover, by replaying the conversation with a new thread. No
+// other credential holds state for the thread, and cooling this one would
+// block every other request it serves, so it is a request fault.
+func IsClaudeThreadStateMissing(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "no thread state was found") && strings.Contains(lower, "previous_message_id")
 }
 
 func hasModelNotFoundErrorBody(err error) bool {

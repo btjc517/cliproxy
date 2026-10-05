@@ -259,3 +259,16 @@ func TestIsClientCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestIsClaudeThreadStateMissing(t *testing.T) {
+	body := `{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested ` + "`previous_message_id`" + `. Replay the full conversation."}}`
+	if !IsClaudeThreadStateMissing(body) {
+		t.Fatal("thread state 404 not recognised")
+	}
+	if !IsRequestFault(404, errors.New(body)) {
+		t.Fatal("thread state 404 must be a request fault so the credential is not cooled")
+	}
+	if IsClaudeThreadStateMissing(`{"error":{"type":"not_found_error","message":"model: claude-x"}}`) {
+		t.Fatal("an unrelated 404 matched")
+	}
+}
