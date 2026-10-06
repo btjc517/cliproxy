@@ -345,7 +345,8 @@ export function timeline(accts) {
     tl.querySelectorAll(".tl-strip span").forEach((s) => {
       const over = () => s.scrollWidth > s.clientWidth + 1;
       if (over() && s.parentElement.classList.contains("none")) s.classList.add("compact");
-      if (over()) s.classList.add("hide");
+      // A centred icon spills both edges evenly, which scrollWidth misses.
+      if (over() || (s.classList.contains("compact") && s.clientWidth < 12)) s.classList.add("hide");
     });
     // Labels keep inside the row and never overlap. A label that starts just
     // inside the previous one is nudged right; one that cannot fit is hidden.
