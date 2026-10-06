@@ -139,10 +139,15 @@ function deadZones(providers, long, { now, start, step, n, nowX }) {
       const mid = tOf((xs[k] + xs[k + 1]) / 2);
       if (xs[k + 1] > xs[k] && pool.every((m) => leftAt(m, mid) === 0)) spans.push([xs[k], xs[k + 1]]);
     }
+    // Open: still nothing left at the chart's last point, so the stretch
+    // runs on past the edge rather than ending in a refill there.
+    const open = pool.every((m) => leftAt(m, endT) === 0);
     for (const [x0, x1] of spans) {
       const last = zones[zones.length - 1];
       if (last && last.provider === provider && x0 - last.x1 < 1e-6) last.x1 = Math.max(last.x1, x1);
       else zones.push({ provider, x0, x1 });
+      const z = zones[zones.length - 1];
+      z.open = open && z.x1 >= n - 1;
     }
   }
   return zones;
@@ -253,9 +258,9 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
     const head = future ? `${isToday(t) ? "Today" : day(t)} ${clock(t)}, at this rate` : `${isToday(t) ? "Today" : day(t)} ${clock(t)}`;
     // Inside a dead stretch: say so, and until when if it ends on the chart.
     // The end is when allowance comes back, so it is not inside the stretch,
-    // unless the stretch runs to the chart's edge.
-    const dead = zones.filter((z) => i >= z.x0 && (i < z.x1 || (z.x1 >= n - 1 && i <= z.x1))).map((z) => {
-      const until = z.x1 < n - 1 ? start + z.x1 * step : 0;
+    // unless the stretch runs on past the chart's edge.
+    const dead = zones.filter((z) => i >= z.x0 && (i < z.x1 || (z.open && i <= z.x1))).map((z) => {
+      const until = z.open ? 0 : start + z.x1 * step;
       const text = `No ${providerTitle(z.provider)} allowance left${until ? " until " + (isToday(until) ? clock(until) : resetShort(until)) : ""}`;
       return `<div class="dead">${icon("skull", 12, "currentColor")}<span>${esc(text)}</span></div>`;
     }).join("");
