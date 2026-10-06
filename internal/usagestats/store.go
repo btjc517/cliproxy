@@ -41,14 +41,16 @@ const (
 	HistoryFileName = "usage-history.json"
 )
 
-// Counters is one bucket of usage for a credential.
+// Counters is one bucket of usage for a credential. APICost is what the
+// tokens would have cost at the public API list prices, in USD.
 type Counters struct {
-	Requests   int64 `json:"requests"`
-	Failed     int64 `json:"failed"`
-	Input      int64 `json:"input_tokens"`
-	Output     int64 `json:"output_tokens"`
-	CacheRead  int64 `json:"cache_read_tokens"`
-	CacheWrite int64 `json:"cache_write_tokens"`
+	Requests   int64   `json:"requests"`
+	Failed     int64   `json:"failed"`
+	Input      int64   `json:"input_tokens"`
+	Output     int64   `json:"output_tokens"`
+	CacheRead  int64   `json:"cache_read_tokens"`
+	CacheWrite int64   `json:"cache_write_tokens"`
+	APICost    float64 `json:"api_cost"`
 }
 
 func (c *Counters) add(other Counters) {
@@ -58,7 +60,11 @@ func (c *Counters) add(other Counters) {
 	c.Output += other.Output
 	c.CacheRead += other.CacheRead
 	c.CacheWrite += other.CacheWrite
+	c.APICost = roundCost(c.APICost + other.APICost)
 }
+
+// tokens is the sum of every token count.
+func (c Counters) tokens() int64 { return c.Input + c.Output + c.CacheRead + c.CacheWrite }
 
 // Session records which credentials served one client session.
 type Session struct {
@@ -103,14 +109,21 @@ type fileState struct {
 	SessionMeta   map[string]*sessionMeta           `json:"session_meta,omitempty"`
 	// AccountDaily is usage per credential and local day.
 	AccountDaily map[string]map[string]*Counters `json:"account_daily,omitempty"`
+	// CostSince is when per-request pricing started. A file without it was
+	// written before API cost and gets a one-time estimate on load.
+	CostSince time.Time `json:"cost_since,omitzero"`
 }
 
 // historyFile is the backfill written by the log collector. Days and machines
-// map to provider totals; requests there count model replies.
+// map to provider totals; requests there count model replies. Models splits
+// some days' provider totals by model, keyed by day, provider and model id,
+// and MachineModels does the same for machines.
 type historyFile struct {
-	Cutoff   time.Time                      `json:"cutoff"`
-	Days     map[string]map[string]Counters `json:"days"`
-	Machines map[string]map[string]Counters `json:"machines,omitempty"`
+	Cutoff        time.Time                                 `json:"cutoff"`
+	Days          map[string]map[string]Counters            `json:"days"`
+	Machines      map[string]map[string]Counters            `json:"machines,omitempty"`
+	Models        map[string]map[string]map[string]Counters `json:"models,omitempty"`
+	MachineModels map[string]map[string]map[string]Counters `json:"machine_models,omitempty"`
 }
 
 // Store aggregates usage records in memory and flushes them to disk.
@@ -133,6 +146,10 @@ type Store struct {
 	traces   map[string]*traceState
 	meta     map[string]*sessionMeta
 	backfill *historyFile
+	// fallback names each provider's model for pricing unknown models and
+	// usage from before costSince, when per-request pricing started.
+	fallback  map[string]string
+	costSince time.Time
 	// changes counts mutations and saved is the count the stats file holds;
 	// the tally needs saving while they differ.
 	changes uint64
@@ -170,6 +187,7 @@ func newStore() *Store {
 		authProviders: make(map[string]string),
 		traces:        make(map[string]*traceState),
 		meta:          make(map[string]*sessionMeta),
+		fallback:      defaultFallback(),
 		saveFile:      writeFileAtomic,
 		nowFunc:       time.Now,
 		machineName:   tailnetname.MachineName,
@@ -196,9 +214,17 @@ func (s *Store) configure(path string) {
 		return
 	}
 	s.path = path
-	s.loadLocked()
+	// The history comes first: it sets the fallback models that price an
+	// older stats file.
 	s.loadHistoryLocked(filepath.Join(filepath.Dir(path), HistoryFileName))
+	estimated := s.loadLocked()
 	s.mu.Unlock()
+	if estimated {
+		// Saves the one-time estimate together with cost_since.
+		if errFlush := s.Flush(); errFlush != nil {
+			log.Warnf("usagestats: save after pricing earlier usage failed: %v", errFlush)
+		}
+	}
 
 	s.stopOnce.Do(func() {
 		s.stop = make(chan struct{})
@@ -250,12 +276,14 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 		at = s.nowFunc()
 	}
 	delta := countersFromRecord(record)
+	provider := providerOf(record.Provider, authID)
 
 	location := s.nowFunc().Location()
 	hourStart := bucketStart(at, location, 1)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delta.APICost = costFor(record.Model, provider, delta, s.fallback, true)
 	buckets := s.hourly[authID]
 	if buckets == nil {
 		buckets = make(map[int64]*Counters)
@@ -269,7 +297,6 @@ func (s *Store) recordFrom(record coreusage.Record, clientIP string) {
 	}
 	bucket.add(delta)
 
-	provider := providerOf(record.Provider, authID)
 	day := at.In(location).Format(dayLayout)
 	s.dailyBucketLocked(day, provider).add(delta)
 	s.accountDayLocked(authID, day).add(delta)
@@ -414,6 +441,7 @@ type Summary struct {
 	Range       string                    `json:"range"`
 	Performance Performance               `json:"performance"`
 	UsageRange  UsageRange                `json:"usage_range"`
+	Pricing     Pricing                   `json:"pricing"`
 }
 
 // UsageRange is usage per credential over the selected range, in the same
@@ -555,6 +583,7 @@ func (s *Store) SummaryForSelection(sessionLimit int, window Window, ids, known 
 	summary.Range = window.Key
 	summary.Performance = s.performanceLocked(now, window, s.knownSelectionLocked(ids, known))
 	summary.UsageRange = s.usageRangeLocked(now, window, summary.History.Days)
+	summary.Pricing = s.pricingLocked()
 
 	sessions := make([]Session, 0, len(s.sessions))
 	for _, session := range s.sessions {
@@ -792,6 +821,7 @@ func (s *Store) Flush() error {
 		AuthProviders: s.authProviders,
 		SessionMeta:   s.meta,
 		AccountDaily:  s.accountDaily,
+		CostSince:     s.costSince,
 	})
 	path := s.path
 	save := s.saveFile
@@ -882,18 +912,30 @@ func copyNewFile(src, dst string) error {
 	return errCopy
 }
 
-func (s *Store) loadLocked() {
+// loadLocked merges the stats file into the tally. It reports whether it
+// estimated the API cost of a file written before per-request pricing, which
+// happens once: the estimate is saved with cost_since.
+func (s *Store) loadLocked() bool {
+	// Without a usable file, every request from now on is priced exactly.
+	s.costSince = s.nowFunc().Truncate(time.Second)
 	data, errRead := os.ReadFile(s.path)
 	if errRead != nil {
 		if !os.IsNotExist(errRead) {
 			s.failLoadLocked(fmt.Errorf("read: %w", errRead))
 		}
-		return
+		return false
 	}
 	var state fileState
 	if errUnmarshal := json.Unmarshal(data, &state); errUnmarshal != nil {
 		s.failLoadLocked(fmt.Errorf("parse: %w", errUnmarshal))
-		return
+		return false
+	}
+	estimated := state.CostSince.IsZero()
+	if estimated {
+		estimateCost(&state, s.fallback)
+		s.markDirtyLocked()
+	} else {
+		s.costSince = state.CostSince
 	}
 	for authID, buckets := range state.Hourly {
 		target := s.hourly[authID]
@@ -1009,6 +1051,7 @@ func (s *Store) loadLocked() {
 			s.meta[id] = meta
 		}
 	}
+	return estimated
 }
 
 // loadedSession repairs a session read from the stats file: the map key is
@@ -1039,6 +1082,8 @@ func (s *Store) loadHistoryLocked(path string) {
 		log.Warnf("usagestats: parse %s: %v", filepath.Base(path), errUnmarshal)
 		return
 	}
+	s.fallback = fallbackModels(&history)
+	priceHistory(&history, s.fallback)
 	s.backfill = &history
 }
 
