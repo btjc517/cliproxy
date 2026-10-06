@@ -153,11 +153,13 @@ export function costNote(provs) {
   const since = validTime(p.exact_since);
   const fb = plainObject(p.fallback) || {};
   const models = [...new Set(provs.map((k) => fb[k]).filter(Boolean))].map(modelTitle);
+  // Proxy usage from before per-request pricing is estimated at the fallback
+  // models; older usage from local logs is priced by model when the history has it.
   const parts = [
-    since ? `per request since ${isToday(since) ? "today" : day(since)} ${clock(since)}` : "",
-    p.history_by_model ? "earlier usage priced by model from local logs" : models.length ? `earlier usage estimated at ${models.join(" and ")} prices` : "",
+    since ? `Per request since ${isToday(since) ? "today" : day(since)} ${clock(since)}.` : "",
+    models.length ? `Earlier proxy usage estimated at ${models.join(" and ")} prices${p.history_by_model ? ", older usage priced by model from local logs" : ""}.` : "",
   ].filter(Boolean);
-  return "At public API list prices." + (parts.length ? " " + cap(parts.join("; ")) + "." : "");
+  return ["At public API list prices.", ...parts].join(" ");
 }
 
 // The hover on an API cost card: what the prices leave out.
