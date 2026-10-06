@@ -279,9 +279,12 @@ function stripHtml(models, fr, now) {
   });
   const max = Math.max(0, ...segs.map((s) => s.n));
   const total = models.length;
+  // None available stands apart from fewer than usual.
   return segs.map((s) => {
     const x0 = fr.x(s.from), x1 = fr.x(s.to);
-    return `<div class="${s.n < max ? "low" : ""}" style="left:${pc(x0)};width:${pc(x1 - x0)}"><span>${s.n} of ${total}</span></div>`;
+    const cls = s.n === 0 ? "none" : s.n < max ? "low" : "";
+    const data = `data-n="${s.n}" data-total="${total}" data-from="${s.from}" data-to="${s.to}"`;
+    return `<div class="${cls}" style="left:${pc(x0)};width:${pc(x1 - x0)}" ${data}><span>${s.n === 0 ? `${warnIcon(12)}<b>None</b>` : `${s.n} of ${total}`}</span></div>`;
   }).join("");
 }
 
@@ -337,8 +340,13 @@ export function timeline(accts) {
   const mount = (root) => {
     const tl = root.querySelector("[data-tl]");
     if (!tl) return;
-    // Strip counts that do not fit their stretch are left out.
-    tl.querySelectorAll(".tl-strip span").forEach((s) => { if (s.scrollWidth > s.clientWidth + 1) s.classList.add("hide"); });
+    // Strip counts that do not fit their stretch are left out. A stretch with
+    // none available keeps its warning icon when the word does not fit.
+    tl.querySelectorAll(".tl-strip span").forEach((s) => {
+      const over = () => s.scrollWidth > s.clientWidth + 1;
+      if (over() && s.parentElement.classList.contains("none")) s.classList.add("compact");
+      if (over()) s.classList.add("hide");
+    });
     // Labels keep inside the row and never overlap. A label that starts just
     // inside the previous one is nudged right; one that cannot fit is hidden.
     tl.querySelectorAll("[data-tl-row]").forEach((area) => {
@@ -367,29 +375,47 @@ export function timeline(accts) {
       if (holding) S.hold = Math.max(0, S.hold - 1);
       holding = false;
     };
+    // The tip sits above the hovered area, or below it near the top.
+    const showTip = (area, e, html) => {
+      if (!holding) { S.hold++; holding = true; }
+      if (!tip) { tip = document.createElement("div"); tip.className = "tip sm"; tl.appendChild(tip); }
+      tip.innerHTML = html;
+      const ar = area.getBoundingClientRect(), tr = tl.getBoundingClientRect();
+      const w = tip.offsetWidth, h = tip.offsetHeight;
+      const x = Math.max(0, Math.min(e.clientX - tr.left + 12, tr.width - w));
+      let y = ar.top - tr.top - h - 4;
+      if (y < 0) y = ar.bottom - tr.top + 4;
+      tip.style.left = x + "px";
+      tip.style.top = y + "px";
+    };
     tl.querySelectorAll("[data-tl-row]").forEach((area, idx) => {
       const m = rows[idx];
       area.addEventListener("mousemove", (e) => {
-        const ar = area.getBoundingClientRect(), tr = tl.getBoundingClientRect();
+        const ar = area.getBoundingClientRect();
         const t = fr.at((e.clientX - ar.left) / ar.width);
         const v = valueAt(m, t);
         if (v == null) return clear();
-        if (!holding) { S.hold++; holding = true; }
         if (!guide) { guide = document.createElement("i"); guide.className = "tl-guide"; }
         if (guide.parentElement !== area) area.appendChild(guide);
         guide.style.left = e.clientX - ar.left + "px";
-        if (!tip) { tip = document.createElement("div"); tip.className = "tip sm"; tl.appendChild(tip); }
         const when = `${day(t)}, ${clock(t)}`;
         const note = held(m, t) ? (m.hold[1] === Infinity ? m.st.text || "Unavailable" : "Resting, not used for new sessions") : t > now ? "At the current burn" : "";
-        tip.innerHTML = `<div class="h"><span>${esc(when)}</span><span>${v <= 0 ? "Out" : Math.round(v) + "% left"}</span></div>${note ? `<div class="s">${esc(note)}</div>` : ""}`;
-        const w = tip.offsetWidth, h = tip.offsetHeight;
-        const x = Math.max(0, Math.min(e.clientX - tr.left + 12, tr.width - w));
-        let y = ar.top - tr.top - h - 4;
-        if (y < 0) y = ar.bottom - tr.top + 4;
-        tip.style.left = x + "px";
-        tip.style.top = y + "px";
+        showTip(area, e, `<div class="h"><span>${esc(when)}</span><span>${v <= 0 ? "Out" : Math.round(v) + "% left"}</span></div>${note ? `<div class="s">${esc(note)}</div>` : ""}`);
       });
       area.addEventListener("mouseleave", clear);
+    });
+    // Strip hover: how many accounts are available, from when to when, so a
+    // stretch too narrow for its label can still be read.
+    const stamp = (t) => (Math.abs(t - now) < 6 * 864e5 ? weekdayTime(t) : `${day(t)} ${clock(t)}`);
+    tl.querySelectorAll(".tl-strip").forEach((strip) => {
+      strip.addEventListener("mousemove", (e) => {
+        const seg = e.target.closest(".tl-strip > div");
+        if (!seg) return clear();
+        const n = Number(seg.dataset.n);
+        const head = n === 0 ? "None available" : `${n} of ${seg.dataset.total} available`;
+        showTip(strip, e, `<div class="h"><span>${esc(head)}</span></div><div class="s">${esc(`${stamp(Number(seg.dataset.from))} to ${stamp(Number(seg.dataset.to))}`)}</div>`);
+      });
+      strip.addEventListener("mouseleave", clear);
     });
   };
   return { html, mount };
