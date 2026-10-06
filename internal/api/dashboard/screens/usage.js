@@ -295,7 +295,7 @@ export function view() {
   const allowance = allowanceChart({ key: "usAllowance", ids, long, colorOf });
   const allowanceSec = `<div class="usec">
     <div class="block">
-      <div class="uhead"><div class="t"><b>Allowance</b><span class="muted">${long ? "Where each weekly limit is heading before it resets" : "Where each 5-hour limit is heading before it resets"}</span></div>${seg([{ id: "week", label: "Week" }, { id: "5h", label: "5 hours" }], long ? "week" : "5h", "data-us-window", "bare")}</div>
+      <div class="uhead"><div class="t"><b>Allowance</b><span class="muted">${long ? "Where each weekly limit is heading, and when it resets" : "Where each 5-hour limit is heading, and when it resets"}</span></div>${seg([{ id: "week", label: "Week" }, { id: "5h", label: "5 hours" }], long ? "week" : "5h", "data-us-window", "bare")}</div>
       ${allowance.html}
     </div>
     ${allowanceTable(ids, long, colorOf)}

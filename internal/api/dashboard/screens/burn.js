@@ -2,7 +2,7 @@
 // and how fast each account is using it.
 import {
   S, esc, clock, day, weekdayTime, resetShort, logo, email, accounts, validTime, limits, left,
-  table, timeChart, bindChart, tipRows, warnState, meterCell, dayKey, isToday, status,
+  table, timeChart, bindChart, spaceMarks, tipRows, warnState, meterCell, dayKey, isToday, status,
 } from "../core.js";
 import { accountColor } from "./common.js";
 
@@ -50,6 +50,47 @@ export function trajectory(ser, now = Date.now()) {
   return { long: !!ser.long, idle, leftNow, perHour, burned, since, coveredH, rate, reset, runsOut, leftAtReset };
 }
 
+// Allowance left at time t (from now on) at the current rate. It runs down
+// from now, refills to 100% at each reset and runs down again at the same rate.
+export function projectedAt(tr, now, period, t) {
+  if (!tr || tr.rate == null || !(tr.reset > now) || t < now) return null;
+  if (t < tr.reset) return Math.max(0, tr.leftNow - tr.rate * ((t - now) / HOUR));
+  const from = period > 0 ? tr.reset + Math.floor((t - tr.reset) / period) * period : tr.reset;
+  return Math.max(0, 100 - tr.rate * ((t - from) / HOUR));
+}
+
+// The same projection as points for a line from now to end: each stretch
+// runs down to 0 at most, and a reset is a vertical step back up to 100%.
+function projectionPoints(tr, now, end, period, xOf) {
+  const pts = [];
+  if (tr.rate == null || !(tr.reset > now)) return pts;
+  let from = now, v0 = tr.leftNow, next = tr.reset;
+  for (;;) {
+    const stop = Math.min(next, end);
+    pts.push({ x: xOf(from), v: v0 });
+    const out = tr.rate > 0 ? from + (v0 / tr.rate) * HOUR : Infinity;
+    if (out < stop) pts.push({ x: xOf(out), v: 0 });
+    pts.push({ x: xOf(stop), v: Math.max(0, v0 - tr.rate * ((stop - from) / HOUR)) });
+    if (next > end) break;
+    // The reset: back to 100%. With no known period there is no next one.
+    from = next;
+    v0 = 100;
+    next = period > 0 ? next + period : Infinity;
+    if (from >= end) { pts.push({ x: xOf(from), v: 100 }); break; }
+  }
+  return pts;
+}
+
+// The reset times of one account that fall between now and end.
+function resetsUntil(tr, now, end, period) {
+  const out = [];
+  for (let t = tr.reset; t > now && t <= end; t += period) {
+    out.push(t);
+    if (!(period > 0)) break;
+  }
+  return out;
+}
+
 export const pctRate = (v) => (v == null ? "–" : v > 0 && v < 1 ? v.toFixed(1).replace(/\.0$/, "") + "%" : Math.round(v) + "%");
 
 // The rate a projection uses: a share a day for a weekly meter, an hour for a 5-hour one.
@@ -69,7 +110,8 @@ export function outlook(tr, { short = false } = {}) {
   return `Lasts to reset, about ${Math.round(tr.leftAtReset)}% left`;
 }
 
-// Allowance left for the given accounts: history solid, the trajectory dashed to each reset.
+// Allowance left for the given accounts: history solid, then the trajectory
+// dashed, refilling at each reset, with the resets marked above the plot.
 // colorOf(id, idx): the colour for an account, when the screen keys it elsewhere too.
 export function allowanceChart({ key, ids, long, colorOf = null }) {
   const nm = accountLabels();
@@ -100,10 +142,13 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
   }
   const start = gridStart + offset * step;
   const nowX = (now - start) / step;
-  let end = now + (long ? 24 * HOUR : 5 * HOUR);
+  // Run a little past the last reset, a day for the week and an hour for 5
+  // hours, so the refill shows.
   const trs = list.map((x) => trajectory(x.ser, now));
-  for (const tr of trs) if (tr.reset > end) end = tr.reset;
-  end = Math.min(end, now + (long ? 7 * 24 * HOUR : 5 * HOUR));
+  const after = long ? 24 * HOUR : HOUR;
+  let end = now + (long ? 24 * HOUR : 5 * HOUR);
+  for (const tr of trs) if (tr.reset > now) end = Math.max(end, tr.reset + after);
+  end = Math.min(end, now + (long ? 8 * 24 * HOUR : 6 * HOUR));
   const n = Math.floor((end - start) / step) + 1;
   const xOf = (t) => (t - start) / step;
 
@@ -111,15 +156,11 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
     const tr = trs[k];
     const values = new Array(n).fill(null);
     x.ser.used.forEach((u, i) => { if (u != null && i >= offset && i - offset < n) values[i - offset] = 100 - u / 10; });
-    let proj = [];
-    if (tr.rate != null && tr.reset > now) {
-      const stop = Math.min(tr.reset, end);
-      proj.push({ x: nowX, v: tr.leftNow });
-      if (tr.runsOut && tr.runsOut < stop) proj.push({ x: xOf(tr.runsOut), v: 0 });
-      proj.push({ x: xOf(stop), v: tr.runsOut && tr.runsOut < stop ? 0 : Math.max(0, tr.leftNow - tr.rate * ((stop - now) / HOUR)) });
-    }
-    return { id: x.id, color: x.color, label: nm[x.id] || x.id, values, proj, tr, ser: x.ser, nowV: tr.leftNow };
+    const period = (Number(x.ser.window_seconds) || 0) * 1000;
+    const proj = projectionPoints(tr, now, end, period, xOf);
+    return { id: x.id, color: x.color, label: nm[x.id] || x.id, values, proj, tr, period, ser: x.ser, nowV: tr.leftNow };
   });
+  const marks = lines.flatMap((l) => resetsUntil(l.tr, now, end, l.period).map((t) => ({ i: xOf(t), color: l.color, text: isToday(t) ? clock(t) : resetShort(t) })));
 
   const labels = [];
   for (let i = 0; i < n; i++) {
@@ -134,7 +175,7 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
   const height = 160;
   const cols = Array.from({ length: n }, (_, i) => ({ values: Object.fromEntries(lines.map((l) => [l.id, l.values[i]])) }));
   const series = lines.map((l) => ({ key: l.id, color: l.color, proj: l.proj, nowV: l.nowV }));
-  const html = timeChart({ id: key, format: "line", series, cols, height, max: 100, nowX, labels: xl, yfmt: (v) => Math.round(v) + "%" });
+  const html = timeChart({ id: key, format: "line", series, cols, height, max: 100, nowX, labels: xl, marks, yfmt: (v) => Math.round(v) + "%" });
   const tip = (i) => {
     const t = start + i * step;
     const future = t > now;
@@ -142,7 +183,7 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
     for (const l of lines) {
       let v = null;
       if (!future) v = l.values[i];
-      else if (l.tr.rate != null && t <= l.tr.reset) v = l.tr.runsOut && t >= l.tr.runsOut ? 0 : Math.max(0, l.tr.leftNow - l.tr.rate * ((t - now) / HOUR));
+      else v = projectedAt(l.tr, now, l.period, t);
       if (v == null) continue;
       rows.push({ k: l.label, v: Math.round(v) + "% left", color: l.color });
     }
@@ -153,7 +194,7 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
   return {
     html,
     legend: lines.map((l) => ({ id: l.id, label: l.label, color: l.color })),
-    mount(root) { bindChart(root, key, tip); },
+    mount(root) { bindChart(root, key, tip); spaceMarks(root, key); },
   };
 }
 
