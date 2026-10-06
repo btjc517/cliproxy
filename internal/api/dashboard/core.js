@@ -801,22 +801,27 @@ export function bindChart(root, id, tipFor) {
   plot.addEventListener("mouseleave", clear);
 }
 
-// Marks above a line chart keep apart: one that starts inside the one before
-// moves right, and one that would then run off the chart is hidden.
+// Marks above a line chart keep apart and in order: each starts 8px after
+// the one before, and from the right edge back they are pulled left to fit.
+// Only marks that would then start left of the chart are hidden.
 export function spaceMarks(root, id) {
   const lane = root.querySelector(`[data-chart="${id}"] .cmarks`);
   if (!lane) return;
   for (const el of lane.children) { el.classList.remove("hide"); el.style.transform = ""; }
   const lr = lane.getBoundingClientRect();
   if (!lr.width) return; // not laid out yet: nothing to measure against
-  let edge = -Infinity;
-  const items = [...lane.children].map((el) => ({ el, r: el.getBoundingClientRect() })).sort((a, b) => a.r.left - b.r.left);
-  for (const { el, r } of items) {
-    let shift = Math.min(0, lr.right - r.right);
-    if (r.left + shift < edge + 8) shift = edge + 8 - r.left;
-    if (r.right + shift > lr.right + 1) { el.classList.add("hide"); continue; }
-    if (shift) el.style.transform = `translateX(${shift - 6}px)`;
-    edge = r.right + shift;
+  const items = [...lane.children].map((el) => {
+    const r = el.getBoundingClientRect();
+    return { el, at: r.left, w: r.width, x: r.left };
+  }).sort((a, b) => a.at - b.at);
+  for (let k = 1; k < items.length; k++) items[k].x = Math.max(items[k].x, items[k - 1].x + items[k - 1].w + 8);
+  for (let k = items.length - 1; k >= 0; k--) {
+    const limit = k === items.length - 1 ? lr.right : items[k + 1].x - 8;
+    items[k].x = Math.min(items[k].x, limit - items[k].w);
+  }
+  for (const it of items) {
+    if (it.x < lr.left - 1) it.el.classList.add("hide");
+    else if (it.x !== it.at) it.el.style.transform = `translateX(${it.x - it.at - 6}px)`;
   }
 }
 
