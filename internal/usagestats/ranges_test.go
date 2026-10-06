@@ -31,13 +31,21 @@ func recordSample(store *Store, s sample) {
 	})
 }
 
+// priced is the sample's counters with the API cost its record gets. The
+// record names no model, so it is priced at its provider's fallback.
+func (s sample) priced() Counters {
+	counters := s.counters
+	counters.APICost = costFor("", providerOf("", s.auth), counters, defaultFallback(), true)
+	return counters
+}
+
 // sumSamples adds the samples of auth ("" for every credential) that fall in
-// [from, to).
+// [from, to), with their API cost.
 func sumSamples(samples []sample, auth string, from, to time.Time) Counters {
 	var total Counters
 	for _, s := range samples {
 		if (auth == "" || s.auth == auth) && !s.at.Before(from) && s.at.Before(to) {
-			total.add(s.counters)
+			total.add(s.priced())
 		}
 	}
 	return total
@@ -320,7 +328,9 @@ func TestPerfRollupKeepsTotals(t *testing.T) {
 				if scope == "all" || scope == "claude" || scope == "codex" {
 					auth = ""
 				}
+				// The performance series carries tokens but no API cost.
 				want := sumSamples(samples, auth, from, end)
+				want.APICost = 0
 				if scope == "claude" || scope == "codex" {
 					want = Counters{}
 					for _, s := range samples {
