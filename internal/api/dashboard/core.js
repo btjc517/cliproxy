@@ -615,10 +615,11 @@ export function figure(label, value, unit = "", opts = {}) {
 // ---------- time charts: lines by default, bars on request ----------
 
 // Shared axes for both forms: three y labels, gridlines at the top and middle.
-function chartFrame({ id, format, n, height, top, yfmt, plotHtml, xl, dense }) {
-  return `<div class="chart ${format === "bars" ? "" : "linechart"}" data-chart="${esc(id)}" data-format="${format}" data-n="${n}">
+function chartFrame({ id, format, n, height, top, yfmt, plotHtml, xl, dense, marksHtml = "" }) {
+  return `<div class="chart ${format === "bars" ? "" : "linechart"} ${marksHtml ? "marked" : ""}" data-chart="${esc(id)}" data-format="${format}" data-n="${n}">
     <div class="yax" style="height:${height}px"><span>${esc(yfmt(top))}</span><span>${esc(yfmt(top / 2))}</span><span>0</span></div>
     <div class="plotwrap">
+      ${marksHtml ? `<div class="cmarks">${marksHtml}</div>` : ""}
       <div class="plot ${dense ? "dense" : ""}" style="height:${height}px">
         <div class="grid" style="top:0"></div><div class="grid" style="top:${Math.round(height / 2)}px"></div>
         ${plotHtml}
@@ -669,7 +670,8 @@ const drawn = new Map();
 // For a chart that runs past now (allowance left), nowX is now's fractional
 // grid index: each series then ends at {nowX, nowV} with its dot there, and
 // `proj` ([{x, v}], x fractional) is drawn dashed after it.
-function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], max = null, nowX = null }) {
+// marks: [{i, color, text}], reset times drawn in a row above the plot.
+function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], max = null, nowX = null, marks = [] }) {
   const n = cols.length;
   const vals = series.map((s) => cols.map((c) => (s.gaps && c.empty ? null : num(c.values[s.key]))));
   const top = max != null ? max : niceMax(Math.max(0, ...vals.flat().filter((v) => v != null)));
@@ -708,7 +710,8 @@ function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], ma
   }).join("");
   const nowLine = nowX != null ? `<div class="nowline" style="left:${(xf(nowX) * 100).toFixed(2)}%"></div>` : "";
   const svg = `<svg viewBox="0 0 1000 ${height}" preserveAspectRatio="none" width="100%" height="${height}" aria-hidden="true">${paths}</svg>`;
-  return chartFrame({ id, format: "line", n, height, top, yfmt, plotHtml: nowLine + svg + dots, xl });
+  const marksHtml = marks.map((m) => `<span style="left:${(xf(m.i) * 100).toFixed(2)}%">${icon("reset", 12, m.color)}<span>${esc(m.text)}</span></span>`).join("");
+  return chartFrame({ id, format: "line", n, height, top, yfmt, plotHtml: nowLine + svg + dots, xl, marksHtml });
 }
 
 // A time chart in the viewer's chosen form. Same options as barChart.
@@ -796,6 +799,23 @@ export function bindChart(root, id, tipFor) {
     tip.style.top = small ? "14px" : "-14px";
   });
   plot.addEventListener("mouseleave", clear);
+}
+
+// Marks above a line chart keep apart: one that starts inside the one before
+// moves right, and one that would then run off the chart is hidden.
+export function spaceMarks(root, id) {
+  const lane = root.querySelector(`[data-chart="${id}"] .cmarks`);
+  if (!lane) return;
+  const lr = lane.getBoundingClientRect();
+  let edge = -Infinity;
+  const items = [...lane.children].map((el) => ({ el, r: el.getBoundingClientRect() })).sort((a, b) => a.r.left - b.r.left);
+  for (const { el, r } of items) {
+    let shift = Math.min(0, lr.right - r.right);
+    if (r.left + shift < edge + 8) shift = edge + 8 - r.left;
+    if (r.right + shift > lr.right + 1) { el.classList.add("hide"); continue; }
+    if (shift) el.style.transform = `translateX(${shift - 6}px)`;
+    edge = r.right + shift;
+  }
 }
 
 // Line or bars switch for one chart; the choice is remembered per viewer.

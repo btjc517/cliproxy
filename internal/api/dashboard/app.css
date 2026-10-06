@@ -309,6 +309,11 @@ svg { display: block; flex-shrink: 0; }
 .chart .xax span.last { transform: translateX(-100%); }
 /* Line chart: allowance left over time, with the trajectory dashed. */
 .linechart .plot { display: block; }
+.chart.marked .yax { margin-top: 24px; }
+.chart .cmarks { position: relative; height: 16px; }
+.chart .cmarks > span { position: absolute; top: 0; height: 16px; display: flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--muted-fg); transform: translateX(-6px); pointer-events: none; }
+.chart .cmarks > span.hide { visibility: hidden; }
+.linechart .cmarks svg { position: static; flex-shrink: 0; }
 .linechart svg { position: absolute; inset: 0; overflow: visible; }
 .linechart path { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
 .linechart path.proj { opacity: .7; }
