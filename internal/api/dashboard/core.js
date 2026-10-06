@@ -174,17 +174,21 @@ export function int(n) {
   return (Number(n) || 0).toLocaleString("en-GB");
 }
 
-// US dollars: "$0.42", "$12.30", "$1,234", "$12.3k", "$1.23M".
+// US dollars: "$0.42", "$12.30", "$1,234", "$12.3k", "$1.23M". Each unit is
+// picked after rounding, so $9,999.50 reads "$10.0k" and $999,950 "$1.00M".
 export function money(n) {
   n = Number(n) || 0;
+  const sign = n < 0 ? "-" : "";
   const a = Math.abs(n);
-  if (a >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
-  if (a >= 1e4) return "$" + (n / 1e3).toFixed(1) + "k";
-  if (a >= 1e3) return "$" + Math.round(n).toLocaleString("en-GB");
-  return "$" + n.toFixed(2);
+  const cents = Math.round(a * 100) / 100, dollars = Math.round(a), k = Math.round(a / 100) / 10;
+  if (k >= 1e3) return `${sign}$${(Math.round(a / 1e4) / 100).toFixed(2)}M`;
+  if (k >= 10) return `${sign}$${k.toFixed(1)}k`;
+  if (cents >= 1e3) return sign + "$" + dollars.toLocaleString("en-GB");
+  return `${sign}$${cents.toFixed(2)}`;
 }
-// Dollars on a chart's y axis, short enough for its column.
-export const moneyAxis = (v) => "$" + (v >= 1e3 ? fmt(v) : v >= 10 ? Math.round(v) : Number(v.toFixed(2)));
+// Dollars on a chart's y axis, short enough for its column. Below a cent it
+// keeps two significant figures, so a sub-cent chart does not read "$0".
+export const moneyAxis = (v) => "$" + (v >= 1e3 ? fmt(v) : v >= 10 ? Math.round(v) : v >= 0.01 || !v ? Number(v.toFixed(2)) : Number(v.toPrecision(2)));
 
 export function ms(v) {
   v = Number(v) || 0;
@@ -544,7 +548,7 @@ export function sessions() {
     if (!pid) continue;
     let p = byId.get(pid);
     if (!p) {
-      p = { id: pid, provider: s.provider, auth_ids: [], first_seen: s.first_seen, last_seen: s.last_seen, requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, threads: [], title: "", machine: s.machine || "" };
+      p = { id: pid, provider: s.provider, auth_ids: [], first_seen: s.first_seen, last_seen: s.last_seen, requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0, threads: [], title: "", machine: s.machine || "" };
       byId.set(pid, p);
     }
     p.threads.push(s);
@@ -552,7 +556,7 @@ export function sessions() {
   const out = [...byId.values()].map((p) => {
     const t = { ...p, own: { requests: p.requests, failed: p.failed }, by_auth: addByAuth({}, p.by_auth) };
     for (const c of p.threads) {
-      for (const k of ["requests", "failed", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]) t[k] = (t[k] || 0) + (c[k] || 0);
+      for (const k of ["requests", "failed", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "api_cost"]) t[k] = (t[k] || 0) + (c[k] || 0);
       for (const id of c.auth_ids || []) if (!t.auth_ids.includes(id)) t.auth_ids.push(id);
       addByAuth(t.by_auth, c.by_auth);
       if (ms0(c.last_seen) > ms0(t.last_seen)) t.last_seen = c.last_seen;
