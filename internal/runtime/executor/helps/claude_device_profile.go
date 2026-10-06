@@ -637,3 +637,9 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	r.Header.Set("X-Stainless-Arch", profile.Arch)
 	r.Header.Set("User-Agent", profile.UserAgent)
 }
+
+// DefaultClaudeUserAgent returns the Claude Code user agent the proxy presents
+// upstream when no client profile applies.
+func DefaultClaudeUserAgent(cfg *config.Config) string {
+	return defaultClaudeDeviceProfile(cfg).UserAgent
+}

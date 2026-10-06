@@ -330,6 +330,17 @@ func (s *RoutingState) observeResult(result Result, headers http.Header, now tim
 		account.Health.LastFailureStatus = result.Error.StatusCode()
 		account.Health.LastFailureCode = upstreamErrorCode(result.Error)
 	}
+	mergeMeters(account, meters, model, now)
+	if len(meters) > 0 {
+		facts.LastModel = model
+		facts.ObservedAt = now
+		account.Facts = facts
+	}
+	s.dirty = true
+}
+
+// mergeMeters folds observed meters into an account and its history.
+func mergeMeters(account *accountRouting, meters map[string]*Meter, model string, now time.Time) {
 	for name, observed := range meters {
 		existing := account.Meters[name]
 		if existing == nil {
@@ -351,12 +362,6 @@ func (s *RoutingState) observeResult(result Result, headers http.Header, now tim
 		existing.Models = addMeterModel(existing.Models, model)
 		account.History[name] = appendMeterSample(account.History[name], MeterSample{At: now, Utilization: observed.Utilization})
 	}
-	if len(meters) > 0 {
-		facts.LastModel = model
-		facts.ObservedAt = now
-		account.Facts = facts
-	}
-	s.dirty = true
 }
 
 func appendMeterSample(samples []MeterSample, sample MeterSample) []MeterSample {
