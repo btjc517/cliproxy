@@ -23,9 +23,11 @@ func TestAccountColoursAreNeverGrey(t *testing.T) {
 		t.Fatal("ACCOUNT_COLORS not found in common.js")
 	}
 	// Every declaration of each custom property, in any block, so a theme or
-	// later override cannot slip a grey past the check.
+	// later override cannot slip a grey past the check. Comments go first;
+	// a declaration ends at a semicolon or at the end of its block.
+	css = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAll(css, nil)
 	decls := map[string][]string{}
-	for _, m := range regexp.MustCompile(`(--[\w-]+)\s*:\s*([^;]+);`).FindAllSubmatch(css, -1) {
+	for _, m := range regexp.MustCompile(`(--[\w-]+)\s*:\s*([^;}]+)`).FindAllSubmatch(css, -1) {
 		decls[string(m[1])] = append(decls[string(m[1])], strings.TrimSpace(string(m[2])))
 	}
 	entries := strings.Split(string(list[1]), ",")
@@ -54,12 +56,12 @@ func TestAccountColoursAreNeverGrey(t *testing.T) {
 	}
 }
 
-// isGrey fails the test on anything but #RRGGBB or #RRGGBBAA, so a colour in
-// another notation cannot pass unchecked.
+// isGrey fails the test on anything but opaque #RRGGBB, so a colour in another
+// notation, or a transparent one, cannot pass unchecked.
 func isGrey(t *testing.T, value string) bool {
 	t.Helper()
-	if !regexp.MustCompile(`^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$`).MatchString(value) {
-		t.Fatalf("account colour %q is not a hex colour", value)
+	if !regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`).MatchString(value) {
+		t.Fatalf("account colour %q is not an opaque #RRGGBB colour", value)
 	}
 	channel := func(s string) int {
 		v, _ := strconv.ParseUint(s, 16, 8)
