@@ -1,9 +1,9 @@
 // Pieces shared by several screens: provider tabs and account chips, the
-// usage figure strip with its hourly chart, and session rows.
+// usage figure strip with its hourly chart, the API cost note, and session rows.
 import {
-  S, esc, fmt, int, ms, pctText, rateText, clock, day, seen, icon, logo, tabs, table, figure, timeChart, bindChart, tipRows,
-  accounts, hourly, tokens, cacheReuse, perf, sumUsage, names, sessionTitle, sessionHref, warnState,
-  chartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle, whenShort, wantScope, selectionPerf,
+  S, esc, fmt, int, ms, money, moneyAxis, pctText, rateText, clock, day, seen, icon, logo, tabs, table, figure, timeChart, bindChart, tipRows,
+  accounts, hourly, tokens, cacheReuse, apiCost, costKnown, perf, sumUsage, names, sessionTitle, sessionHref, warnState,
+  chartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle, whenShort, wantScope, selectionPerf, validTime, isToday, plainObject,
 } from "../core.js";
 
 export const PROVIDERS = [
@@ -132,11 +132,48 @@ export function accountColor(id) {
   return colorCache.map.get(id) || ACCOUNT_COLORS[0];
 }
 
+// ---------- API cost ----------
+
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+// "claude-opus-5-5" as "Opus 5.5", "gpt-6-astra" as "GPT-6 Astra"; other ids as given.
+function modelTitle(id) {
+  const s = String(id || "");
+  let m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?$/.exec(s);
+  if (m) return `${cap(m[1])} ${m[2]}${m[3] ? "." + m[3] : ""}`;
+  m = /^gpt-([\d.]+)(?:-([a-z]+))?$/.exec(s);
+  if (m) return `GPT-${m[1]}${m[2] ? " " + cap(m[2]) : ""}`;
+  return s;
+}
+
+// The line under a chart of API cost: which prices, and how usage from before
+// per-request pricing was priced. provs: the providers of the accounts in view.
+export function costNote(provs) {
+  const p = S.data?.summary?.pricing || {};
+  const since = validTime(p.exact_since);
+  const fb = plainObject(p.fallback) || {};
+  const models = [...new Set(provs.map((k) => fb[k]).filter(Boolean))].map(modelTitle);
+  // Proxy usage from before per-request pricing is estimated at the fallback
+  // models; older usage from local logs is priced by model when the history has it.
+  const parts = [
+    since ? `Per request since ${isToday(since) ? "today" : day(since)} ${clock(since)}.` : "",
+    models.length ? `Earlier proxy usage estimated at ${models.join(" and ")} prices${p.history_by_model ? ", older usage priced by model from local logs" : ""}.` : "",
+  ].filter(Boolean);
+  return ["At public API list prices.", ...parts].join(" ");
+}
+
+// The hover on an API cost card: what the prices leave out.
+export function costTitle() {
+  const n = S.data?.summary?.pricing?.not_modelled;
+  return n ? "Not modelled: " + n : "";
+}
+
 // ---------- usage figures and the 24-hour chart ----------
 
 const METRICS = [
   { id: "requests", label: "Requests" },
   { id: "tokens", label: "Tokens" },
+  { id: "cost", label: "API cost" },
   { id: "cache", label: "Cache reuse" },
   { id: "ttft", label: "First token, median" },
   { id: "throughput", label: "Throughput" },
@@ -146,24 +183,29 @@ const METRICS = [
 // ids: accounts in scope; p: their performance over 24 hours (perfFor);
 // stackBy: "provider" | "account" | "none"; chart: the id its line or bars choice is kept under.
 export function usageStrip({ key, chart: chartId, ids, p, stackBy, legend = true }) {
-  const metric = S.ui[key] || "requests";
+  // API cost shows only when the backend prices usage.
+  const metrics = METRICS.filter((m) => m.id !== "cost" || costKnown());
+  const metric = metrics.some((m) => m.id === S.ui[key]) ? S.ui[key] : "requests";
   const u = sumUsage(ids, "last_24h");
   const values = {
     requests: int(u.requests),
     tokens: fmt(tokens(u)),
+    cost: money(apiCost(u)),
     cache: pctText(cacheReuse(u)),
     ttft: p?.ttft_ms?.p50 ? ms(p.ttft_ms.p50) : "–",
     throughput: p?.throughput?.p50 ? String(Math.round(p.throughput.p50)) : "–",
     failure: rateText(u.failed, u.requests),
   };
-  const figs = METRICS.map((m) => figure(m.label, esc(values[m.id]), m.id === "throughput" && values.throughput !== "–" ? "tokens/s" : "", { metric: m.id, on: m.id === metric })).join("");
+  const figs = metrics.map((m) => figure(m.label, esc(values[m.id]), m.id === "throughput" && values.throughput !== "–" ? "tokens/s" : "", { metric: m.id, on: m.id === metric, title: m.id === "cost" ? costTitle() : "" })).join("");
 
   const chart = buildChart({ chartId, ids, p, stackBy, metric });
   const leg = legend && chart.series.length > 1 ? `<div class="legend">${legendHtml(chart.series)}</div>` : "";
   const tools = chart.drawn ? `<div class="ctools">${formatToggle(chartId)}</div>` : "";
+  const provs = accounts().filter((a) => ids.includes(a.id)).map((a) => a.provider);
+  const note = metric === "cost" ? `<div class="muted cnote">${esc(costNote(provs))}</div>` : "";
   const html = `<div class="figs chartbox">
     <div class="figrow"><div class="figtabs">${figs}</div><div class="figend">${leg}${tools}</div></div>
-    ${chart.html}
+    ${chart.html}${note}
   </div>`;
   const mount = (root) => {
     root.querySelectorAll(`.figs [data-metric]`).forEach((b) => {
@@ -218,12 +260,13 @@ function buildChart({ chartId, ids, p, stackBy, metric }) {
   const val = (b) => {
     if (!b) return 0;
     if (metric === "tokens") return tokens(b);
+    if (metric === "cost") return apiCost(b);
     if (metric === "failure") return b.failed || 0;
     return b.requests || 0;
   };
   const buckets = starts.map((s, i) => {
     const byAcct = {};
-    const sum = { requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+    const sum = { requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 };
     for (const a of all) {
       const b = per[a.id]?.[i];
       byAcct[a.id] = b;
@@ -247,20 +290,20 @@ function buildChart({ chartId, ids, p, stackBy, metric }) {
       return { values: v };
     });
   }
-  const yfmt = metric === "cache" ? (v) => Math.round(v) + "%" : (v) => fmt(v);
+  const yfmt = metric === "cache" ? (v) => Math.round(v) + "%" : metric === "cost" ? moneyAxis : (v) => fmt(v);
   const html = timeChart({ id: chartId, format, series: ser, cols, yfmt, max: metric === "cache" ? 100 : null, labels: timeLabels(starts, HOUR) });
   const tip = (i) => {
     const b = buckets[i];
     if (!b) return "";
     if (!b.sum.requests) return metric === "cache" ? gapNote(starts, i, HOUR, (k) => !!buckets[k].sum.requests) || "" : "";
-    const total = metric === "cache" ? pctText(cacheReuse(b.sum)) : metric === "tokens" ? fmt(tokens(b.sum)) : metric === "failure" ? int(b.sum.failed) : int(b.sum.requests);
+    const total = metric === "cache" ? pctText(cacheReuse(b.sum)) : metric === "tokens" ? fmt(tokens(b.sum)) : metric === "cost" ? money(apiCost(b.sum)) : metric === "failure" ? int(b.sum.failed) : int(b.sum.requests);
     const rows = [];
     all.forEach((a) => {
       const x = b.byAcct[a.id];
       if (!x || !x.requests) return;
       // Rows name accounts, so they carry account colours even when the chart stacks by provider.
       const color = accountColor(a.id);
-      rows.push({ k: nm[a.id], v: metric === "tokens" ? fmt(tokens(x)) : metric === "failure" ? int(x.failed) : int(x.requests), color });
+      rows.push({ k: nm[a.id], v: metric === "tokens" ? fmt(tokens(x)) : metric === "cost" ? money(apiCost(x)) : metric === "failure" ? int(x.failed) : int(x.requests), color });
     });
     const foot = [];
     if (metric !== "failure") foot.push({ k: "Failed", v: int(b.sum.failed), cls: b.sum.failed ? "warn" : "" });

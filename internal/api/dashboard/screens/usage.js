@@ -1,15 +1,15 @@
 // Usage: where each allowance is heading, tokens by account over the chosen
 // range, and a year of daily token activity.
 import {
-  S, esc, fmt, int, logo, email, status, warnState, sumUsage, tokens, cacheReuse, pctText, dayKey, hourly, tipRows, seg, table, figure,
+  S, esc, fmt, int, money, moneyAxis, logo, email, status, warnState, sumUsage, tokens, cacheReuse, apiCost, costKnown, pctText, dayKey, hourly, tipRows, seg, table, figure,
   timeChart, bindChart, chartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle, rangeTabs, bindRangeTabs, screenRange,
   providerTitle,
 } from "../core.js";
-import { providerTabs, bindProviderTabs, accountChips, scopeOf, readAt, accountColor, gapNote } from "./common.js";
+import { providerTabs, bindProviderTabs, accountChips, scopeOf, readAt, accountColor, gapNote, costNote, costTitle } from "./common.js";
 import { allowanceChart, allowanceTable } from "./burn.js";
 
 const DAY = 864e5;
-const EMPTY = () => ({ requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 });
+const EMPTY = () => ({ requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 });
 const add = (a, b) => { if (b) for (const k in a) a[k] += Number(b[k]) || 0; return a; };
 const rerender = () => window.dispatchEvent(new Event("dash:render"));
 
@@ -196,16 +196,20 @@ const METRICS = [
   { id: "requests", label: "Requests", val: (b) => Number(b.requests) || 0, f: int },
   { id: "cache", label: "Cache reuse" },
   { id: "output", label: "Output", val: (b) => Number(b.output_tokens) || 0, f: fmt },
+  { id: "cost", label: "API cost", val: (b) => apiCost(b), f: money },
 ];
 
 function tokensSection(sc, range, colorOf) {
   const ids = sc.ids;
   const data = usageBuckets(ids, range);
-  const metric = METRICS.find((m) => m.id === S.ui.usMetric) || METRICS[0];
+  // API cost shows only when the backend prices usage.
+  const cost = costKnown();
+  const metrics = METRICS.filter((m) => m.id !== "cost" || cost);
+  const metric = metrics.find((m) => m.id === S.ui.usMetric) || metrics[0];
   const u = data ? data.totals : null;
   const tile = (m) => {
-    const v = !u ? "–" : m.id === "cache" ? pctText(cacheReuse(u)) : m.id === "tokens" ? fmt(tokens(u)) : m.id === "requests" ? int(u.requests) : fmt(u.output_tokens);
-    return figure(m.label, esc(v), "", { metric: m.id, on: m.id === metric.id });
+    const v = !u ? "–" : m.id === "cache" ? pctText(cacheReuse(u)) : m.f(m.val(u));
+    return figure(m.label, esc(v), "", { metric: m.id, on: m.id === metric.id, title: m.id === "cost" ? costTitle() : "" });
   };
   const nm = Object.fromEntries(sc.shown.map((a) => [a.id, a.email]));
   let chart = `<div class="empty">No usage for this range yet. It fills in once the proxy keeps it.</div>`, tip = () => "";
@@ -225,7 +229,7 @@ function tokensSection(sc, range, colorOf) {
     const isCache = metric.id === "cache";
     chart = timeChart({
       id: chartId, format: chartFormat(chartId), series, cols, height: 140, max: isCache ? 100 : null,
-      yfmt: isCache ? (v) => Math.round(v) + "%" : (v) => fmt(v), labels: timeLabels(data.starts, data.step), dense: n > 40,
+      yfmt: isCache ? (v) => Math.round(v) + "%" : metric.id === "cost" ? moneyAxis : (v) => fmt(v), labels: timeLabels(data.starts, data.step), dense: n > 40,
     });
     tip = (i) => {
       const s = sumAt(i);
@@ -244,7 +248,7 @@ function tokensSection(sc, range, colorOf) {
     if (r == null) return `<span class="muted">–</span>`;
     return `<span class="metercell"><span class="meter"><i style="width:${Math.round(r)}%;background:${color}"></i></span><span>${Math.round(r)}%</span></span>`;
   };
-  const cells = (x, color) => [cell0(x.requests, int), cell0(x.input_tokens, fmt), cell0(x.cache_write_tokens, fmt), cell0(x.cache_read_tokens, fmt), cell0(x.output_tokens, fmt), reuse(x, color)];
+  const cells = (x, color) => [cell0(x.requests, int), cell0(x.input_tokens, fmt), cell0(x.cache_write_tokens, fmt), cell0(x.cache_read_tokens, fmt), cell0(x.output_tokens, fmt), ...(cost ? [cell0(x.api_cost, money)] : []), reuse(x, color)];
   const per = (id) => {
     if (!data) return null;
     if (data.totals && ids.length === 1) return data.totals;
@@ -265,13 +269,14 @@ function tokensSection(sc, range, colorOf) {
     { label: "", w: 32, cls: "lead" }, { label: "Account" },
     { label: "Requests", w: 80, r: true, cls: "num" }, { label: "New input", w: 96, r: true, cls: "num" },
     { label: "Written to cache", w: 112, r: true, cls: "num" }, { label: "Read from cache", w: 112, r: true, cls: "num" },
-    { label: "Output", w: 88, r: true, cls: "num" }, { label: "Cache reuse", w: 136, cls: "num reusecol" },
+    { label: "Output", w: 88, r: true, cls: "num" }, ...(cost ? [{ label: "API cost", w: 88, r: true, cls: "num" }] : []),
+    { label: "Cache reuse", w: 136, cls: "num reusecol" },
   ];
   const sub = RANGE_TEXT[range] + (ids.length > 1 ? ", by account" : "");
   const html = `<div class="usec chartbox">
     <div class="block tight">
       <div class="uhead"><div class="t"><b>Tokens</b><span class="muted">${esc(sub)}</span></div>${data && data.starts.length ? `<div class="ctools">${formatToggle(chartId)}</div>` : ""}</div>
-      <div class="uvis"><div class="figtabs">${METRICS.map(tile).join("")}</div>${chart}</div>
+      <div class="uvis"><div class="figtabs">${metrics.map(tile).join("")}</div>${chart}${metric.id === "cost" ? `<div class="muted cnote">${esc(costNote(sc.shown.map((a) => a.provider)))}</div>` : ""}</div>
     </div>
     ${table(cols, rows, { empty: "No accounts." })}
   </div>`;
@@ -306,7 +311,9 @@ export function view() {
   const hist = history(sc);
   const sums = hist.sums;
   const cols = weeks(hist.map, hist.known);
-  const fig = (label, x) => `<div><span class="muted">${label}</span><span class="bignum"><span class="v">${x ? fmt(tokens(x)) : "–"}</span></span></div>`;
+  // Each figure gets a second line at API prices when the backend prices usage.
+  const cost = costKnown();
+  const fig = (label, x) => `<div><span class="muted">${label}</span><span class="bignum"><span class="v">${x ? fmt(tokens(x)) : "–"}</span></span>${cost && x ? `<span class="muted">${esc(money(apiCost(x)))} at API prices</span>` : ""}</div>`;
   const scale = `<div class="scale">Less <i style="background:var(--surface-2)"></i><i style="background:color-mix(in srgb, var(--chart-1) 18%, transparent)"></i><i style="background:var(--chart-p50)"></i><i style="background:var(--chart-p90)"></i><i style="background:var(--chart-1)"></i><i style="background:var(--chart-p99)"></i> More</div>`;
   const historySec = `<div class="activity">
     <div class="uhead"><div class="t"><b>History</b><span class="muted">${esc(historySub(hist, cols))}</span></div></div>
