@@ -264,6 +264,8 @@ const P = {
   settings: "M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
   server: "M21.75 17.25v-.228a4.5 4.5 0 0 0-.12-1.03l-2.268-9.64a3.375 3.375 0 0 0-3.285-2.602H7.923a3.375 3.375 0 0 0-3.285 2.602l-2.268 9.64a4.5 4.5 0 0 0-.12 1.03v.228m19.5 0a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3m19.5 0a3 3 0 0 0-3-3H5.25a3 3 0 0 0-3 3m16.5 0h.008v.008h-.008v-.008Zm-3 0h.008v.008h-.008v-.008Z",
   reset: "M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99",
+  // Heroicons has no skull: Lucide's "skull" (ISC licence), its four shapes in one path.
+  skull: "M15 22a1 1 0 0 0 1-1v-1a2 2 0 0 0 1.56-3.25 8 8 0 1 0-11.12 0A2 2 0 0 0 8 20v1a1 1 0 0 0 1 1zM12.5 17l-.5-1-.5 1h1zM14 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0M8 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0",
   chevronRight: "m8.25 4.5 7.5 7.5-7.5 7.5",
   chevronLeft: "M15.75 19.5 8.25 12l7.5-7.5",
   chevronDown: "m19.5 8.25-7.5 7.5-7.5-7.5",
@@ -671,7 +673,8 @@ const drawn = new Map();
 // grid index: each series then ends at {nowX, nowV} with its dot there, and
 // `proj` ([{x, v}], x fractional) is drawn dashed after it.
 // marks: [{i, color, text}], reset times drawn in a row above the plot.
-function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], max = null, nowX = null, marks = [] }) {
+// bands: [{x0, x1, html}], stretches shaded behind the lines.
+function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], max = null, nowX = null, marks = [], bands = [] }) {
   const n = cols.length;
   const vals = series.map((s) => cols.map((c) => (s.gaps && c.empty ? null : num(c.values[s.key]))));
   const top = max != null ? max : niceMax(Math.max(0, ...vals.flat().filter((v) => v != null)));
@@ -711,7 +714,8 @@ function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], ma
   const nowLine = nowX != null ? `<div class="nowline" style="left:${(xf(nowX) * 100).toFixed(2)}%"></div>` : "";
   const svg = `<svg viewBox="0 0 1000 ${height}" preserveAspectRatio="none" width="100%" height="${height}" aria-hidden="true">${paths}</svg>`;
   const marksHtml = marks.map((m) => `<span style="left:${(xf(m.i) * 100).toFixed(2)}%">${icon("reset", 12, m.color)}<span>${esc(m.text)}</span></span>`).join("");
-  return chartFrame({ id, format: "line", n, height, top, yfmt, plotHtml: nowLine + svg + dots, xl, marksHtml });
+  const bandsHtml = bands.map((b) => `<div class="band" style="left:${(xf(b.x0) * 100).toFixed(2)}%;width:${((xf(b.x1) - xf(b.x0)) * 100).toFixed(2)}%">${b.html || ""}</div>`).join("");
+  return chartFrame({ id, format: "line", n, height, top, yfmt, plotHtml: bandsHtml + nowLine + svg + dots, xl, marksHtml });
 }
 
 // A time chart in the viewer's chosen form. Same options as barChart.

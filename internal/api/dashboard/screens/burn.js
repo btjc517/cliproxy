@@ -2,7 +2,7 @@
 // and how fast each account is using it.
 import {
   S, esc, clock, day, weekdayTime, resetShort, logo, email, accounts, validTime, limits, left,
-  table, timeChart, bindChart, spaceMarks, tipRows, warnState, meterCell, dayKey, isToday, status,
+  table, timeChart, bindChart, spaceMarks, tipRows, warnState, meterCell, dayKey, isToday, status, icon, providerTitle,
 } from "../core.js";
 import { accountColor } from "./common.js";
 
@@ -93,6 +93,50 @@ function resetsUntil(tr, now, end, period) {
   return out;
 }
 
+// The share left in a series' reading at time t, or null without one.
+function readingAt(ser, t) {
+  const step = (Number(ser.step_seconds) || 0) * 1000;
+  if (!step) return null;
+  const u = ser.used?.[Math.round((t - ms(ser.start)) / step)];
+  return u == null ? null : 100 - u / 10;
+}
+
+// Stretches, in chart x, where a provider has nothing left on any account it
+// can use: readings up to now, the projection after. Accounts that are off,
+// blocked or in error cannot serve and are left out. One with no reading, or
+// no rate to project, might still have some, so the provider is not dead then.
+function deadZones(providers, long, { now, start, step, n, nowX }) {
+  const zones = [];
+  const tOf = (x) => start + x * step;
+  for (const provider of providers) {
+    const pool = accounts().filter((a) => a.provider === provider && !["off", "blocked", "error"].includes(status(a).kind)).map((a) => {
+      const ser = allowanceSeries(a.id, long);
+      return ser && { ser, tr: trajectory(ser, now), period: (Number(ser.window_seconds) || 0) * 1000 };
+    });
+    if (!pool.length || pool.some((m) => !m)) continue;
+    const spans = [];
+    // Up to now: each grid step where every account read 0.
+    for (let i = 0; i < Math.min(n - 1, nowX); i++) {
+      if (pool.every((m) => readingAt(m.ser, tOf(i)) === 0)) spans.push([i, Math.min(i + 1, nowX)]);
+    }
+    // From now: the projection only changes course where one runs out or
+    // resets, so test the middle of each stretch between those points.
+    const cuts = new Set([nowX, n - 1]);
+    for (const m of pool) for (const q of projectionPoints(m.tr, now, tOf(n - 1), m.period, (t) => (t - start) / step)) cuts.add(q.x);
+    const xs = [...cuts].filter((x) => x >= nowX && x <= n - 1).sort((a, b) => a - b);
+    for (let k = 0; k < xs.length - 1; k++) {
+      const mid = tOf((xs[k] + xs[k + 1]) / 2);
+      if (xs[k + 1] > xs[k] && pool.every((m) => projectedAt(m.tr, now, m.period, mid) === 0)) spans.push([xs[k], xs[k + 1]]);
+    }
+    for (const [x0, x1] of spans) {
+      const last = zones[zones.length - 1];
+      if (last && last.provider === provider && x0 - last.x1 < 1e-6) last.x1 = Math.max(last.x1, x1);
+      else zones.push({ provider, x0, x1 });
+    }
+  }
+  return zones;
+}
+
 export const pctRate = (v) => (v == null ? "–" : v > 0 && v < 1 ? v.toFixed(1).replace(/\.0$/, "") + "%" : Math.round(v) + "%");
 
 // The rate a projection uses: a share a day for a weekly meter, an hour for a 5-hour one.
@@ -164,6 +208,9 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
     return { id: x.id, color: x.color, label: nm[x.id] || x.id, values, proj, tr, period, ser: x.ser, nowV: tr.leftNow };
   });
   const marks = lines.flatMap((l) => resetsUntil(l.tr, now, end, l.period).map((t) => ({ i: xOf(t), color: l.color, text: isToday(t) ? clock(t) : resetShort(t) })));
+  const all = accounts();
+  const providers = [...new Set(lines.map((l) => all.find((a) => a.id === l.id)?.provider).filter(Boolean))];
+  const zones = deadZones(providers, long, { now, start, step, n, nowX });
 
   const labels = [];
   for (let i = 0; i < n; i++) {
@@ -178,7 +225,8 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
   const height = 160;
   const cols = Array.from({ length: n }, (_, i) => ({ values: Object.fromEntries(lines.map((l) => [l.id, l.values[i]])) }));
   const series = lines.map((l) => ({ key: l.id, color: l.color, proj: l.proj, nowV: l.nowV }));
-  const html = timeChart({ id: key, format: "line", series, cols, height, max: 100, nowX, labels: xl, marks, yfmt: (v) => Math.round(v) + "%" });
+  const bands = zones.map((z) => ({ x0: z.x0, x1: z.x1, html: icon("skull", 14, "currentColor") }));
+  const html = timeChart({ id: key, format: "line", series, cols, height, max: 100, nowX, labels: xl, marks, bands, yfmt: (v) => Math.round(v) + "%" });
   const tip = (i) => {
     const t = start + i * step;
     const future = t > now;
@@ -192,12 +240,23 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
     }
     if (!rows.length) return "";
     const head = future ? `${isToday(t) ? "Today" : day(t)} ${clock(t)}, at this rate` : `${isToday(t) ? "Today" : day(t)} ${clock(t)}`;
-    return `<div class="h"><span>${esc(head)}</span></div>${tipRows(rows)}`;
+    // Inside a dead stretch: say so, and until when if it ends on the chart.
+    const dead = zones.filter((z) => i >= z.x0 && i <= z.x1).map((z) => {
+      const until = z.x1 < n - 1 ? start + z.x1 * step : 0;
+      const text = `No ${providerTitle(z.provider)} allowance left${until ? " until " + (isToday(until) ? clock(until) : resetShort(until)) : ""}`;
+      return `<div class="dead">${icon("skull", 12, "currentColor")}<span>${esc(text)}</span></div>`;
+    }).join("");
+    return `<div class="h"><span>${esc(head)}</span></div>${dead}${tipRows(rows)}`;
   };
   return {
     html,
     legend: lines.map((l) => ({ id: l.id, label: l.label, color: l.color })),
-    mount(root) { bindChart(root, key, tip); spaceMarks(root, key); },
+    mount(root) {
+      bindChart(root, key, tip);
+      spaceMarks(root, key);
+      // A skull that does not fit its stretch is left out.
+      root.querySelectorAll(`[data-chart="${key}"] .band`).forEach((b) => b.classList.toggle("narrow", b.clientWidth < 18));
+    },
   };
 }
 

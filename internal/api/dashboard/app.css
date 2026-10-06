@@ -314,6 +314,11 @@ svg { display: block; flex-shrink: 0; }
 .chart .cmarks > span { position: absolute; top: 0; height: 16px; display: flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--muted-fg); transform: translateX(-6px); pointer-events: none; }
 .chart .cmarks > span.hide { visibility: hidden; }
 .linechart .cmarks svg { position: static; flex-shrink: 0; }
+.linechart .band { position: absolute; top: 0; bottom: 0; display: flex; justify-content: center; padding-top: 6px; background: var(--error-tint); color: var(--error-text); pointer-events: none; overflow: hidden; }
+.linechart .band svg { position: static; flex-shrink: 0; }
+.linechart .band.narrow svg { display: none; }
+.tip .dead { display: flex; align-items: center; gap: 6px; color: var(--error-text); }
+.tip .dead svg { position: static; flex-shrink: 0; }
 .linechart svg { position: absolute; inset: 0; overflow: visible; }
 .linechart path { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
 .linechart path.proj { opacity: .7; }
