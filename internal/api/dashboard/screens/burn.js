@@ -115,18 +115,29 @@ function deadZones(providers, long, { now, start, step, n, nowX }) {
     });
     if (!pool.length || pool.some((m) => !m)) continue;
     const spans = [];
-    // Up to now: each grid step where every account read 0.
+    // Up to now: a step counts only when every account read 0 at both of its
+    // ends (now itself from the live reading), so a refill inside it is not
+    // painted over.
+    const zeroAt = (x) => (x >= nowX ? pool.every((m) => m.tr.leftNow <= 0) : pool.every((m) => readingAt(m.ser, tOf(x)) === 0));
     for (let i = 0; i < Math.min(n - 1, nowX); i++) {
-      if (pool.every((m) => readingAt(m.ser, tOf(i)) === 0)) spans.push([i, Math.min(i + 1, nowX)]);
+      const to = Math.min(i + 1, nowX);
+      if (zeroAt(i) && zeroAt(to)) spans.push([i, to]);
     }
-    // From now: the projection only changes course where one runs out or
-    // resets, so test the middle of each stretch between those points.
+    // From now: a used-up account stays at 0 until its reset whatever its
+    // rate; otherwise the projection. Both only change course where an
+    // account runs out or resets, so test the middle of each stretch
+    // between those points.
+    const endT = tOf(n - 1);
+    const leftAt = (m, t) => (m.tr.leftNow <= 0 && t < m.tr.reset ? 0 : projectedAt(m.tr, now, m.period, t));
     const cuts = new Set([nowX, n - 1]);
-    for (const m of pool) for (const q of projectionPoints(m.tr, now, tOf(n - 1), m.period, (t) => (t - start) / step)) cuts.add(q.x);
+    for (const m of pool) {
+      for (const q of projectionPoints(m.tr, now, endT, m.period, (t) => (t - start) / step)) cuts.add(q.x);
+      for (const t of resetsUntil(m.tr, now, endT, m.period)) cuts.add((t - start) / step);
+    }
     const xs = [...cuts].filter((x) => x >= nowX && x <= n - 1).sort((a, b) => a - b);
     for (let k = 0; k < xs.length - 1; k++) {
       const mid = tOf((xs[k] + xs[k + 1]) / 2);
-      if (xs[k + 1] > xs[k] && pool.every((m) => projectedAt(m.tr, now, m.period, mid) === 0)) spans.push([xs[k], xs[k + 1]]);
+      if (xs[k + 1] > xs[k] && pool.every((m) => leftAt(m, mid) === 0)) spans.push([xs[k], xs[k + 1]]);
     }
     for (const [x0, x1] of spans) {
       const last = zones[zones.length - 1];
@@ -241,7 +252,9 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
     if (!rows.length) return "";
     const head = future ? `${isToday(t) ? "Today" : day(t)} ${clock(t)}, at this rate` : `${isToday(t) ? "Today" : day(t)} ${clock(t)}`;
     // Inside a dead stretch: say so, and until when if it ends on the chart.
-    const dead = zones.filter((z) => i >= z.x0 && i <= z.x1).map((z) => {
+    // The end is when allowance comes back, so it is not inside the stretch,
+    // unless the stretch runs to the chart's edge.
+    const dead = zones.filter((z) => i >= z.x0 && (i < z.x1 || (z.x1 >= n - 1 && i <= z.x1))).map((z) => {
       const until = z.x1 < n - 1 ? start + z.x1 * step : 0;
       const text = `No ${providerTitle(z.provider)} allowance left${until ? " until " + (isToday(until) ? clock(until) : resetShort(until)) : ""}`;
       return `<div class="dead">${icon("skull", 12, "currentColor")}<span>${esc(text)}</span></div>`;
