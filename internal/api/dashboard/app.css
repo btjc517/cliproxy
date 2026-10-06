@@ -30,6 +30,7 @@
   --chart-p99: #104281;
   --chart-grid: #0000000F;
   --chart-other: #A3A3A3;
+  --chart-5: #00BCFE;         /* --color-status-info: cyan, so no account is ever drawn grey */
   --warn-tint: #F99C0014;     /* --color-status-warn-tint */
   --popover: #FFFFFF;
   --popover-shadow: #0A0A0A26 0 0 0 0.5px, #0000000D 0 4px 6px -1px, #0000000D 0 2px 4px -2px, #00000014 0 8px 16px -4px;
@@ -67,6 +68,7 @@
     --chart-p99: #9EC5F4;
     --chart-grid: #FFFFFF14;
     --chart-other: #737373;
+    --chart-5: #00BCFE;
     --warn-tint: #F99C001F;   /* --color-status-warn-tint-dark */
     --popover: #1F1F1F;
     --popover-shadow: #FFFFFF1F 0 0 0 0.5px, #00000066 0 8px 24px -4px;
@@ -103,6 +105,7 @@
   --chart-p99: #9EC5F4;
   --chart-grid: #FFFFFF14;
   --chart-other: #737373;
+  --chart-5: #00BCFE;
   --warn-tint: #F99C001F;
   --popover: #1F1F1F;
   --popover-shadow: #FFFFFF1F 0 0 0 0.5px, #00000066 0 8px 24px -4px;

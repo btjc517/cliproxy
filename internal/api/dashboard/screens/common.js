@@ -115,7 +115,8 @@ export function readAt(prefix = "Read") {
   return S.readAt ? `${prefix} ${clock(S.readAt)}` : "";
 }
 
-export const ACCOUNT_COLORS = ["var(--chart-1)", "var(--chart-p90)", "var(--chart-p50)", "var(--chart-p99)", "#A3A3A3", "#6E9EEF"];
+// Never grey: grey means muted or off here, so a grey account looks switched off.
+export const ACCOUNT_COLORS = ["var(--chart-1)", "var(--chart-p90)", "var(--chart-p50)", "var(--chart-p99)", "var(--chart-5)", "#6E9EEF"];
 
 // One colour per account on every screen. Accounts take the colours in a
 // fixed order (email Z to A, then provider, then id), never in the order a
