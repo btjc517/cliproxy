@@ -8,7 +8,7 @@ import (
 )
 
 // Grey means muted or off on the dashboard, so an account drawn in grey looks
-// switched off. Every account colour must resolve to a real hue in every theme.
+// switched off. Every account colour must be a real hue in every theme.
 func TestAccountColoursAreNeverGrey(t *testing.T) {
 	js, errJS := dashboardFiles.ReadFile("dashboard/screens/common.js")
 	if errJS != nil {
@@ -18,53 +18,53 @@ func TestAccountColoursAreNeverGrey(t *testing.T) {
 	if errCSS != nil {
 		t.Fatalf("read app.css: %v", errCSS)
 	}
-	list := regexp.MustCompile(`ACCOUNT_COLORS = \[([^\]]*)\]`).FindSubmatch(js)
+	list := regexp.MustCompile(`ACCOUNT_COLORS\s*=\s*\[([^\]]*)\]`).FindSubmatch(js)
 	if list == nil {
 		t.Fatal("ACCOUNT_COLORS not found in common.js")
 	}
-	colours := regexp.MustCompile(`"([^"]+)"`).FindAllSubmatch(list[1], -1)
-	if len(colours) == 0 {
-		t.Fatal("ACCOUNT_COLORS is empty")
+	// Every declaration of each custom property, in any block, so a theme or
+	// later override cannot slip a grey past the check.
+	decls := map[string][]string{}
+	for _, m := range regexp.MustCompile(`(--[\w-]+)\s*:\s*([^;]+);`).FindAllSubmatch(css, -1) {
+		decls[string(m[1])] = append(decls[string(m[1])], strings.TrimSpace(string(m[2])))
 	}
-	// The light theme, the dark media query and the forced dark theme.
-	themes := regexp.MustCompile(`\{([^{}]*--chart-1:[^{}]*)\}`).FindAllSubmatch(css, -1)
-	if len(themes) != 3 {
-		t.Fatalf("found %d theme blocks in app.css, want 3", len(themes))
-	}
-	decl := regexp.MustCompile(`(--[\w-]+):\s*(#[0-9A-Fa-f]{6})`)
-	for i, theme := range themes {
-		vars := map[string]string{}
-		for _, m := range decl.FindAllSubmatch(theme[1], -1) {
-			vars[string(m[1])] = string(m[2])
+	entries := strings.Split(string(list[1]), ",")
+	for _, raw := range entries {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
 		}
-		for _, c := range colours {
-			value := string(c[1])
-			if name, ok := strings.CutPrefix(value, "var("); ok {
-				value = vars[strings.TrimSuffix(name, ")")]
-				if value == "" {
-					t.Errorf("theme %d: %s is not defined", i, c[1])
-					continue
-				}
+		if len(entry) < 2 || !strings.ContainsRune(`"'`+"`", rune(entry[0])) || entry[len(entry)-1] != entry[0] {
+			t.Fatalf("ACCOUNT_COLORS entry %s is not a plain string", entry)
+		}
+		colour := entry[1 : len(entry)-1]
+		values := []string{colour}
+		if name, ok := strings.CutPrefix(colour, "var("); ok {
+			name = strings.TrimSuffix(name, ")")
+			values = decls[name]
+			if len(values) == 0 {
+				t.Errorf("account colour %s is not defined in app.css", colour)
 			}
-			if isGrey(t, value) {
-				t.Errorf("theme %d: account colour %s resolves to grey %s", i, c[1], value)
+		}
+		for _, v := range values {
+			if isGrey(t, v) {
+				t.Errorf("account colour %s resolves to grey %s", colour, v)
 			}
 		}
 	}
 }
 
-func isGrey(t *testing.T, hex string) bool {
+// isGrey fails the test on anything but #RRGGBB or #RRGGBBAA, so a colour in
+// another notation cannot pass unchecked.
+func isGrey(t *testing.T, value string) bool {
 	t.Helper()
-	if len(hex) < 7 || hex[0] != '#' {
-		t.Fatalf("not a hex colour: %q", hex)
+	if !regexp.MustCompile(`^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$`).MatchString(value) {
+		t.Fatalf("account colour %q is not a hex colour", value)
 	}
 	channel := func(s string) int {
-		v, errParse := strconv.ParseUint(s, 16, 8)
-		if errParse != nil {
-			t.Fatalf("bad hex colour %q: %v", hex, errParse)
-		}
+		v, _ := strconv.ParseUint(s, 16, 8)
 		return int(v)
 	}
-	r, g, b := channel(hex[1:3]), channel(hex[3:5]), channel(hex[5:7])
+	r, g, b := channel(value[1:3]), channel(value[3:5]), channel(value[5:7])
 	return max(r, g, b)-min(r, g, b) < 24
 }
