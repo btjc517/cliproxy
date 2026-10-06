@@ -806,7 +806,9 @@ export function bindChart(root, id, tipFor) {
 export function spaceMarks(root, id) {
   const lane = root.querySelector(`[data-chart="${id}"] .cmarks`);
   if (!lane) return;
+  for (const el of lane.children) { el.classList.remove("hide"); el.style.transform = ""; }
   const lr = lane.getBoundingClientRect();
+  if (!lr.width) return; // not laid out yet: nothing to measure against
   let edge = -Infinity;
   const items = [...lane.children].map((el) => ({ el, r: el.getBoundingClientRect() })).sort((a, b) => a.r.left - b.r.left);
   for (const { el, r } of items) {

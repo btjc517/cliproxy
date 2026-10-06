@@ -65,16 +65,18 @@ function projectionPoints(tr, now, end, period, xOf) {
   const pts = [];
   if (tr.rate == null || !(tr.reset > now)) return pts;
   let from = now, v0 = tr.leftNow, next = tr.reset;
-  while (from < end) {
+  for (;;) {
     const stop = Math.min(next, end);
     pts.push({ x: xOf(from), v: v0 });
     const out = tr.rate > 0 ? from + (v0 / tr.rate) * HOUR : Infinity;
     if (out < stop) pts.push({ x: xOf(out), v: 0 });
     pts.push({ x: xOf(stop), v: Math.max(0, v0 - tr.rate * ((stop - from) / HOUR)) });
-    if (next >= end || !(period > 0)) break;
+    if (next > end) break;
+    // The reset: back to 100%. With no known period there is no next one.
     from = next;
     v0 = 100;
-    next += period;
+    next = period > 0 ? next + period : Infinity;
+    if (from >= end) { pts.push({ x: xOf(from), v: 100 }); break; }
   }
   return pts;
 }
