@@ -41,13 +41,15 @@ export function trajectory(ser, now = Date.now()) {
   if (ser.long) rate = coveredH >= 3 ? burned / coveredH : perHour;
   else rate = perHour != null ? perHour : idle ? 0 : null;
   const reset = ms(ser.reset_at);
+  // Nothing left is used up, not running out now.
+  const usedUp = leftNow <= 0;
   let runsOut = 0, leftAtReset = null;
   if (rate != null && reset > now) {
     const hours = (reset - now) / HOUR;
-    if (rate > 0 && leftNow / rate < hours) runsOut = now + (leftNow / rate) * HOUR;
+    if (!usedUp && rate > 0 && leftNow / rate < hours) runsOut = now + (leftNow / rate) * HOUR;
     leftAtReset = Math.max(0, leftNow - rate * hours);
   }
-  return { long: !!ser.long, idle, leftNow, perHour, burned, since, coveredH, rate, reset, runsOut, leftAtReset };
+  return { long: !!ser.long, idle, leftNow, usedUp, perHour, burned, since, coveredH, rate, reset, runsOut, leftAtReset };
 }
 
 // Allowance left at time t (from now on) at the current rate. It runs down
@@ -100,9 +102,10 @@ export function rateText(tr) {
   return tr.long ? pctRate(tr.rate * 24) + " a day" : pctRate(tr.rate) + " an hour";
 }
 
-// "Runs out Thu 14:00" or "Lasts to reset, about 62% left".
+// "Used up", "Runs out Thu 14:00" or "Lasts to reset, about 62% left".
 export function outlook(tr, { short = false } = {}) {
   if (!tr) return `<span class="muted">No reading yet</span>`;
+  if (tr.usedUp) return warnState("Used up");
   if (tr.rate == null) return `<span class="muted">Too few readings yet</span>`;
   if (tr.runsOut) return warnState("Runs out " + (isToday(tr.runsOut) ? clock(tr.runsOut) : weekdayTime(tr.runsOut)));
   if (tr.leftAtReset == null) return `<span class="muted">No reset time yet</span>`;
@@ -230,7 +233,8 @@ export function allowanceTable(ids, long, colorOf) {
     const rateCell = long
       ? perDay == null ? `<span class="muted">–</span>` : tr.coveredH >= 20 ? pctRate(perDay) : `${pctRate(perDay)}<span class="muted">from ${Math.round(tr.coveredH)}h</span>`
       : tr.perHour == null ? `<span class="muted">${tr.idle ? "Idle" : "–"}</span>` : pctRate(tr.perHour);
-    const heading = tr.rate == null ? `<span class="muted">Too few readings yet</span>`
+    const heading = tr.usedUp ? warnState("Used up")
+      : tr.rate == null ? `<span class="muted">Too few readings yet</span>`
       : tr.runsOut ? warnState("Runs out " + (isToday(tr.runsOut) ? clock(tr.runsOut) : weekdayTime(tr.runsOut)))
       : tr.leftAtReset == null ? `<span class="muted">No reset time yet</span>` : `${Math.round(tr.leftAtReset)}% left at reset`;
     return { href, cells: [lead, email(a?.email || id), meterCell(tr.leftNow, color), rateCell, heading, tr.reset ? esc(resetShort(tr.reset)) : ""] };
