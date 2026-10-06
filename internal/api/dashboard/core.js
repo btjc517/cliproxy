@@ -174,6 +174,18 @@ export function int(n) {
   return (Number(n) || 0).toLocaleString("en-GB");
 }
 
+// US dollars: "$0.42", "$12.30", "$1,234", "$12.3k", "$1.23M".
+export function money(n) {
+  n = Number(n) || 0;
+  const a = Math.abs(n);
+  if (a >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
+  if (a >= 1e4) return "$" + (n / 1e3).toFixed(1) + "k";
+  if (a >= 1e3) return "$" + Math.round(n).toLocaleString("en-GB");
+  return "$" + n.toFixed(2);
+}
+// Dollars on a chart's y axis, short enough for its column.
+export const moneyAxis = (v) => "$" + (v >= 1e3 ? fmt(v) : v >= 10 ? Math.round(v) : Number(v.toFixed(2)));
+
 export function ms(v) {
   v = Number(v) || 0;
   if (!v) return "–";
@@ -461,7 +473,7 @@ export function plan(acct) {
 
 // Usage totals for a set of accounts over one of the summary windows.
 export function sumUsage(ids, window) {
-  const out = { requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+  const out = { requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 };
   const acc = S.data?.summary?.accounts || {};
   for (const id of ids) {
     const u = acc[id]?.[window];
@@ -476,6 +488,10 @@ export function cacheReuse(u) {
   const total = read + (u.cache_write_tokens || 0) + (u.input_tokens || 0);
   return total ? (read / total) * 100 : null;
 }
+// What usage would have cost at the public API list prices, in USD. A backend
+// without summary.pricing does not price usage, so cost stays hidden there.
+export const costKnown = () => !!plainObject(S.data?.summary?.pricing);
+export const apiCost = (u) => Number(u?.api_cost) || 0;
 
 // Hourly buckets for the last `n` hours, per account id, oldest first.
 export function hourly(ids, n = 24) {
@@ -611,7 +627,7 @@ export function table(cols, rows, opts = {}) {
 
 export function figure(label, value, unit = "", opts = {}) {
   const tag = opts.metric ? "button" : "div";
-  return `<${tag} class="fig ${opts.on ? "on" : ""} ${opts.metric ? "" : "static"}" ${opts.metric ? `data-metric="${esc(opts.metric)}"` : ""}><span class="l">${esc(label)}</span><span class="v">${value}${unit ? `<span class="u">${esc(unit)}</span>` : ""}</span>${opts.sub ? `<span class="muted">${opts.sub}</span>` : ""}</${tag}>`;
+  return `<${tag} class="fig ${opts.on ? "on" : ""} ${opts.metric ? "" : "static"}" ${opts.metric ? `data-metric="${esc(opts.metric)}"` : ""}${opts.title ? ` title="${esc(opts.title)}"` : ""}><span class="l">${esc(label)}</span><span class="v">${value}${unit ? `<span class="u">${esc(unit)}</span>` : ""}</span>${opts.sub ? `<span class="muted">${opts.sub}</span>` : ""}</${tag}>`;
 }
 
 // ---------- time charts: lines by default, bars on request ----------
