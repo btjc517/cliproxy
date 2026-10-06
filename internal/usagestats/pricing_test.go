@@ -257,6 +257,29 @@ func TestHistoryDaysPricedByModel(t *testing.T) {
 	}
 }
 
+func TestHistoryMachinesPricedByModel(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)}
+	dir := t.TempDir()
+	writeHistory(t, dir, `{"cutoff":"2026-10-03T18:00:00Z",`+
+		`"days":{"2026-10-01":{"claude":{"requests":2,"output_tokens":3000}}},`+
+		`"machines":{"m1":{"claude":{"requests":1,"output_tokens":1000}},"mbp":{"claude":{"requests":1,"output_tokens":2000}}},`+
+		`"models":{"2026-10-01":{"claude":{"claude-sonnet-4-6":{"output_tokens":3000}}}},`+
+		`"machine_models":{"m1":{"claude":{"claude-sonnet-4-6":{"output_tokens":1000}}}}}`)
+	store := newClockStore(clock)
+	store.configure(filepath.Join(dir, "usage-stats.json"))
+	defer close(store.stop)
+
+	// m1 has a model split; mbp has none and is priced at the fallback, which
+	// is Sonnet 4.6 as the only model in the history.
+	machines := store.Summary(10).History.BackfillMachines
+	if got := machines["m1"]["claude"].APICost; got != 0.015 {
+		t.Fatalf("m1 claude costs %v, want 0.015", got)
+	}
+	if got := machines["mbp"]["claude"].APICost; got != 0.03 {
+		t.Fatalf("mbp claude costs %v, want 0.03 at the fallback", got)
+	}
+}
+
 func TestFallbackModelIsTopModelOfLast30Days(t *testing.T) {
 	models := func(day, provider string, tokens map[string]int64) map[string]map[string]map[string]Counters {
 		byModel := make(map[string]Counters, len(tokens))

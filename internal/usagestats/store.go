@@ -116,12 +116,14 @@ type fileState struct {
 
 // historyFile is the backfill written by the log collector. Days and machines
 // map to provider totals; requests there count model replies. Models splits
-// some days' provider totals by model, keyed by day, provider and model id.
+// some days' provider totals by model, keyed by day, provider and model id,
+// and MachineModels does the same for machines.
 type historyFile struct {
-	Cutoff   time.Time                                 `json:"cutoff"`
-	Days     map[string]map[string]Counters            `json:"days"`
-	Machines map[string]map[string]Counters            `json:"machines,omitempty"`
-	Models   map[string]map[string]map[string]Counters `json:"models,omitempty"`
+	Cutoff        time.Time                                 `json:"cutoff"`
+	Days          map[string]map[string]Counters            `json:"days"`
+	Machines      map[string]map[string]Counters            `json:"machines,omitempty"`
+	Models        map[string]map[string]map[string]Counters `json:"models,omitempty"`
+	MachineModels map[string]map[string]map[string]Counters `json:"machine_models,omitempty"`
 }
 
 // Store aggregates usage records in memory and flushes them to disk.

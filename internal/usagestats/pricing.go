@@ -215,18 +215,25 @@ func (h *historyFile) hasModels() bool {
 	return false
 }
 
-// priceHistory sets the API cost of each backfill day and provider that has
-// none: each model's tokens at that model's price, and any tokens the models
-// do not cover at the fallback. A day without models is priced at the
-// fallback. It runs at load and changes only the copy in memory.
+// priceHistory sets the API cost of each backfill day and machine that has
+// none, by provider. Days are split by model through Models and machines
+// through MachineModels. It runs at load and changes only the copy in memory.
 func priceHistory(history *historyFile, fallback map[string]string) {
-	for day, providers := range history.Days {
+	priceTotals(history.Days, history.Models, fallback)
+	priceTotals(history.Machines, history.MachineModels, fallback)
+}
+
+// priceTotals prices provider totals keyed by day or machine: each model's
+// tokens at that model's price, and any tokens the models do not cover at the
+// fallback. A total without models is priced at the fallback.
+func priceTotals(totals map[string]map[string]Counters, models map[string]map[string]map[string]Counters, fallback map[string]string) {
+	for key, providers := range totals {
 		for provider, total := range providers {
 			if total.APICost != 0 {
 				continue
 			}
 			rest := total
-			for model, counters := range history.Models[day][provider] {
+			for model, counters := range models[key][provider] {
 				total.APICost = roundCost(total.APICost + costFor(model, provider, counters, fallback, false))
 				rest.Input -= counters.Input
 				rest.Output -= counters.Output
