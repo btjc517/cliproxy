@@ -359,12 +359,14 @@ export function allowanceRange(ser, tr, now, from, to) {
     }
   }
   if (to > now) {
-    if (tr.rate == null || tr.reset <= now) return { used: null, resets: null };
+    if (tr.reset <= now) return { used: null, resets: null };
     const begin = Math.max(now, from);
+    resets += resetsUntil(tr, now, to, period).filter((t) => t > begin).length;
+    if (tr.rate == null) return { used: null, resets };
     const points = projectionPoints(tr, now, to, period, (t) => t);
     for (let i = 1; i < points.length; i++) {
       const a = points[i - 1], b = points[i];
-      if (a.x === b.x) { if (b.v > a.v && b.x > begin && b.x <= to) resets++; continue; }
+      if (a.x === b.x) continue;
       const duration = Math.max(0, Math.min(to, b.x) - Math.max(begin, a.x));
       used += Math.max(0, a.v - b.v) * duration / (b.x - a.x);
     }
