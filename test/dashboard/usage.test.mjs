@@ -64,3 +64,10 @@ test('a response for an old visible window cannot overwrite a newer window', asy
   assert.equal(S.data.tag,'newer');assert.equal(S.dataViewport,expected);
  } finally {globalThis.fetch=oldFetch;delete globalThis.location;}
 });
+
+
+test('known reset clocks are counted even when future demand is zero or unknown',()=>{
+ const from=tr.reset-2*HOUR,to=tr.reset+WEEK+HOUR;
+ assert.deepEqual(allowanceRange(ser,{...tr,rate:0},now,from,to),{used:0,resets:2});
+ assert.deepEqual(allowanceRange(ser,{...tr,rate:null},now,from,to),{used:null,resets:2});
+});
