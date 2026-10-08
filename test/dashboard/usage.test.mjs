@@ -42,7 +42,8 @@ test('exhaustion uses observed history rather than forecasting permanently idle 
  const t=trajectory(exhausted,now);
  assert.equal(t.rate,10);
  assert.equal(projectedAt(t,now,WEEK,t.reset+5*HOUR),50);
- assert.equal(trajectory({...exhausted,used:[1000,1000,1000,1000,1000]},now).rate,0);
+ assert.equal(trajectory({...exhausted,used:[1000,1000,1000,1000,1000]},now).rate,null);
+ assert.equal(trajectory({...exhausted,utilization:.5,used:[500,500,500,500,500]},now).rate,0);
 });
 
 test('a response for an old visible window cannot overwrite a newer window', async()=>{

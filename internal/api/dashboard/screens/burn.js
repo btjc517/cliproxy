@@ -44,11 +44,12 @@ export function trajectory(ser, now = Date.now()) {
   // Exhaustion is not evidence of zero future demand. When the recent
   // lookback contains no burn, use measured drops in this meter's retained
   // history. Missing samples and refill intervals contribute neither burn
-  // nor elapsed time. A truly idle history still has a zero rate.
+  // nor elapsed time. An entirely exhausted history cannot establish demand.
   let rateBasis = ser.long ? "Average over the latest day" : "Recent observed burn";
   if (leftNow <= 0 && rate === 0) {
     const observed = observedHistoryRate(ser, now);
-    if (observed != null && observed > 0) { rate = observed; rateBasis = "Average over available meter history, including idle time"; }
+    rate = observed != null && observed > 0 ? observed : null;
+    rateBasis = rate == null ? "Not enough consumption history to forecast after reset" : "Average over available meter history, including idle time";
   }
   const reset = ms(ser.reset_at);
   // Nothing left is used up, not running out now.
