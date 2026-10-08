@@ -80,7 +80,12 @@ export function observedHistoryRate(ser, now = Date.now()) {
 // Allowance left at time t (from now on) at the current rate. It runs down
 // from now, refills to 100% at each reset and runs down again at the same rate.
 export function projectedAt(tr, now, period, t) {
-  if (!tr || tr.rate == null || !(tr.reset > now) || t < now) return null;
+  if (!tr || !(tr.reset > now) || t < now) return null;
+  if (tr.rate == null) {
+    if (t < tr.reset) return tr.leftNow === 0 ? 0 : null;
+    const reset = period > 0 ? tr.reset + Math.floor((t - tr.reset) / period) * period : tr.reset;
+    return t === reset ? 100 : null;
+  }
   if (t < tr.reset) return Math.max(0, tr.leftNow - tr.rate * ((t - now) / HOUR));
   const from = period > 0 ? tr.reset + Math.floor((t - tr.reset) / period) * period : tr.reset;
   return Math.max(0, 100 - tr.rate * ((t - from) / HOUR));
@@ -90,7 +95,18 @@ export function projectedAt(tr, now, period, t) {
 // runs down to 0 at most, and a reset is a vertical step back up to 100%.
 export function projectionPoints(tr, now, end, period, xOf) {
   const pts = [];
-  if (tr.rate == null || !(tr.reset > now) || end <= now) return pts;
+  if (!(tr.reset > now) || end <= now) return pts;
+  if (tr.rate == null) {
+    // Exhaustion stays at zero until the known refill. After that, show
+    // each known reset point without inventing a slope between resets.
+    if (tr.leftNow === 0) {
+      pts.push({ x: xOf(now), v: 0 }, { x: xOf(Math.min(end, tr.reset)), v: 0 });
+    }
+    for (const t of resetsUntil(tr, now, end, period)) {
+      pts.push({ x: xOf(t), v: 100, move: t !== tr.reset || tr.leftNow !== 0, marker: true });
+    }
+    return pts;
+  }
   let from = now, v0 = tr.leftNow, next = tr.reset;
   for (;;) {
     const stop = Math.min(next, end);

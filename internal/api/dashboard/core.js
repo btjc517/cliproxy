@@ -737,7 +737,10 @@ function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], ma
     } else if (nowX == null && n && v[n - 1] != null) dots += dot("nowdot", n - 1, v[n - 1], s.color);
     if (bridge) paths += `<path class="bridge" d="${bridge}" />`;
     if (solid) paths += `<path d="${solid}" stroke="${s.color}" />`;
-    if (s.proj && s.proj.length > 1) paths += `<path class="proj" d="${s.proj.map((q, j) => `${j ? "L" : "M"}${X(q.x)} ${Y(q.v)}`).join(" ")}" stroke="${s.color}" stroke-dasharray="4 4" />`;
+    if (s.proj?.length) {
+      for (const q of s.proj) if (q.marker) dots += dot("pt", q.x, q.v, s.color);
+      paths += `<path class="proj" d="${s.proj.map((q, j) => `${j && !q.move ? "L" : "M"}${X(q.x)} ${Y(q.v)}`).join(" ")}" stroke="${s.color}" stroke-dasharray="4 4" />`;
+    }
   });
   drawn.set(id, { vals: series.map((s, i) => s.hoverValues || vals[i]), colors: series.map((s) => s.color), top, height, n, positions });
   const xl = labels.map((l) => {

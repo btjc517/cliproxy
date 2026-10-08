@@ -71,3 +71,24 @@ test('known reset clocks are counted even when future demand is zero or unknown'
  assert.deepEqual(allowanceRange(ser,{...tr,rate:0},now,from,to),{used:0,resets:2});
  assert.deepEqual(allowanceRange(ser,{...tr,rate:null},now,from,to),{used:null,resets:2});
 });
+
+
+test('unknown burn still draws the known refill without a fabricated decline',()=>{
+ const unknown={...tr,rate:null,leftNow:0};
+ assert.equal(projectedAt(unknown,now,WEEK,tr.reset-HOUR),0);
+ assert.equal(projectedAt(unknown,now,WEEK,tr.reset),100);
+ assert.equal(projectedAt(unknown,now,WEEK,tr.reset+HOUR),null);
+ const points=projectionPoints(unknown,now,tr.reset+2*WEEK,WEEK,t=>t);
+ assert.deepEqual(points.slice(0,3),[{x:now,v:0},{x:tr.reset,v:0},{x:tr.reset,v:100,move:false,marker:true}]);
+ assert.equal(points.filter(p=>p.marker).length,3);
+ assert.ok(points.slice(3).every(p=>p.move&&p.marker&&p.v===100));
+ const partial=projectionPoints({...unknown,leftNow:50},now,tr.reset+HOUR,WEEK,t=>t);
+ assert.deepEqual(partial,[{x:tr.reset,v:100,move:true,marker:true}]);
+});
+
+test('chart renderer keeps unknown intervals disconnected and reset points visible',async()=>{
+ const {timeChart}=await import('../../internal/api/dashboard/core.js');
+ const html=timeChart({id:'reset-test',format:'line',cols:[{values:{}},{values:{}}],series:[{key:'a',color:'#123456',proj:[{x:0,v:0},{x:.25,v:0},{x:.25,v:100,marker:true},{x:.75,v:100,move:true,marker:true}]}],height:100,max:100});
+ assert.match(html,/M0.00 100.00 L250.00 100.00 L250.00 0.00 M750.00 0.00/);
+ assert.equal((html.match(/class="pt"/g)||[]).length,2);
+});
