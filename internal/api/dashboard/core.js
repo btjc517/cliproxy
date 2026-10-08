@@ -6,6 +6,7 @@ export const S = {
   error: "",
   key: "",
   dataRange: "",     // window the loaded payload covers
+  dataViewport: "",
   dataScope: "",     // accounts merged into performance.scopes.selection, comma-joined
   ui: {},            // per-screen choices that survive a refresh
   hold: 0,           // >0 while a menu, drawer or hover would be lost by a re-render
@@ -124,18 +125,27 @@ let started = 0, applied = 0;
 // Loads /dashboard/data for the current route, with the picked accounts when
 // the screen needs them merged. A reply that arrives after a newer one, or
 // after the route moved to another window or selection, is dropped.
+export function wantUsageViewport() {
+  if (!location.hash.startsWith("#/usage") || S.ui.usSection !== "history" || S.ui.usHistoryView === "grid") return "";
+  const v = S.ui.historyViewport;
+  return v ? new Date(v.start).toISOString() + "," + new Date(v.end).toISOString() : "";
+}
+
 export async function fetchData() {
   const want = wantRange();
   const scope = wantScope();
   const my = ++started;
-  const res = await fetch("/dashboard/data?range=" + encodeURIComponent(want) + (scope ? "&scope=" + encodeURIComponent(scope) : ""), { cache: "no-store" });
+  const viewport = wantUsageViewport();
+  const [from, to] = viewport.split(",");
+  const res = await fetch("/dashboard/data?range=" + encodeURIComponent(want) + (scope ? "&scope=" + encodeURIComponent(scope) : "") + (viewport ? "&usage_start=" + encodeURIComponent(from) + "&usage_end=" + encodeURIComponent(to) : ""), { cache: "no-store" });
   if (!res.ok) throw new Error("Could not read the proxy (" + res.status + ")");
   const data = await res.json();
-  if (my < applied || want !== wantRange() || scope !== wantScope()) return;
+  if (my < applied || want !== wantRange() || scope !== wantScope() || viewport !== wantUsageViewport()) return;
   applied = my;
   S.data = data;
   S.dataRange = want;
   S.dataScope = scope;
+  S.dataViewport = viewport;
   S.readAt = Date.now();
 }
 
@@ -655,11 +665,12 @@ const num = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null 
 
 // Stacked bar chart. series: [{key, color, label}], cols: [{values: {key: n}}], labels: [{i, text}].
 // overlay: each series is drawn from the baseline behind the smaller ones (percentiles), not stacked.
-export function barChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], dense = false, overlay = false, max = null }) {
+export function barChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], dense = false, overlay = false, max = null, positions = null }) {
   const n = cols.length;
   const vals = cols.map((c) => series.map((s) => (s.gaps && c.empty ? 0 : num(c.values[s.key]) || 0)));
   const totals = vals.map((v) => (overlay ? Math.max(0, ...v) : v.reduce((a, b) => a + b, 0)));
   const top = max != null ? max : niceMax(Math.max(0, ...totals));
+  drawn.set(id, { positions });
   const colsHtml = vals.map((v, i) => {
     let segs = "", below = 0;
     const parts = series.map((s, k) => {
@@ -672,10 +683,12 @@ export function barChart({ id, series, cols, height = 140, yfmt = fmt, labels = 
       const h = Math.max(1, Math.round((Math.min(parts[k], top) / top) * height));
       segs += `<i style="height:${h}px;background:${series[k].color}"></i>`;
     }
-    return `<div class="col" data-i="${i}">${segs}</div>`;
+    const spacing = positions && n > 1 ? Math.abs(positions[Math.min(n - 1, i + 1)] - positions[Math.max(0, i - 1)]) / (i > 0 && i < n - 1 ? 2 : 1) : 1;
+    const style = positions ? `style="position:absolute;left:${Math.max(0, positions[i] - spacing / 2) * 100}%;width:${Math.max(0, Math.min(1, positions[i] + spacing / 2) - Math.max(0, positions[i] - spacing / 2)) * 100}%;padding:0 1px"` : "";
+    return `<div class="col" data-i="${i}" ${style}>${segs}</div>`;
   }).join("");
   const xl = labels.map((l) => {
-    const pos = n > 1 ? (l.i + 0.5) / n : 0.5;
+    const pos = n > 1 ? positions ? l.i / (n - 1) : (l.i + 0.5) / n : 0.5;
     const cls = l.i === 0 ? "first" : l.i === n - 1 ? "last" : "";
     const left = l.i === 0 ? "0" : l.i === n - 1 ? "100%" : (pos * 100).toFixed(2) + "%";
     return `<span class="${cls}" style="left:${left}">${esc(l.text)}</span>`;
@@ -694,12 +707,13 @@ const drawn = new Map();
 // `proj` ([{x, v}], x fractional) is drawn dashed after it.
 // marks: [{i, color, text}], reset times drawn in a row above the plot.
 // bands: [{x0, x1, html}], stretches shaded behind the lines.
-function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], max = null, nowX = null, marks = [], bands = [] }) {
+function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], max = null, nowX = null, marks = [], bands = [], markerLanes = false, positions = null }) {
   const n = cols.length;
   const vals = series.map((s) => cols.map((c) => (s.gaps && c.empty ? null : num(c.values[s.key]))));
   const top = max != null ? max : niceMax(Math.max(0, ...vals.flat().filter((v) => v != null)));
   const xf = (i) => (n > 1 ? i / (n - 1) : 0.5);
-  const X = (i) => (xf(i) * 1000).toFixed(2);
+  const pointX = (i) => positions?.[i] ?? xf(i);
+  const X = (i) => (pointX(i) * 1000).toFixed(2);
   const Y = (v) => (height - (Math.max(0, Math.min(top, v)) / top) * height).toFixed(2);
   const dot = (cls, x, v, color) => `<i class="${cls}" style="left:${(xf(x) * 100).toFixed(2)}%;top:${Y(v)}px;background:${color}"></i>`;
   let paths = "", dots = "";
@@ -717,23 +731,23 @@ function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], ma
       if (i < n - 1 && (i === 0 || v[i - 1] == null) && v[i + 1] == null && nowX == null) dots += dot("pt", i, v[i], s.color);
       prev = i;
     }
-    if (nowX != null && s.nowV != null) {
-      if (solid) solid += `L${X(nowX)} ${Y(s.nowV)}`;
+    if (nowX != null && nowX >= 0 && nowX <= n - 1 && s.nowV != null) {
+      if (solid) solid += `L${(xf(nowX) * 1000).toFixed(2)} ${Y(s.nowV)}`;
       dots += dot("nowdot", nowX, s.nowV, s.color);
     } else if (nowX == null && n && v[n - 1] != null) dots += dot("nowdot", n - 1, v[n - 1], s.color);
     if (bridge) paths += `<path class="bridge" d="${bridge}" />`;
     if (solid) paths += `<path d="${solid}" stroke="${s.color}" />`;
     if (s.proj && s.proj.length > 1) paths += `<path class="proj" d="${s.proj.map((q, j) => `${j ? "L" : "M"}${X(q.x)} ${Y(q.v)}`).join(" ")}" stroke="${s.color}" stroke-dasharray="4 4" />`;
   });
-  drawn.set(id, { vals, colors: series.map((s) => s.color), top, height, n });
+  drawn.set(id, { vals: series.map((s, i) => s.hoverValues || vals[i]), colors: series.map((s) => s.color), top, height, n, positions });
   const xl = labels.map((l) => {
     const pos = xf(l.i);
     const cls = pos <= 0.02 ? "first" : pos >= 0.98 ? "last" : "";
     return `<span class="${cls}" style="left:${(pos * 100).toFixed(2)}%">${esc(l.text)}</span>`;
   }).join("");
-  const nowLine = nowX != null ? `<div class="nowline" style="left:${(xf(nowX) * 100).toFixed(2)}%"></div>` : "";
+  const nowLine = nowX != null && nowX >= 0 && nowX <= n - 1 ? `<div class="nowline" style="left:${(xf(nowX) * 100).toFixed(2)}%"></div>` : "";
   const svg = `<svg viewBox="0 0 1000 ${height}" preserveAspectRatio="none" width="100%" height="${height}" aria-hidden="true">${paths}</svg>`;
-  const marksHtml = marks.map((m) => `<span style="left:${(xf(m.i) * 100).toFixed(2)}%">${icon("reset", 12, m.color)}<span>${esc(m.text)}</span></span>`).join("");
+  const marksHtml = marks.map((m) => `<span title="${esc(m.title || m.text)}" style="left:${(xf(m.i) * 100).toFixed(2)}%;${markerLanes ? `top:${(m.lane % 3) * 15}px;pointer-events:auto` : ""}">${icon("reset", 12, m.color)}${markerLanes ? "" : `<span>${esc(m.text)}</span>`}</span>`).join("");
   const bandsHtml = bands.map((b) => `<div class="band" style="left:${(xf(b.x0) * 100).toFixed(2)}%;width:${((xf(b.x1) - xf(b.x0)) * 100).toFixed(2)}%">${b.html || ""}</div>`).join("");
   return chartFrame({ id, format: "line", n, height, top, yfmt, plotHtml: bandsHtml + nowLine + svg + dots, xl, marksHtml });
 }
@@ -772,10 +786,11 @@ export function bindChart(root, id, tipFor) {
     held = false;
   };
   plot.addEventListener("mousemove", (e) => {
-    if (!n) return;
+    if (!n || plot.classList.contains("selecting") || plot.classList.contains("range-selected")) return;
     const pr = plot.getBoundingClientRect();
     const f = (e.clientX - pr.left) / pr.width;
-    const i = Math.max(0, Math.min(n - 1, line ? Math.round(f * (n - 1)) : Math.floor(f * n)));
+    const positions = drawn.get(id)?.positions;
+    const i = positions ? positions.reduce((best, x, j) => Math.abs(x - f) < Math.abs(positions[best] - f) ? j : best, 0) : Math.max(0, Math.min(n - 1, line ? Math.round(f * (n - 1)) : Math.floor(f * n)));
     if (i === cur) return;
     const res = tipFor(i);
     if (!res) return clear();
@@ -785,7 +800,7 @@ export function bindChart(root, id, tipFor) {
     if (!held) { S.hold++; held = true; }
     let gx;
     if (line) {
-      gx = n > 1 ? (i / (n - 1)) * pr.width : pr.width / 2;
+      gx = positions ? Math.max(0, Math.min(pr.width, positions[i] * pr.width)) : n > 1 ? (i / (n - 1)) * pr.width : pr.width / 2;
       if (!guide) { guide = document.createElement("div"); guide.className = "guide"; plot.appendChild(guide); }
       guide.style.left = gx + "px";
       for (const m of marks) m.remove();
@@ -823,6 +838,7 @@ export function bindChart(root, id, tipFor) {
     tip.style.top = small ? "14px" : "-14px";
   });
   plot.addEventListener("mouseleave", clear);
+  return clear;
 }
 
 // Marks above a line chart keep apart and in order: each starts 8px after

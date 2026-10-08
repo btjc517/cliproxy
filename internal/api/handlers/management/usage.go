@@ -98,6 +98,17 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 	}
 	window := usagestats.ResolveWindow(strings.TrimSpace(c.Query("range")))
 	selection := usagestats.ParseSelection(c.Query("scope"))
+	var usageStart, usageEnd time.Time
+	if c.Query("usage_start") != "" || c.Query("usage_end") != "" {
+		var errStart, errEnd error
+		usageStart, errStart = time.Parse(time.RFC3339, c.Query("usage_start"))
+		usageEnd, errEnd = time.Parse(time.RFC3339, c.Query("usage_end"))
+		if errStart != nil || errEnd != nil || !usageEnd.After(usageStart) || usageEnd.Sub(usageStart) > 366*24*time.Hour || usageStart.Year() < 1970 || usageEnd.Year() > 2100 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "usage window must be valid RFC3339 dates, ordered and at most 366 days"})
+			return
+		}
+	}
+
 	now := time.Now()
 	accounts := make([]gin.H, 0)
 	var auths []*coreauth.Auth
@@ -136,12 +147,18 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 			authIDs = append(authIDs, auth.ID)
 		}
 	}
+	summary := usagestats.Default().SummaryForSelection(100, window, selection, authIDs)
+	if !usageStart.IsZero() {
+		custom := usagestats.Default().UsageBetween(usageStart, usageEnd)
+		custom.Ranges = summary.UsageRange.Ranges
+		summary.UsageRange = custom
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"server":    h.dashboardServer(c, now),
 		"routing":   routing,
 		"accounts":  accounts,
 		"router":    router,
 		"allowance": coreauth.DefaultRoutingState().MeterHistory(authIDs, now),
-		"summary":   usagestats.Default().SummaryForSelection(100, window, selection, authIDs),
+		"summary":   summary,
 	})
 }

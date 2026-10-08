@@ -1,12 +1,14 @@
 // Usage: where each allowance is heading, tokens by account over the chosen
 // range, and a year of daily token activity.
 import {
-  S, esc, fmt, int, money, moneyAxis, logo, email, status, warnState, sumUsage, tokens, cacheReuse, apiCost, costKnown, pctText, dayKey, hourly, tipRows, seg, table, figure,
-  timeChart, bindChart, chartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle, rangeTabs, bindRangeTabs, screenRange,
-  providerTitle,
+  S, esc, fmt, int, money, moneyAxis, logo, email, status, warnState, tokens, cacheReuse, apiCost, costKnown, pctText, dayKey, tipRows, seg, table, figure,
+  timeChart, bindChart, chartFormat, formatToggle, bindFormatToggles, bucketTitle,
+  providerTitle, wantUsageViewport, clock, day,
 } from "../core.js";
-import { providerTabs, bindProviderTabs, accountChips, scopeOf, readAt, accountColor, gapNote, costNote, costTitle } from "./common.js";
+import { readAt, accountColor, gapNote, costNote, costTitle } from "./common.js";
 import { allowanceChart, allowanceTable } from "./burn.js";
+import { windowFor, windowLabel, viewportLabels, bindViewport } from "./viewport.js";
+import { usageScope, usagePicker, bindUsagePicker } from "./usage-picker.js";
 
 const DAY = 864e5;
 const EMPTY = () => ({ requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 });
@@ -18,8 +20,6 @@ const keyOf = (dt) => dt.toISOString().slice(0, 10);
 const longDay = (k) => parseDay(k).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" }).replace(",", "");
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const monthName = (k) => MONTHS[parseDay(k).getUTCMonth()];
-
-const RANGE_TEXT = { "24h": "Last 24 hours", "7d": "Last 7 days", "30d": "Last month", "180d": "Last 6 months", all: "All time" };
 
 // ---------- history ----------
 
@@ -158,39 +158,6 @@ function historySub(h, cols) {
 
 // ---------- tokens by account over the range ----------
 
-// Per-account buckets for the range: the backend's usage_range when it covers
-// this range, else what the summary already has (hours for 24 hours, days for 7 days).
-function usageBuckets(ids, range) {
-  const ur = S.data?.summary?.usage_range;
-  if (ur && ur.range === range && S.dataRange === range && Array.isArray(ur.starts) && ur.starts.length) {
-    const step = (Number(ur.bucket_seconds) || 3600) * 1000;
-    const per = Object.fromEntries(ids.map((id) => [id, ur.accounts?.[id] || []]));
-    const starts = ur.starts.map((s) => Date.parse(s));
-    const totals = add(EMPTY(), null);
-    for (const id of ids) for (const b of per[id]) add(totals, b);
-    return { starts, step, per, totals };
-  }
-  if (range === "24h") {
-    const { per, starts } = hourly(ids, 24);
-    return { starts: starts.map((s) => Date.parse(s)), step: 3600e3, per, totals: sumUsage(ids, "last_24h") };
-  }
-  if (range === "7d") {
-    const today = parseDay(dayKey(Date.now()));
-    const keys = [];
-    for (let i = 6; i >= 0; i--) { const dt = new Date(today); dt.setUTCDate(today.getUTCDate() - i); keys.push(keyOf(dt)); }
-    const per = {};
-    const totals = EMPTY();
-    for (const id of ids) {
-      const daily = S.data?.summary?.accounts?.[id]?.daily || [];
-      per[id] = keys.map((k) => daily.find((d) => d.date === k) || null);
-      for (const b of per[id]) add(totals, b);
-    }
-    // Noon UTC falls on the same calendar day in every time zone the proxy could use.
-    return { starts: keys.map((k) => Date.parse(k + "T12:00:00Z")), step: DAY, per, totals };
-  }
-  return null;
-}
-
 const METRICS = [
   { id: "tokens", label: "Tokens", val: (b) => tokens(b), f: fmt },
   { id: "requests", label: "Requests", val: (b) => Number(b.requests) || 0, f: int },
@@ -199,9 +166,16 @@ const METRICS = [
   { id: "cost", label: "API cost", val: (b) => apiCost(b), f: money },
 ];
 
-function tokensSection(sc, range, colorOf) {
+function tokensSection(sc, colorOf, viewport, height) {
   const ids = sc.ids;
-  const data = usageBuckets(ids, range);
+  const ur = S.data?.summary?.usage_range;
+  const loading = S.dataViewport !== wantUsageViewport();
+  const raw = ur?.range === "viewport" && !loading ? ur : null;
+  const data = raw ? {
+    starts: raw.starts.map(Date.parse), ends: raw.ends.map(Date.parse), step: raw.bucket_seconds * 1000,
+    per: Object.fromEntries(ids.map((id) => [id, raw.accounts[id] || []])),
+    totals: ids.reduce((sum, id) => (raw.accounts[id] || []).reduce((t, b) => add(t, b), sum), EMPTY()),
+  } : null;
   // API cost shows only when the backend prices usage.
   const cost = costKnown();
   const metrics = METRICS.filter((m) => m.id !== "cost" || cost);
@@ -212,7 +186,7 @@ function tokensSection(sc, range, colorOf) {
     return figure(m.label, esc(v), "", { metric: m.id, on: m.id === metric.id, title: m.id === "cost" ? costTitle() : "" });
   };
   const nm = Object.fromEntries(sc.shown.map((a) => [a.id, a.email]));
-  let chart = `<div class="empty">No usage for this range yet. It fills in once the proxy keeps it.</div>`, tip = () => "";
+  let chart = `<div class="empty">${loading ? "Loading visible window..." : "No usage for this window yet."}</div>`, tip = () => "";
   const chartId = "usage-tokens";
   if (data && data.starts.length) {
     const n = data.starts.length;
@@ -227,9 +201,11 @@ function tokensSection(sc, range, colorOf) {
       cols = data.starts.map((_, i) => ({ values: Object.fromEntries(ids.map((id) => [id, at(id, i) ? metric.val(at(id, i)) : 0])) }));
     }
     const isCache = metric.id === "cache";
+    const showNow = Math.abs(Date.now() - viewport.end) < 60000;
+    if (showNow) for (const s of series) s.nowV = cols[cols.length - 1]?.values[s.key] ?? null;
     chart = timeChart({
-      id: chartId, format: chartFormat(chartId), series, cols, height: 140, max: isCache ? 100 : null,
-      yfmt: isCache ? (v) => Math.round(v) + "%" : metric.id === "cost" ? moneyAxis : (v) => fmt(v), labels: timeLabels(data.starts, data.step), dense: n > 40,
+      id: chartId, format: chartFormat(chartId), series, cols, height, positions: data.starts.map((t, i) => ((t + data.ends[i]) / 2 - viewport.start) / (viewport.end - viewport.start)), max: isCache ? 100 : null,
+      yfmt: isCache ? (v) => Math.round(v) + "%" : metric.id === "cost" ? moneyAxis : (v) => fmt(v), labels: viewportLabels(viewport, n, showNow ? viewport.end : null), dense: n > 40, nowX: showNow ? n - 1 : -1,
     });
     tip = (i) => {
       const s = sumAt(i);
@@ -248,15 +224,14 @@ function tokensSection(sc, range, colorOf) {
     if (r == null) return `<span class="muted">–</span>`;
     return `<span class="metercell"><span class="meter"><i style="width:${Math.round(r)}%;background:${color}"></i></span><span>${Math.round(r)}%</span></span>`;
   };
-  const cells = (x, color) => [cell0(x.requests, int), cell0(x.input_tokens, fmt), cell0(x.cache_write_tokens, fmt), cell0(x.cache_read_tokens, fmt), cell0(x.output_tokens, fmt), ...(cost ? [cell0(x.api_cost, money)] : []), reuse(x, color)];
+  const cells = (x, color) => !x ? Array(cost ? 7 : 6).fill(`<span class="muted">–</span>`) : [cell0(x.requests, int), cell0(x.input_tokens, fmt), cell0(x.cache_write_tokens, fmt), cell0(x.cache_read_tokens, fmt), cell0(x.output_tokens, fmt), ...(cost ? [cell0(x.api_cost, money)] : []), reuse(x, color)];
   const per = (id) => {
     if (!data) return null;
     if (data.totals && ids.length === 1) return data.totals;
-    if (range === "24h" && !(S.data?.summary?.usage_range?.range === range && S.dataRange === range)) return sumUsage([id], "last_24h");
     return (data.per[id] || []).reduce((t, b) => add(t, b), EMPTY());
   };
   const rows = sc.shown.map((a) => {
-    const x = per(a.id) || EMPTY();
+    const x = per(a.id);
     const st = status(a);
     const warn = st.kind === "blocked" || st.kind === "error" ? warnState(st.text) : "";
     return { href: "#/accounts/" + encodeURIComponent(a.id), cells: [`<span class="lead"><i class="sq" style="background:${colorOf(a.id)}"></i>${logo(a.provider)}</span>`, `${email(a.email)}${warn}`, ...cells(x, colorOf(a.id))] };
@@ -272,17 +247,22 @@ function tokensSection(sc, range, colorOf) {
     { label: "Output", w: 88, r: true, cls: "num" }, ...(cost ? [{ label: "API cost", w: 88, r: true, cls: "num" }] : []),
     { label: "Cache reuse", w: 136, cls: "num reusecol" },
   ];
-  const sub = RANGE_TEXT[range] + (ids.length > 1 ? ", by account" : "");
-  const html = `<div class="usec chartbox">
+  const legend = sc.shown.filter((a) => data && tokens((data.per[a.id] || []).reduce((t, b) => add(t, b), EMPTY())) > 0).map((a) => `<span><i style="background:${colorOf(a.id)}"></i>${email(a.email)}</span>`).join("");
+  const html = `<div class="usec chartbox usage-history-graph">
     <div class="block tight">
-      <div class="uhead"><div class="t"><b>Tokens</b><span class="muted">${esc(sub)}</span></div>${data && data.starts.length ? `<div class="ctools">${formatToggle(chartId)}</div>` : ""}</div>
-      <div class="uvis"><div class="figtabs">${metrics.map(tile).join("")}</div>${chart}${metric.id === "cost" ? `<div class="muted cnote">${esc(costNote(sc.shown.map((a) => a.provider)))}</div>` : ""}</div>
+      <div class="uvis"><div class="figtabs">${metrics.map(tile).join("")}</div>${chart}<div class="usage-chart-foot"><div class="legend">${legend}</div><span class="muted">${data ? (data.step >= DAY ? "Daily" : "Hourly") + " buckets" : ""}</span></div>${metric.id === "cost" ? `<div class="muted cnote">${esc(costNote(sc.shown.map((a) => a.provider)))}</div>` : ""}</div>
     </div>
-    ${table(cols, rows, { empty: "No accounts." })}
+    ${table(cols, rows, { empty: "No accounts selected." })}
   </div>`;
   const mount = (root) => {
     root.querySelectorAll(".uvis [data-metric]").forEach((b) => { b.onclick = () => { S.ui.usMetric = b.dataset.metric; rerender(); }; });
-    bindChart(root, chartId, tip);
+    const clearHover = bindChart(root, chartId, tip);
+    bindViewport(root, chartId, "history", viewport, { clearHover, rangeTip: (from, to) => {
+      if (!data) return "";
+      const indices = data.starts.map((t, i) => i).filter((i) => data.starts[i] < to && data.ends[i] > from);
+      const rows = ids.map((id) => ({ k: nm[id] || id, v: fmt(tokens(indices.reduce((t, i) => add(t, data.per[id]?.[i]), EMPTY()))), color: colorOf(id) }));
+      return `<div class="h"><span>${esc(day(from))} ${clock(from)} to ${esc(day(to))} ${clock(to)}</span></div>${tipRows(rows)}<div class="s">Tokens in intersecting ${data.step >= DAY ? "daily" : "hourly"} buckets</div>`;
+    } });
   };
   return { html, mount };
 }
@@ -290,23 +270,22 @@ function tokensSection(sc, range, colorOf) {
 // ---------- the screen ----------
 
 export function view() {
-  const sc = scopeOf("usProv");
+  const sc = usageScope();
   const ids = sc.ids;
-  const range = screenRange("usage");
   // One colour per account across the allowance chart, the tokens chart and both tables.
   const colorOf = (id) => accountColor(id);
 
+  const section = S.ui.usSection || "allowance";
+  const grid = section === "history" && S.ui.usHistoryView === "grid";
+  const viewport = windowFor(section);
+  // Freeze the requested historical window so polling responses match it.
+  if (section === "history" && !S.ui.historyViewport) S.ui.historyViewport = viewport;
   const long = (S.ui.usWindow || "week") === "week";
-  const allowance = allowanceChart({ key: "usAllowance", ids, long, colorOf });
-  const allowanceSec = `<div class="usec">
-    <div class="block">
-      <div class="uhead"><div class="t"><b>Allowance</b><span class="muted">${long ? "Where each weekly limit is heading, and when it resets" : "Where each 5-hour limit is heading, and when it resets"}</span></div>${seg([{ id: "week", label: "Week" }, { id: "5h", label: "5 hours" }], long ? "week" : "5h", "data-us-window", "bare")}</div>
-      ${allowance.html}
-    </div>
-    ${allowanceTable(ids, long, colorOf)}
-  </div>`;
-
-  const tok = tokensSection(sc, range, colorOf);
+  const mainHeight = document.getElementById("main")?.clientHeight || 884;
+  const allowanceHeight = Math.max(180, mainHeight - 96 - 100 - 32 - Math.min(ids.length, 6) * 48 - 69);
+  const allowance = section === "allowance" ? allowanceChart({ key: "usAllowance", ids, long, colorOf, viewport, height: allowanceHeight }) : null;
+  const allowanceSec = allowance ? `<div class="usec usage-allowance"><div class="block">${allowance.html}</div>${allowanceTable(ids, long, colorOf)}</div>` : "";
+  const tok = section === "history" && !grid ? tokensSection(sc, colorOf, viewport, Math.max(140, mainHeight - 96 - 140 - 32 - Math.min(ids.length + 1, 7) * 48 - 60)) : null;
 
   const hist = history(sc);
   const sums = hist.sums;
@@ -316,28 +295,25 @@ export function view() {
   const fig = (label, x) => `<div><span class="muted">${label}</span><span class="bignum"><span class="v">${x ? fmt(tokens(x)) : "–"}</span></span>${cost && x ? `<span class="muted">${esc(money(apiCost(x)))} at API prices</span>` : ""}</div>`;
   const scale = `<div class="scale">Less <i style="background:var(--surface-2)"></i><i style="background:color-mix(in srgb, var(--chart-1) 18%, transparent)"></i><i style="background:var(--chart-p50)"></i><i style="background:var(--chart-p90)"></i><i style="background:var(--chart-1)"></i><i style="background:var(--chart-p99)"></i> More</div>`;
   const historySec = `<div class="activity">
-    <div class="uhead"><div class="t"><b>History</b><span class="muted">${esc(historySub(hist, cols))}</span></div></div>
-    <div class="figsrow"><div class="four">${fig("Today", sums.today)}${fig("This week", sums.week)}${fig("This month", sums.month)}${fig("Lifetime", sums.life)}</div>${scale}</div>
-    ${heat(cols)}
+    <div class="figsrow"><div class="four">${fig("Today", sums.today)}${fig("This week", sums.week)}${fig("This month", sums.month)}${fig("Lifetime", sums.life)}</div></div>
+    ${heat(cols)}<div class="usage-chart-foot"><span class="muted">${esc(historySub(hist, cols))}</span>${scale}</div>
   </div>`;
 
   const html = `
-    <div class="bar wrap">${providerTabs("usProv")}<div class="end" style="gap:16px"><span class="muted nowrap readat">${esc(readAt())}</span>${rangeTabs("usage")}</div></div>
-    ${accountChips("usProv")}
-    <div class="body">
-      ${allowanceSec}
-      ${tok.html}
-      ${historySec}
-    </div>`;
+    <div class="bar usage-bar"><div class="tabs" role="tablist" aria-label="Usage view">${["allowance", "history"].map((id) => `<button role="tab" aria-selected="${section === id}" class="tab ${section === id ? "on" : ""}" data-usage-section="${id}">${id === "allowance" ? "Allowance" : "History"}</button>`).join("")}</div><div class="end"><span class="muted nowrap readat">${esc(readAt())}</span>${grid ? '<span class="muted">Past year</span>' : windowLabel(viewport)}</div></div>
+    <div class="usage-toolbar">${section === "allowance" ? seg([{ id: "week", label: "Weekly" }, { id: "5h", label: "5-hour" }], long ? "week" : "5h", "data-us-window", "bare") : seg([{ id: "graph", label: "Graph" }, { id: "grid", label: "Grid" }], grid ? "grid" : "graph", "data-history-view", "bare")}<div class="row gap8">${section === "history" && !grid ? formatToggle("usage-tokens") : ""}${usagePicker(sc)}</div></div>
+    <div class="body usage-body">${section === "allowance" ? allowanceSec : grid ? historySec : tok.html}</div>`;
 
   return {
     html,
     mount(root) {
-      bindProviderTabs(root, "usProv");
-      bindRangeTabs(root, "usage");
+      bindUsagePicker(root);
       bindFormatToggles(root);
-      allowance.mount(root);
-      tok.mount(root);
+      allowance?.mount(root);
+      tok?.mount(root);
+      const redraw = () => { rerender(); if (section === "history" || S.ui.usSection === "history") window.dispatchEvent(new Event("dash:usage-window")); };
+      root.querySelectorAll("[data-usage-section]").forEach((b) => { b.onclick = () => { S.ui.usSection = b.dataset.usageSection; redraw(); }; });
+      root.querySelectorAll("[data-history-view]").forEach((b) => { b.onclick = () => { S.ui.usHistoryView = b.dataset.historyView; redraw(); }; });
       root.querySelectorAll("[data-us-window]").forEach((b) => { b.onclick = () => { S.ui.usWindow = b.dataset.usWindow; rerender(); }; });
       const wrap = root.querySelector("[data-heat]");
       if (wrap) {
