@@ -5,6 +5,7 @@ import {
   table, timeChart, bindChart, spaceMarks, tipRows, warnState, meterCell, dayKey, isToday, status, icon, providerTitle,
 } from "../core.js";
 import { accountColor } from "./common.js";
+import { bindViewport, viewportLabels, spanText } from "./viewport.js";
 
 const HOUR = 3600e3;
 const IDLE_AFTER = 90 * 60e3; // the router's burn lookback: no reading for this long is idle
@@ -40,6 +41,16 @@ export function trajectory(ser, now = Date.now()) {
   let rate = null;
   if (ser.long) rate = coveredH >= 3 ? burned / coveredH : perHour;
   else rate = perHour != null ? perHour : idle ? 0 : null;
+  // Exhaustion is not evidence of zero future demand. When the recent
+  // lookback contains no burn, use measured drops in this meter's retained
+  // history. Missing samples and refill intervals contribute neither burn
+  // nor elapsed time. An entirely exhausted history cannot establish demand.
+  let rateBasis = ser.long ? "Average over the latest day" : "Recent observed burn";
+  if (leftNow <= 0 && rate === 0) {
+    const observed = observedHistoryRate(ser, now);
+    rate = observed != null && observed > 0 ? observed : null;
+    rateBasis = rate == null ? "Not enough consumption history to forecast after reset" : "Average over available meter history, including idle time";
+  }
   const reset = ms(ser.reset_at);
   // Nothing left is used up, not running out now.
   const usedUp = leftNow <= 0;
@@ -49,7 +60,21 @@ export function trajectory(ser, now = Date.now()) {
     if (!usedUp && rate > 0 && leftNow / rate < hours) runsOut = now + (leftNow / rate) * HOUR;
     leftAtReset = Math.max(0, leftNow - rate * hours);
   }
-  return { long: !!ser.long, idle, leftNow, usedUp, perHour, burned, since, coveredH, rate, reset, runsOut, leftAtReset };
+  return { long: !!ser.long, idle, leftNow, usedUp, perHour, burned, since, coveredH, rate, rateBasis, reset, runsOut, leftAtReset };
+}
+
+export function observedHistoryRate(ser, now = Date.now()) {
+  const step = Number(ser.step_seconds) * 1000, start = ms(ser.start);
+  if (!step || !Array.isArray(ser.used)) return null;
+  let consumed = 0, duration = 0;
+  for (let i = 1; i < ser.used.length; i++) {
+    if (start + i * step > now) break;
+    const a = ser.used[i - 1], b = ser.used[i];
+    if (a == null || b == null || b < a) continue;
+    consumed += (b - a) / 10;
+    duration += step;
+  }
+  return duration > 0 ? consumed / (duration / HOUR) : null;
 }
 
 // Allowance left at time t (from now on) at the current rate. It runs down
@@ -63,9 +88,9 @@ export function projectedAt(tr, now, period, t) {
 
 // The same projection as points for a line from now to end: each stretch
 // runs down to 0 at most, and a reset is a vertical step back up to 100%.
-function projectionPoints(tr, now, end, period, xOf) {
+export function projectionPoints(tr, now, end, period, xOf) {
   const pts = [];
-  if (tr.rate == null || !(tr.reset > now)) return pts;
+  if (tr.rate == null || !(tr.reset > now) || end <= now) return pts;
   let from = now, v0 = tr.leftNow, next = tr.reset;
   for (;;) {
     const stop = Math.min(next, end);
@@ -129,12 +154,12 @@ function deadZones(providers, long, { now, start, step, n, nowX }) {
     // between those points.
     const endT = tOf(n - 1);
     const leftAt = (m, t) => (m.tr.leftNow <= 0 && t < m.tr.reset ? 0 : projectedAt(m.tr, now, m.period, t));
-    const cuts = new Set([nowX, n - 1]);
+    const cuts = new Set([Math.max(0, nowX), n - 1]);
     for (const m of pool) {
       for (const q of projectionPoints(m.tr, now, endT, m.period, (t) => (t - start) / step)) cuts.add(q.x);
       for (const t of resetsUntil(m.tr, now, endT, m.period)) cuts.add((t - start) / step);
     }
-    const xs = [...cuts].filter((x) => x >= nowX && x <= n - 1).sort((a, b) => a - b);
+    const xs = [...cuts].filter((x) => x >= Math.max(0, nowX) && x <= n - 1).sort((a, b) => a - b);
     for (let k = 0; k < xs.length - 1; k++) {
       const mid = tOf((xs[k] + xs[k + 1]) / 2);
       if (xs[k + 1] > xs[k] && pool.every((m) => leftAt(m, mid) === 0)) spans.push([xs[k], xs[k + 1]]);
@@ -176,7 +201,7 @@ export function outlook(tr, { short = false } = {}) {
 // Allowance left for the given accounts: history solid, then the trajectory
 // dashed, refilling at each reset, with the resets marked above the plot.
 // colorOf(id, idx): the colour for an account, when the screen keys it elsewhere too.
-export function allowanceChart({ key, ids, long, colorOf = null }) {
+export function allowanceChart({ key, ids, long, colorOf = null, viewport = null, height = 160 }) {
   const nm = accountLabels();
   const now = Date.now();
   const list = ids.map((id, idx) => ({ id, ser: allowanceSeries(id, long), color: colorOf ? colorOf(id, idx) : accountColor(id) })).filter((x) => x.ser);
@@ -184,46 +209,36 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
   if (list.length === 1 && !colorOf) list[0].color = "var(--chart-1)";
   if (!list.length) {
     return {
-      html: `<div class="empty">No allowance readings yet. The proxy reads them from each reply, so they appear once ${ids.length === 1 ? "this account is" : "an account is"} used.</div>`,
+      html: ids.length === 0 ? `<div class="empty">No accounts selected.</div>` : `<div class="empty">No allowance readings yet. The proxy reads them from each reply, so they appear once ${ids.length === 1 ? "this account is" : "an account is"} used.</div>`,
       legend: [], mount() {},
     };
   }
-  const step = list[0].ser.step_seconds * 1000;
-  const gridStart = ms(list[0].ser.start);
-  // Labels mark where the proxy's local day (week view) or 4-hour block
-  // (5-hour view) changes between grid points, so odd time zones still get them.
-  const block = (t) => (long ? dayKey(t) : dayKey(t) + Math.floor(Number(clock(t).slice(0, 2)) / 4));
-  // Start at the block of the first reading while history is shorter than the grid.
-  const firstAt = Math.min(...list.map((x) => ms(x.ser.first_at) || gridStart));
-  let offset = 0;
-  if (firstAt > gridStart) {
-    // The first grid point inside the first reading's block.
-    const b = block(firstAt);
-    offset = Math.floor((firstAt - gridStart) / step);
-    if (block(gridStart + offset * step) !== b) offset++;
-    while (offset > 0 && block(gridStart + (offset - 1) * step) === b) offset--;
-  }
-  const start = gridStart + offset * step;
-  const nowX = (now - start) / step;
-  // Run a little past the last reset, a day for the week and an hour for 5
-  // hours, so the refill shows.
   const trs = list.map((x) => trajectory(x.ser, now));
-  const after = long ? 24 * HOUR : HOUR;
+  const rawStep = list[0].ser.step_seconds * 1000;
+  const gridStart = ms(list[0].ser.start);
+  const block = (t) => (long ? dayKey(t) : dayKey(t) + Math.floor(Number(clock(t).slice(0, 2)) / 4));
+  const firstAt = Math.min(...list.map((x) => ms(x.ser.first_at) || gridStart));
+  const start = viewport ? viewport.start : Math.max(gridStart, firstAt - rawStep);
   let end = now + (long ? 24 * HOUR : 5 * HOUR);
-  for (const tr of trs) if (tr.reset > now) end = Math.max(end, tr.reset + after);
-  end = Math.min(end, now + (long ? 8 * 24 * HOUR : 6 * HOUR));
-  const n = Math.floor((end - start) / step) + 1;
+  for (const tr of trs) if (tr.reset > now) end = Math.max(end, tr.reset + (long ? 24 * HOUR : HOUR));
+  end = viewport ? viewport.end : Math.min(end, now + (long ? 8 * 24 * HOUR : 6 * HOUR));
+  const n = viewport ? 721 : Math.max(2, Math.ceil((end - start) / rawStep) + 1);
+  const step = (end - start) / (n - 1);
+  const nowX = (now - start) / step;
   const xOf = (t) => (t - start) / step;
 
   const lines = list.map((x, k) => {
     const tr = trs[k];
     const values = new Array(n).fill(null);
-    x.ser.used.forEach((u, i) => { if (u != null && i >= offset && i - offset < n) values[i - offset] = 100 - u / 10; });
+    for (let i = 0; i < n; i++) {
+      const t = start + i * step;
+      if (t <= now) values[i] = readingAt(x.ser, t);
+    }
     const period = (Number(x.ser.window_seconds) || 0) * 1000;
     const proj = projectionPoints(tr, now, end, period, xOf);
     return { id: x.id, color: x.color, label: nm[x.id] || x.id, values, proj, tr, period, ser: x.ser, nowV: tr.leftNow };
   });
-  const marks = lines.flatMap((l) => resetsUntil(l.tr, now, end, l.period).map((t) => ({ i: xOf(t), color: l.color, text: isToday(t) ? clock(t) : resetShort(t) })));
+  const marks = lines.flatMap((l) => resetsUntil(l.tr, now, end, l.period).filter((t) => t >= start).map((t) => ({ i: xOf(t), color: l.color, text: isToday(t) ? clock(t) : resetShort(t), title: `${l.label}, ${day(t)} ${clock(t)}, resets to 100%`, lane: lines.indexOf(l) })));
   const all = accounts();
   const providers = [...new Set(lines.map((l) => all.find((a) => a.id === l.id)?.provider).filter(Boolean))];
   const zones = deadZones(providers, long, { now, start, step, n, nowX });
@@ -236,13 +251,11 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
   }
   const near = (i) => Math.abs(i - nowX) < (n - 1) * 0.06;
   const xl = labels.filter((l) => !near(l.i));
-  xl.push({ i: nowX, text: "Now" });
-
-  const height = 160;
+  if (now >= start && now <= end) xl.push({ i: nowX, text: "Now" });
   const cols = Array.from({ length: n }, (_, i) => ({ values: Object.fromEntries(lines.map((l) => [l.id, l.values[i]])) }));
-  const series = lines.map((l) => ({ key: l.id, color: l.color, proj: l.proj, nowV: l.nowV }));
+  const series = lines.map((l) => ({ key: l.id, color: l.color, proj: l.proj, nowV: l.nowV, hoverValues: Array.from({ length: n }, (_, i) => start + i * step > now ? projectedAt(l.tr, now, l.period, start + i * step) : l.values[i]) }));
   const bands = zones.map((z) => ({ x0: z.x0, x1: z.x1, html: icon("skull", 14, "currentColor") }));
-  const html = timeChart({ id: key, format: "line", series, cols, height, max: 100, nowX, labels: xl, marks, bands, yfmt: (v) => Math.round(v) + "%" });
+  const html = timeChart({ id: key, format: "line", series, cols, height, max: 100, nowX, labels: viewport ? viewportLabels(viewport, n, now) : xl, marks, bands, markerLanes: !!viewport, yfmt: (v) => Math.round(v) + "%" });
   const tip = (i) => {
     const t = start + i * step;
     const future = t > now;
@@ -270,8 +283,16 @@ export function allowanceChart({ key, ids, long, colorOf = null }) {
     html,
     legend: lines.map((l) => ({ id: l.id, label: l.label, color: l.color })),
     mount(root) {
-      bindChart(root, key, tip);
-      spaceMarks(root, key);
+      const clearHover = bindChart(root, key, tip);
+      if (!viewport) spaceMarks(root, key);
+      if (viewport) bindViewport(root, key, "allowance", viewport, { clearHover, rangeTip: (from, to) => {
+        const rows = ids.map((id) => {
+          const l = lines.find((x) => x.id === id);
+          const result = l ? allowanceRange(l.ser, l.tr, now, from, to) : null;
+          return `<div class="range-row"><span><i class="sq" style="background:${colorOf?.(id) || accountColor(id)}"></i>${esc(nm[id] || id)}</span><span>${result?.used == null ? "Unknown" : pctRate(result.used)}</span><span>${result?.resets ?? "Unknown"}</span></div>`;
+        }).join("");
+        return `<div class="h"><span>${esc(day(from))} ${clock(from)} to ${esc(day(to))} ${clock(to)}${to > now ? ", at this rate" : ""}</span><span>${esc(spanText(to - from))}</span></div><div class="range-row muted"><span>Account</span><span>Used</span><span>Resets</span></div>${rows}`;
+      } });
       // A skull that does not fit its stretch is left out.
       root.querySelectorAll(`[data-chart="${key}"] .band`).forEach((b) => b.classList.toggle("narrow", b.clientWidth < 18));
     },
@@ -296,29 +317,57 @@ export function allowanceTable(ids, long, colorOf) {
     if (!tr) {
       // No trend: the account's state says more than "no reading" when it has one.
       const st = a ? status(a) : { kind: "" };
-      const dash = `<span class="muted">–</span>`;
+      const dash = `<span class="muted">Unavailable</span>`;
       if (st.kind === "blocked" || st.kind === "error") return { href, cells: [lead, email(a?.email || id), dash, dash, warnState(st.text), ""] };
       if (st.kind === "off") return { href, cells: [lead, email(a?.email || id), dash, dash, `<span class="muted">Off</span>`, ""] };
       if (st.kind === "usedup") {
         const until = st.until || reset;
         return { href, cells: [lead, email(a?.email || id), meterCell(0, color), dash, warnState("Used up"), until ? esc(resetShort(until)) : ""] };
       }
-      return { href, cells: [lead, email(a?.email || id), leftNow == null ? `<span class="muted">No reading</span>` : meterCell(leftNow, color), dash, `<span class="muted">${leftNow == null ? "No reading yet" : "Too few readings yet"}</span>`, reset ? esc(resetShort(reset)) : ""] };
+      return { href, cells: [lead, email(a?.email || id), leftNow == null ? `<span class="muted">No reading</span>` : meterCell(leftNow, color), dash, `<span class="muted">${leftNow == null ? "No reading yet" : "Too few readings yet"}</span>`, reset ? esc(resetShort(reset)) : `<span class="muted">Unknown</span>`] };
     }
-    // Per day is the last 24 hours, or the readings so far scaled to a day; a 5-hour limit shows its rate an hour.
-    const perDay = tr.coveredH >= 1 ? (tr.burned / tr.coveredH) * 24 : null;
-    const rateCell = long
-      ? perDay == null ? `<span class="muted">–</span>` : tr.coveredH >= 20 ? pctRate(perDay) : `${pctRate(perDay)}<span class="muted">from ${Math.round(tr.coveredH)}h</span>`
-      : tr.perHour == null ? `<span class="muted">${tr.idle ? "Idle" : "–"}</span>` : pctRate(tr.perHour);
-    const heading = tr.usedUp ? warnState("Used up")
+    const rateCell = tr.rate == null ? `<span class="muted">Unavailable</span>` : `<span title="${esc(tr.rateBasis)}">${pctRate(tr.rate * (long ? 24 : 1))}</span>`;
+    const nextCycle = tr.usedUp && tr.reset > Date.now() && tr.rate > 0
+      ? (100 / tr.rate < (long ? 168 : 5) ? `Runs out ${weekdayTime(tr.reset + 100 / tr.rate * HOUR)}` : `${Math.round(Math.max(0, 100 - tr.rate * (long ? 168 : 5)))}% left at next reset`) : "";
+    const heading = tr.usedUp ? `<span class="outlook">${warnState("Used up")}${nextCycle ? `<span class="muted">${esc(nextCycle)}</span>` : ""}</span>`
       : tr.rate == null ? `<span class="muted">Too few readings yet</span>`
       : tr.runsOut ? warnState("Runs out " + (isToday(tr.runsOut) ? clock(tr.runsOut) : weekdayTime(tr.runsOut)))
       : tr.leftAtReset == null ? `<span class="muted">No reset time yet</span>` : `${Math.round(tr.leftAtReset)}% left at reset`;
-    return { href, cells: [lead, email(a?.email || id), meterCell(tr.leftNow, color), rateCell, heading, tr.reset ? esc(resetShort(tr.reset)) : ""] };
+    return { href, cells: [lead, email(a?.email || id), meterCell(tr.leftNow, color), rateCell, heading, tr.reset ? esc(day(tr.reset) + ", " + clock(tr.reset)) : `<span class="muted">Unknown</span>`] };
   });
   const cols = [
-    { label: "", w: 32, cls: "lead" }, { label: "Account" }, { label: long ? "Week left" : "5 hours left", w: 120 },
-    { label: long ? "Per day" : "Per hour", w: 136, r: true }, { label: "Heading for", w: 240 }, { label: "Resets", w: 104, r: true },
+    { label: "Account", w: 44, cls: "lead" }, { label: "" }, { label: long ? "Week left" : "5 hours left", w: 120 },
+    { label: long ? "Forecast / day" : "Forecast / hour", w: 140 }, { label: "Heading for", w: 270 }, { label: "Next reset", w: 240 },
   ];
   return table(cols, rows, { empty: "No accounts." });
+}
+
+// A reset is a refill, never negative consumption. Unknown history stays unknown.
+export function allowanceRange(ser, tr, now, from, to) {
+  if (!ser || !tr || !(to > from)) return null;
+  let used = 0, resets = 0;
+  const period = (Number(ser.window_seconds) || 0) * 1000;
+  if (from < now) {
+    const step = Number(ser.step_seconds) * 1000, start = ms(ser.start), end = Math.min(now, to);
+    if (!step || from < start || end > start + (ser.used.length - 1) * step + step) return { used: null, resets: null };
+    for (let t = from; t < end;) {
+      const next = Math.min(end, start + (Math.floor((t - start) / step) + 1) * step);
+      const a = readingAt(ser, t), b = next >= now ? tr.leftNow : readingAt(ser, next);
+      if (a == null || b == null) return { used: null, resets: null };
+      if (b > a) resets++; else used += a - b;
+      t = next;
+    }
+  }
+  if (to > now) {
+    if (tr.rate == null || tr.reset <= now) return { used: null, resets: null };
+    const begin = Math.max(now, from);
+    const points = projectionPoints(tr, now, to, period, (t) => t);
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1], b = points[i];
+      if (a.x === b.x) { if (b.v > a.v && b.x > begin && b.x <= to) resets++; continue; }
+      const duration = Math.max(0, Math.min(to, b.x) - Math.max(begin, a.x));
+      used += Math.max(0, a.v - b.v) * duration / (b.x - a.x);
+    }
+  }
+  return { used, resets };
 }

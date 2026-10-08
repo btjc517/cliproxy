@@ -452,6 +452,7 @@ type UsageRange struct {
 	Range         string                `json:"range"`
 	BucketSeconds int64                 `json:"bucket_seconds"`
 	Starts        []time.Time           `json:"starts"`
+	Ends          []time.Time           `json:"ends,omitempty"`
 	Accounts      map[string][]Counters `json:"accounts"`
 	Ranges        []string              `json:"ranges"`
 }

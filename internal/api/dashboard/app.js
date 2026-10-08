@@ -1,5 +1,5 @@
 // Shell, router and data polling for the dashboard.
-import { S, esc, icon, applyTheme, closeMenu, fetchData, wantRange, wantScope } from "./core.js";
+import { S, esc, icon, applyTheme, closeMenu, fetchData, wantRange, wantScope, wantUsageViewport } from "./core.js";
 import * as overview from "./screens/overview.js";
 import * as accounts from "./screens/accounts.js";
 import * as account from "./screens/account.js";
@@ -43,6 +43,7 @@ function route() {
 const app = document.getElementById("app");
 let lastKey = "";
 let pending = false;
+let chartFocus = "";
 
 function hostName() {
   const h = S.data?.server?.host;
@@ -71,6 +72,7 @@ export function render() {
   const r = route();
   const key = location.hash;
   const main = document.getElementById("main");
+  chartFocus = main.querySelector(".plot:focus")?.closest("[data-chart]")?.dataset.chart || chartFocus;
   const body = main.querySelector(".body");
   const keep = key === lastKey && body ? body.scrollTop : 0;
   app.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("on", a.dataset.nav === r.nav));
@@ -93,6 +95,10 @@ export function render() {
   if (nb && keep) nb.scrollTop = keep;
   lastKey = key;
   if (out.mount) out.mount(main, ctx);
+  if (chartFocus) {
+    const plot = main.querySelector(`[data-chart="${chartFocus}"] .interactive-plot`);
+    if (plot) { plot.focus({ preventScroll: true }); chartFocus = ""; }
+  }
 }
 
 export async function load() {
@@ -107,18 +113,26 @@ export async function load() {
 
 window.addEventListener("hashchange", () => {
   closeMenu();
+  chartFocus = "";
   S.hold = 0;
   render();
   document.getElementById("main").querySelector(".body")?.scrollTo(0, 0);
-  if (S.data && (wantRange() !== S.dataRange || wantScope() !== S.dataScope)) load();
+  if (S.data && (wantRange() !== S.dataRange || wantScope() !== S.dataScope || wantUsageViewport() !== S.dataViewport)) load();
 });
 window.addEventListener("dash:refresh", load);
 window.addEventListener("dash:render", render);
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 100); });
+let usageLoadTimer;
+window.addEventListener("dash:usage-window", () => {
+  clearTimeout(usageLoadTimer);
+  usageLoadTimer = setTimeout(load, 180);
+});
 // A held render waits while a button is pressed: replacing the screen between
 // mousedown and click would swallow the click. The click runs in the same task
 // as pointerup, so the flag clears just after it.
 let pressed = false;
-document.addEventListener("pointerdown", () => { pressed = true; }, true);
+document.addEventListener("pointerdown", () => { pressed = true; chartFocus = ""; }, true);
 document.addEventListener("pointerup", () => setTimeout(() => { pressed = false; }, 0), true);
 document.addEventListener("pointercancel", () => { pressed = false; }, true);
 setInterval(() => { if (pending && S.hold === 0 && !pressed) render(); }, 500);
