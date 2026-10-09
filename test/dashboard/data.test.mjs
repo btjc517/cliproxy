@@ -170,6 +170,22 @@ test('panel options fall back to their defaults', () => {
   assert.equal(opt('allowance', {}, 'window'), 'week');
 });
 
+test('the Display menu keeps a row in place when it is ticked or unticked', async () => {
+  const { panelList } = await import('../../internal/api/dashboard/screens/viewmenus.js');
+  const view = (types) => ({ panels: types.map((type) => ({ type, options: {} })) });
+  // Fresh: shown panels first, in the view's order.
+  const first = panelList(view(['tokens', 'cost', 'requests', 'activity']));
+  assert.deepEqual(first.slice(0, 5).map((p) => p.type + (p.on ? '+' : '')), ['tokens+', 'cost+', 'requests+', 'activity+', 'allowance']);
+  const rows = first.map((p) => p.type);
+  // Unticking Requests leaves it third.
+  const after = panelList(view(['tokens', 'cost', 'activity']), rows);
+  assert.deepEqual(after.slice(0, 4).map((p) => p.type + (p.on ? '+' : '')), ['tokens+', 'cost+', 'requests', 'activity+']);
+  // A reorder in the view fills the ticked rows' places.
+  const moved = panelList(view(['activity', 'cost', 'tokens']), rows);
+  assert.deepEqual(moved.slice(0, 4).map((p) => p.type), ['activity', 'cost', 'requests', 'tokens']);
+  assert.equal(moved.length, first.length);
+});
+
 test('allowance history: a refill starts a new stretch and time used up is left out', () => {
   const p = (t, v) => ({ t, v });
   const out = historyLine([p(0, 40), p(1, 10), p(2, 0), p(3, 0), p(4, 0), p(5, 100), p(6, 90), p(7, 95), p(8, 30)]);

@@ -10,7 +10,7 @@ import { accountPicker, bindAccountPicker } from "./account-picker.js";
 import { pctRate, allowanceRange, resetsUntil } from "./burn.js";
 import { PANELS, panelHtml, buildPanel, panelContext, snapGrid, allowanceLines, leftAt, availability } from "./panels.js";
 import { usageSum, perfScope, perfCounts, historyBefore, loadRangePerf, RP } from "./series.js";
-import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backToNow, zoomHint } from "./timeaxis.js";
+import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backToNow, zoomHint, endText } from "./timeaxis.js";
 import { V, findView, defaultId, sameView, viewWindow, hasForecast, loadViews } from "./views.js";
 import { openDisplay, displayOpen, startRename, renameBox, mountRename, setDefaultView, saveDraft, newViewDialog } from "./viewmenus.js";
 
@@ -65,7 +65,6 @@ export function wants(params) {
 
 // ---------- the table ----------
 
-const dm = (t) => day(t).split(" ").slice(1).join(" ");
 const resetName = (t, now) => (t - now < 6 * DAY ? `${day(t).split(" ")[0]} ${clock(t)}` : `${day(t)} ${clock(t)}`);
 const ALLOWANCE_COLS = ["weekLeft", "perDay", "heading", "nextReset"];
 const USAGE_COLS = ["tokens", "requests", "input", "cacheWrite", "cacheRead", "output", "cost", "cacheReuse"];
@@ -140,7 +139,7 @@ function tableHtml(view, ctx) {
   const shownCols = [];
   for (const c of cols) {
     if (ALLOWANCE_COLS.includes(c) && r) {
-      if (!shownCols.some((x) => x.sel)) shownCols.push({ id: "leftAt", sel: true, ...SEL_COLS.leftAt, label: `Left at ${dm(r.end)}` }, { id: "usedIn", sel: true, ...SEL_COLS.usedIn }, { id: "resetsIn", sel: true, ...SEL_COLS.resetsIn });
+      if (!shownCols.some((x) => x.sel)) shownCols.push({ id: "leftAt", sel: true, ...SEL_COLS.leftAt, label: `Left at ${endText(r.end)}` }, { id: "usedIn", sel: true, ...SEL_COLS.usedIn }, { id: "resetsIn", sel: true, ...SEL_COLS.resetsIn });
     } else shownCols.push({ id: c, ...COLUMNS[c] });
   }
   const allowW = shownCols.filter((c) => c.sel || ALLOWANCE_COLS.includes(c.id)).reduce((t, c) => t + c.w, 0);

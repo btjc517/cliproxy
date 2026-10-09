@@ -10,7 +10,7 @@ import { accountColor } from "./common.js";
 import { allowanceSeries, trajectory, projectedAt, projectionPoints, resetsUntil, readingAt, deadZones, accountLabels } from "./burn.js";
 import { model as availModel, available } from "./timeline.js";
 import { EMPTY, addC, usageData, displayBuckets, usageSum, bucketAt, bucketsIn, perfScope, perfCounts, perfAt, historyBefore, rangePerfFor } from "./series.js";
-import { HOUR, DAY, fracOf, plotWidth, addDays, midnight, timeTicks } from "./timeaxis.js";
+import { HOUR, DAY, fracOf, plotWidth, addDays, midnight, timeTicks, endText } from "./timeaxis.js";
 import { plot, lines, dot, bars, band, card, legend, yTop } from "./tplot.js";
 
 const FORMAT = { key: "format", choices: [["lines", "Lines"], ["bars", "Bars"]], def: "lines" };
@@ -333,9 +333,12 @@ export function deadSpans(lines, long, v, now) {
   const all = accounts();
   const providers = [...new Set(lines.map((l) => all.find((a) => a.id === l.id)?.provider).filter(Boolean))];
   const rawStep = (Number(lines[0].ser.step_seconds) || 600) * 1000;
-  const step = Math.max(rawStep, (v.end - v.start) / 1500);
-  const n = Math.max(2, Math.ceil((v.end - v.start) / step) + 1);
-  return deadZones(providers, long, { now, start: v.start, step, n, nowX: (now - v.start) / step }).map((z) => ({ provider: z.provider, t0: v.start + z.x0 * step, t1: v.start + z.x1 * step, open: z.open }));
+  // Samples sit on a grid fixed in time, so a band's edges stay put as the
+  // window moves instead of shifting with where it starts.
+  const step = Math.ceil(Math.max(rawStep, (v.end - v.start) / 1500) / rawStep) * rawStep;
+  const start = Math.floor(v.start / step) * step;
+  const n = Math.max(2, Math.ceil((v.end - start) / step) + 1);
+  return deadZones(providers, long, { now, start, step, n, nowX: (now - start) / step }).map((z) => ({ provider: z.provider, t0: Math.max(v.start, start + z.x0 * step), t1: start + z.x1 * step, open: z.open }));
 }
 
 // "Sun 09:00" for a reset in the coming week, else "Sun 11 Oct".
@@ -442,7 +445,7 @@ function allowancePanel(ctx, o) {
     const t = Math.min(ctx.range.end, v.end > now ? ctx.range.end : now);
     const have = ls.filter((l) => (leftAt(l, t, now) ?? 0) > 0).length;
     figure = `${have} of ${ls.length}`;
-    qual = `have allowance by ${dm(ctx.range.end)}`;
+    qual = `have allowance by ${endText(ctx.range.end)}`;
   } else {
     const used = ls.filter((l) => l.tr.usedUp);
     if (used.length) {
@@ -508,8 +511,12 @@ function availablePanel(ctx) {
     const cls = s.n === 0 ? "none" : "";
     // A stretch with none says until when, while it has room.
     const back = s.n === 0 && r.segs[i + 1] ? s.to : 0;
-    const why = back && (b - a) * plotWidth() > 240 ? `, no ${providerTitle(r.provider)} allowance until ${resetName(back, now)}` : "";
-    const label = s.n === 0 ? `<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M6.701 2.25c.577-1 2.02-1 2.598 0l5.196 9a1.5 1.5 0 0 1-1.299 2.25H2.804a1.5 1.5 0 0 1-1.3-2.25l5.197-9ZM8 4a.75.75 0 0 1 .75.75v3a.75.75 0 1 1-1.5 0v-3A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" fill="currentColor"/></svg><b>None${esc(why)}</b>` : `<b>${s.n} of ${r.total}</b>`;
+    const px = (b - a) * plotWidth();
+    const why = back && px > 240 ? `, no ${providerTitle(r.provider)} allowance until ${resetName(back, now)}` : "";
+    // A segment too narrow for its label shows none rather than a cut-off one;
+    // the crosshair still reads it.
+    const fits = px >= (s.n === 0 ? 60 : (String(s.n).length + String(r.total).length + 4) * 7 + 10);
+    const label = !fits ? "" : s.n === 0 ?`<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M6.701 2.25c.577-1 2.02-1 2.598 0l5.196 9a1.5 1.5 0 0 1-1.299 2.25H2.804a1.5 1.5 0 0 1-1.3-2.25l5.197-9ZM8 4a.75.75 0 0 1 .75.75v3a.75.75 0 1 1-1.5 0v-3A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" fill="currentColor"/></svg><b>None${esc(why)}</b>` : `<b>${s.n} of ${r.total}</b>`;
     return `<div class="av-seg ${cls}" style="top:${6 + k * 24}px;left:${(a * 100).toFixed(3)}%;width:${((b - a) * 100).toFixed(3)}%">${label}</div>`;
   }).join("")).join("");
   const logos = `<div class="av-logos">${rows.map((r, k) => `<span style="top:${9 + k * 24}px">${logo(r.provider)}</span>`).join("")}</div>`;
@@ -617,6 +624,10 @@ function activityPanel(ctx) {
     }
     cols.push(days);
   }
+  // The grid starts at the week usage begins, so a short history is not
+  // mostly empty weeks. At least 13 weeks show.
+  const firstWeek = cols.findIndex((w) => w.some((d) => d.v && tokens(d.v) > 0));
+  cols.splice(0, Math.min(firstWeek < 0 ? cols.length : firstWeek, cols.length - 13));
   const vals = cols.flat().map((d) => (d.v ? tokens(d.v) : 0)).filter((x) => x > 0).sort((a, b) => a - b);
   const q = (p) => vals[Math.min(vals.length - 1, Math.floor(p * vals.length))] || 0;
   const cuts = [q(0.2), q(0.4), q(0.6), q(0.8)];
@@ -636,7 +647,7 @@ function activityPanel(ctx) {
     const m = MONTHS[parseKey(w[w.length - 1].k).getUTCMonth()];
     if (m === lastMonth) return "";
     lastMonth = m;
-    if (wi > 51 || wi - lastAt < 3) return "";
+    if (wi > cols.length - 2 || wi - lastAt < 3) return "";
     lastAt = wi;
     return `<span style="left:${wi * 22}px">${m}</span>`;
   }).join("");
@@ -665,7 +676,7 @@ function activityPanel(ctx) {
     if (!sec) return;
     const scroll = sec.querySelector("[data-act-scroll]");
     const outlineEl = sec.querySelector(".act-outline");
-    if (outlineEl) { outlineEl.setAttribute("width", String(53 * 22)); outlineEl.setAttribute("height", String(7 * 22)); }
+    if (outlineEl) { outlineEl.setAttribute("width", String(cols.length * 22)); outlineEl.setAttribute("height", String(7 * 22)); }
     // Show the outlined window, else this week.
     const first = [...inWin].map((k) => Number(k.split(",")[0])).sort((a, b) => a - b)[0];
     scroll.scrollLeft = first != null && first * 22 < scroll.scrollWidth - scroll.clientWidth ? Math.max(0, first * 22 - scroll.clientWidth / 2) : scroll.scrollWidth;

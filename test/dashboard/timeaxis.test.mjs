@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  HOUR, DAY, MIN_SPAN, MAX_SPAN, limitWindow, zoomWindow, panWindow, timeAt, fracOf, snapTime, makeRange, resizeRange, moveRange, timeTicks, windowText, rangeText,
+  HOUR, DAY, MIN_SPAN, MAX_SPAN, limitWindow, zoomWindow, panWindow, timeAt, fracOf, snapTime, makeRange, resizeRange, moveRange, timeTicks, windowText, rangeText, endText,
 } from '../../internal/api/dashboard/screens/timeaxis.js';
 import { S } from '../../internal/api/dashboard/core.js';
 
@@ -120,4 +120,7 @@ test('window and range labels read as the boards show them', () => {
   assert.equal(windowText({ start: now - 7 * DAY, end: now }, now), '1 Oct 14:00 to 8 Oct 14:00');
   assert.equal(rangeText({ start: Date.parse('2026-10-09T00:00:00Z'), end: Date.parse('2026-10-12T00:00:00Z') }), '9 to 12 Oct, 3 days');
   assert.equal(rangeText({ start: Date.parse('2026-10-08T14:00:00Z'), end: Date.parse('2026-10-08T18:00:00Z') }), '8 Oct 14:00 to 18:00, 4 hours');
+  // A selection's end names the time unless it falls at midnight.
+  assert.equal(endText(Date.parse('2026-10-12T00:00:00Z')), '12 Oct');
+  assert.equal(endText(Date.parse('2026-10-09T06:00:00Z')), '9 Oct 06:00');
 });

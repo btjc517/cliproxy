@@ -197,6 +197,9 @@ export function spanText(ms) {
   return amount(hours / 24, "day");
 }
 
+// A selection's end: "12 Oct" at midnight, else "9 Oct 06:00".
+export const endText = (t) => (clock(t) === "00:00" ? dm(t) : `${dm(t)} ${clock(t)}`);
+
 // "9 to 12 Oct, 3 days" or "8 Oct 14:00 to 18:00, 4 hours".
 export function rangeText(r) {
   const len = r.end - r.start;

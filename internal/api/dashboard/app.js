@@ -17,7 +17,7 @@ const NAV = [
   { id: "sessions", href: "#/sessions", label: "Sessions", icon: "sessions" },
   { id: "routing", href: "#/routing", label: "Routing", icon: "routing" },
 ];
-const VIEW_ICON = { allowance: "usage", usage: "line", performance: "performance" };
+const VIEW_ICON = { allowance: "battery", usage: "usage", performance: "performance" };
 const MORE = `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${[3.5, 8, 12.5].map((x) => `<circle cx="${x}" cy="8" r="1.25" fill="var(--icon)"/>`).join("")}</svg>`;
 
 // Nav links, then the Telemetry group: built-in views, saved views in the

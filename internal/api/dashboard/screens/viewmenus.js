@@ -84,17 +84,23 @@ function openPop(anchor, cls, draw, { onClose, alignLeft = false } = {}) {
 let displayFor = "";
 export const displayOpen = () => !!pop && !!displayFor;
 
-// Panels the view shows, in order, then the rest in the menu's order.
-function panelList(v) {
+// Panels the view shows, in order, then the rest in the menu's order. With
+// rows, the order the open menu shows: a row keeps its place when ticked or
+// unticked, and the view's own order fills the ticked rows' places.
+export function panelList(v, rows = null) {
   const on = v.panels.map((p) => p.type);
-  return [...on, ...PANEL_ORDER.filter((t) => !on.includes(t))].map((type) => ({ type, on: on.includes(type) }));
+  if (!rows) return [...on, ...PANEL_ORDER.filter((t) => !on.includes(t))].map((type) => ({ type, on: on.includes(type) }));
+  const all = [...rows.filter((t) => PANEL_ORDER.includes(t)), ...PANEL_ORDER.filter((t) => !rows.includes(t))];
+  const queue = [...on];
+  return all.map((t) => (on.includes(t) ? { type: queue.shift(), on: true } : { type: t, on: false }));
 }
 
 export function openDisplay(anchor, id) {
   if (displayOpen() && displayFor === id) { closePop(); return; }
   closePop();
   displayFor = id;
-  let sub = "";
+  let sub = "", rows = null;
+  const listNow = () => { const l = panelList(current(id).view, rows); rows = l.map((p) => p.type); return l; };
   const el = openPop(anchor, "display", (box) => {
     const c = current(id);
     if (!c) { closePop(); return; }
@@ -115,12 +121,13 @@ export function openDisplay(anchor, id) {
       });
       return;
     }
-    const list = panelList(v);
+    const list = listNow();
     box.innerHTML = `<div class="dsec">Panels</div>
       <div class="dlist" role="list">${list.map((p, i) => `<div class="drow" data-type="${p.type}" data-i="${i}" tabindex="0" role="checkbox" aria-checked="${p.on}" aria-label="${esc(PANELS[p.type].title)}. Alt and arrow keys move it.">
         <span class="grip" data-grip aria-hidden="true">${GRIP}</span>${check(p.on ? "true" : "false")}<span class="nm">${esc(PANELS[p.type].title)}</span></div>`).join("")}</div>
       <div class="dsep"></div>
-      <button class="drow" data-cols aria-haspopup="true">${icon("table", 16)}<span class="nm">Table columns</span><span class="muted">${v.columns.length} ${v.columns.length === 1 ? "column" : "columns"}</span>${icon("chevronRight", 14)}</button>
+      <div class="dsec">Table columns</div>
+      <button class="drow" data-cols aria-haspopup="true" aria-label="Table columns, ${v.columns.length} shown"><span class="nm">${v.columns.length} ${v.columns.length === 1 ? "column" : "columns"}</span>${icon("chevronRight", 16)}</button>
       <div class="dsep"></div>
       <div class="dsec">Default window</div>
       <div class="dseg" role="radiogroup" aria-label="Default window">${WINDOWS.map(([w, label]) => `<button class="${v.window === w ? "on" : ""}" data-win="${w}" role="radio" aria-checked="${v.window === w}">${esc(label)}</button>`).join("")}</div>
@@ -130,11 +137,11 @@ export function openDisplay(anchor, id) {
       const opts = new Map(d.panels.map((p) => [p.type, p.options]));
       d.panels = types.map((type) => ({ type, options: opts.get(type) || {} }));
     });
-    const onTypes = () => panelList(current(id).view).filter((p) => p.on).map((p) => p.type);
+    const onTypes = () => current(id).view.panels.map((p) => p.type);
     box.querySelectorAll(".drow[data-type]").forEach((row) => {
       const type = row.dataset.type;
       const toggle = () => {
-        const cur = panelList(current(id).view);
+        const cur = listNow();
         const next = cur.map((p) => (p.type === type ? { ...p, on: !p.on } : p)).filter((p) => p.on).map((p) => p.type);
         setPanels(next);
         pop.draw();
@@ -145,7 +152,7 @@ export function openDisplay(anchor, id) {
         if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(); return; }
         if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
           e.preventDefault();
-          const all = panelList(current(id).view);
+          const all = listNow();
           const i = all.findIndex((p) => p.type === type), j = i + (e.key === "ArrowUp" ? -1 : 1);
           if (j < 0 || j >= all.length) return;
           [all[i], all[j]] = [all[j], all[i]];
@@ -160,12 +167,13 @@ export function openDisplay(anchor, id) {
     // Order: the checked panels in list order. Moving an unchecked row only
     // changes where it lands when checked, so the list keeps it in place.
     const moveTo = (all) => {
+      rows = all.map((p) => p.type);
       const types = all.filter((p) => p.on).map((p) => p.type);
       if (types.join() !== onTypes().join()) setPanels(types);
       pop.draw();
     };
     dragRows(box.querySelector(".dlist"), (order) => {
-      const all = panelList(current(id).view);
+      const all = listNow();
       moveTo(order.map((t) => all.find((p) => p.type === t)));
     });
     box.querySelector("[data-cols]").onclick = () => { sub = "columns"; pop.draw(); box.querySelector("[data-back]")?.focus(); };
