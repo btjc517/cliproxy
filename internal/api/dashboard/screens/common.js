@@ -1,16 +1,10 @@
-// Pieces shared by several screens: provider tabs and account chips, the
+// Pieces shared by several screens: performance for the picked accounts, the
 // usage figure strip with its hourly chart, the API cost note, and session rows.
 import {
-  S, esc, fmt, int, ms, money, moneyAxis, pctText, rateText, clock, day, seen, icon, logo, tabs, table, figure, timeChart, bindChart, tipRows,
+  S, esc, fmt, int, ms, money, moneyAxis, pctText, rateText, clock, day, seen, icon, logo, table, figure, timeChart, bindChart, tipRows,
   accounts, hourly, tokens, cacheReuse, apiCost, costKnown, perf, sumUsage, names, sessionTitle, sessionHref, warnState,
   chartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle, whenShort, wantScope, selectionPerf, validTime, isToday, plainObject,
 } from "../core.js";
-
-export const PROVIDERS = [
-  { id: "all", label: "All" },
-  { id: "claude", label: "Claude" },
-  { id: "codex", label: "Codex" },
-];
 
 // Redraws, then loads again when the picked accounts need a new merged scope.
 const rerender = () => {
@@ -18,66 +12,16 @@ const rerender = () => {
   if (S.data && wantScope() !== S.dataScope) window.dispatchEvent(new Event("dash:refresh"));
 };
 
-export function providerTabs(key, counts) {
-  const active = S.ui[key] || "all";
-  const items = PROVIDERS.map((p) => ({ ...p, n: counts ? counts[p.id] : undefined }));
-  return tabs(items, active, `data-prov="${key}" data-tab`);
-}
-
-// The accounts a screen shows: those of the provider tab, narrowed to the
-// picked account chips. None picked and all picked both mean all of them.
-export function scopeOf(key) {
-  const prov = S.ui[key] || "all";
-  const all = accounts().filter((a) => prov === "all" || a.provider === prov);
-  const picked = prov === "all" ? [] : (S.ui[key + "Pick"]?.[prov] || []).filter((id) => all.some((a) => a.id === id));
-  const some = picked.length > 0 && picked.length < all.length;
-  const shown = some ? all.filter((a) => picked.includes(a.id)) : all;
-  return { prov, all, shown, ids: shown.map((a) => a.id), picked, some };
-}
-
-// The second row under the bar on Claude or Codex: one chip per account.
-export function accountChips(key) {
-  const sc = scopeOf(key);
-  if (sc.prov === "all" || !sc.all.length) return "";
-  const on = new Set(sc.picked);
-  const chips = sc.all.map((a) => `<button class="chip ${on.has(a.id) ? "on" : ""}" data-chip="${esc(key)}" data-id="${esc(a.id)}" aria-pressed="${on.has(a.id)}">${esc(a.email)}</button>`).join("");
-  const m = sc.all.length;
-  const end = sc.some
-    ? `<span class="muted nowrap">${sc.shown.length} of ${m} accounts</span><button class="btn showall" data-chipall="${esc(key)}">Show all</button>`
-    : `<span class="muted nowrap">Showing all ${m} ${m === 1 ? "account" : "accounts"}</span>`;
-  return `<div class="chips"><div class="chiplist">${chips}</div><div class="chipsel">${end}</div></div>`;
-}
-
-export function bindProviderTabs(root, key) {
-  root.querySelectorAll(`[data-prov="${key}"]`).forEach((b) => {
-    b.onclick = () => { S.ui[key] = b.dataset.tab; rerender(); };
-  });
-  const store = () => (S.ui[key + "Pick"] = S.ui[key + "Pick"] || {});
-  root.querySelectorAll(`[data-chip="${key}"]`).forEach((b) => {
-    b.onclick = () => {
-      const prov = S.ui[key];
-      const cur = new Set(store()[prov] || []);
-      if (cur.has(b.dataset.id)) cur.delete(b.dataset.id);
-      else cur.add(b.dataset.id);
-      store()[prov] = [...cur];
-      rerender();
-    };
-  });
-  const all = root.querySelector(`[data-chipall="${key}"]`);
-  if (all) all.onclick = () => { store()[S.ui[key]] = []; rerender(); };
-}
-
 // ---------- performance for a set of accounts ----------
 
 const SUM_KEYS = ["requests", "failed", "failovers", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"];
 
-// The stored scope for all accounts or a whole provider. When the chips pick
-// some but not all accounts, even just one, percentiles come only from the
-// backend's merged selection. Until it arrives (or on a backend without it)
-// counts and tokens are added up here and every percentile is left out,
+// The stored scope for all accounts or a whole provider. When the picker
+// leaves some but not all accounts, even just one, percentiles come only from
+// the backend's merged selection. Until it arrives (or on a backend without
+// it) counts and tokens are added up here and every percentile is left out,
 // which shows as "–".
 export function perfFor(sc, range = "24h") {
-  if (sc.prov === "all") return perf("all", range);
   if (!sc.some) return perf(sc.prov, range);
   const sel = selectionPerf(sc.ids, range);
   if (sel) return sel;
@@ -315,6 +259,13 @@ function buildChart({ chartId, ids, p, stackBy, metric }) {
 }
 
 // ---------- sessions table ----------
+
+// Whether the picked accounts served a session. While a whole provider shows,
+// so do its sessions that have no answer yet.
+export function sessionInScope(s, sc) {
+  if (!sc.some) return sc.prov === "all" || s.provider === sc.prov;
+  return (s.auth_ids || []).some((id) => sc.ids.includes(id));
+}
 
 export function accountCell(s, nm) {
   const ids = s.auth_ids || [];

@@ -4,9 +4,10 @@
 import {
   S, esc, int, fmt, ms, icon, logo, email, status, warnState, perf, rate, rateText, pctText, tokens, cacheReuse, sumUsage, tipRows,
   table, menu, closeMenu, timeChart, bindChart, chartFormat, setChartFormat, formatToggle, bindFormatToggles, timeLabels, bucketTitle,
-  prefs, setPref, plainObject, rangeTabs, bindRangeTabs, screenRange,
+  prefs, setPref, plainObject, rangeTabs, bindRangeTabs, screenRange, accountScope,
 } from "../core.js";
-import { providerTabs, bindProviderTabs, accountChips, scopeOf, perfFor, readAt, gapNote, legendHtml } from "./common.js";
+import { perfFor, readAt, gapNote, legendHtml } from "./common.js";
+import { accountPicker, bindAccountPicker } from "./account-picker.js";
 
 const METRICS = [
   { id: "ttft", title: "First token" },
@@ -320,7 +321,7 @@ function customise(anchor) {
 }
 
 export function view() {
-  const sc = scopeOf("pfProv");
+  const sc = accountScope();
   const range = screenRange("performance");
   const p = perfFor(sc, range);
   const series = (p?.series || []).filter((b) => b && b.start);
@@ -330,7 +331,7 @@ export function view() {
   const g = grid(ctx, l);
 
   const html = `
-    <div class="bar wrap">${providerTabs("pfProv")}
+    <div class="bar wrap">${accountPicker()}
       <div class="end wide"><span class="muted nowrap readat">${esc(readAt())}</span>${rangeTabs("performance")}
         <div class="views">
           <button class="iconbtn ${l.table ? "on" : ""}" data-table aria-pressed="${l.table}" aria-label="${l.table ? "Hide" : "Show"} the By account table" title="${l.table ? "Hide" : "Show"} table">${icon("table")}</button>
@@ -338,7 +339,6 @@ export function view() {
         </div>
       </div>
     </div>
-    ${accountChips("pfProv")}
     <div class="body">
       ${g.html}
       ${l.table ? byAccount(sc, range) : ""}
@@ -348,7 +348,7 @@ export function view() {
     html,
     mount(root) {
       live = { root, ctx };
-      bindProviderTabs(root, "pfProv");
+      bindAccountPicker(root);
       bindRangeTabs(root, "performance");
       g.mount(root);
       root.querySelector("[data-table]").onclick = () => { const x = layout(); x.table = !x.table; saveLayout(x); rerender(); };

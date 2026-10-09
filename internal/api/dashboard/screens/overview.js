@@ -1,9 +1,10 @@
 // Overview: weekly allowance per provider, the last 24 hours, active sessions.
 import {
   S, esc, icon, logo, pill, warnState, accounts, status, limits, left, queue, plan, planDay, planDaysAway, resetShort, clock,
-  providerTitle, sessions, isToday,
+  providerTitle, sessions, isToday, accountScope,
 } from "../core.js";
-import { providerTabs, bindProviderTabs, accountChips, scopeOf, perfFor, readAt, usageStrip, sessionTable } from "./common.js";
+import { perfFor, readAt, usageStrip, sessionTable, sessionInScope } from "./common.js";
+import { accountPicker, bindAccountPicker } from "./account-picker.js";
 import { allowanceSeries, trajectory } from "./burn.js";
 import { timeline } from "./timeline.js";
 
@@ -50,7 +51,7 @@ function accountColumn(acct, isNext) {
   return `<div class="acctcol"><div class="l1">${l1}${end ? `<span class="end">${end}</span>` : ""}</div><div class="l2">${l2}</div></div>`;
 }
 
-// keep: the account ids the chips leave on screen.
+// keep: the account ids the picker leaves on screen.
 function allowanceGroup(provider, keep) {
   const q = queue(provider);
   const order = q.order.filter((a) => keep.has(a.id));
@@ -73,20 +74,19 @@ function allowanceGroup(provider, keep) {
 }
 
 export function view() {
-  const sc = scopeOf("ovProv");
-  const prov = sc.prov;
+  const sc = accountScope();
   const keep = new Set(sc.ids);
-  const groups = (prov === "all" ? ["claude", "codex"] : [prov]).map((p) => allowanceGroup(p, keep)).filter(Boolean).join("");
+  const groups = ["claude", "codex"].map((p) => allowanceGroup(p, keep)).filter(Boolean).join("");
   const tl = timeline(sc.shown);
-  const strip = usageStrip({ key: "ovMetric", chart: "overview", ids: sc.ids, p: perfFor(sc), stackBy: prov === "all" ? "provider" : "account" });
+  // Stacked by provider while every account shows, else by account.
+  const strip = usageStrip({ key: "ovMetric", chart: "overview", ids: sc.ids, p: perfFor(sc), stackBy: sc.prov === "all" && !sc.some ? "provider" : "account" });
 
-  const all = sessions().filter((s) => (prov === "all" || s.provider === prov) && (!sc.some || (s.auth_ids || []).some((id) => keep.has(id))));
+  const all = sessions().filter((s) => sessionInScope(s, sc));
   const active = all.filter((s) => Date.now() - Date.parse(s.last_seen) < 10 * 60e3);
   const today = all.filter((s) => isToday(s.last_seen)).length;
 
   const html = `
-    <div class="bar">${providerTabs("ovProv")}<span class="muted nowrap">${esc(readAt("Live, read"))}</span></div>
-    ${accountChips("ovProv")}
+    <div class="bar">${accountPicker()}<span class="muted nowrap">${esc(readAt("Live, read"))}</span></div>
     <div class="body">
       ${groups ? `<div class="allow">${groups}</div>` : `<div class="empty">No accounts signed in.</div>`}
       ${tl.html}
@@ -102,7 +102,7 @@ export function view() {
   return {
     html,
     mount(root) {
-      bindProviderTabs(root, "ovProv");
+      bindAccountPicker(root);
       tl.mount(root);
       strip.mount(root);
     },
