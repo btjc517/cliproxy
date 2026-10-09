@@ -71,7 +71,9 @@ function open(anchor) {
   // The trigger sits at the right end of each bar, so the menu hangs under it
   // aligned to its right edge. The account menu opens to its left, its first
   // row level with the provider row; to the right when the left has no room,
-  // and underneath on a phone.
+  // and on a phone below the menu, or above it when more room is there. The
+  // account menu never covers the provider rows: it is only as tall as the
+  // room it has, and scrolls beyond that.
   const place = () => {
     const vw = window.innerWidth, vh = window.innerHeight, r = anchor.getBoundingClientRect();
     const mw = main.offsetWidth, mh = main.offsetHeight;
@@ -81,12 +83,22 @@ function open(anchor) {
     main.style.top = top + "px";
     const item = hovered && main.querySelector(`[data-provider="${hovered}"]`);
     if (!item) return;
-    const sw = sub.offsetWidth, sh = sub.offsetHeight;
-    let x = left - 4 - sw, y = item.getBoundingClientRect().top - 8;
+    const sw = sub.offsetWidth;
+    let x = left - 4 - sw;
     if (x < 8) x = left + mw + 4;
-    if (x + sw > vw - 8) { x = Math.max(8, Math.min(left + mw - sw, vw - sw - 8)); y = top + mh + 4; }
+    let y;
+    if (x + sw <= vw - 8) {
+      // Beside the menu: any height up to the window, level with the row when it fits.
+      sub.style.maxHeight = Math.min(420, vh - 16) + "px";
+      y = Math.max(8, Math.min(item.getBoundingClientRect().top - 8, vh - sub.offsetHeight - 8));
+    } else {
+      x = Math.max(8, Math.min(left + mw - sw, vw - sw - 8));
+      const below = vh - (top + mh + 4) - 8, above = top - 4 - 8;
+      sub.style.maxHeight = Math.max(0, Math.min(420, Math.max(below, above))) + "px";
+      y = below >= above ? top + mh + 4 : top - 4 - sub.offsetHeight;
+    }
     sub.style.left = x + "px";
-    sub.style.top = Math.max(8, Math.min(y, vh - sh - 8)) + "px";
+    sub.style.top = y + "px";
   };
   const setHovered = (p) => {
     const next = p === "all" ? "" : p;

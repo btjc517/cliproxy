@@ -300,8 +300,8 @@ export function view() {
   </div>`;
 
   const html = `
-    <div class="bar usage-bar"><div class="tabs" role="tablist" aria-label="Usage view">${["allowance", "history"].map((id) => `<button role="tab" aria-selected="${section === id}" class="tab ${section === id ? "on" : ""}" data-usage-section="${id}">${id === "allowance" ? "Allowance" : "History"}</button>`).join("")}</div><div class="end"><span class="muted nowrap readat">${esc(readAt())}</span>${grid ? '<span class="muted">Past year</span>' : windowLabel(viewport)}</div></div>
-    <div class="usage-toolbar">${section === "allowance" ? seg([{ id: "week", label: "Weekly" }, { id: "5h", label: "5-hour" }], long ? "week" : "5h", "data-us-window", "bare") : seg([{ id: "graph", label: "Graph" }, { id: "grid", label: "Grid" }], grid ? "grid" : "graph", "data-history-view", "bare")}<div class="row gap8">${section === "history" && !grid ? formatToggle("usage-tokens") : ""}${accountPicker()}</div></div>
+    <div class="bar usage-bar"><div class="tabs" role="tablist" aria-label="Usage view">${["allowance", "history"].map((id) => `<button role="tab" aria-selected="${section === id}" class="tab ${section === id ? "on" : ""}" data-usage-section="${id}">${id === "allowance" ? "Allowance" : "History"}</button>`).join("")}</div><div class="end"><span class="muted nowrap readat">${esc(readAt())}</span>${grid ? '<span class="muted">Past year</span>' : windowLabel(viewport)}${accountPicker()}</div></div>
+    <div class="usage-toolbar">${section === "allowance" ? seg([{ id: "week", label: "Weekly" }, { id: "5h", label: "5-hour" }], long ? "week" : "5h", "data-us-window", "bare") : seg([{ id: "graph", label: "Graph" }, { id: "grid", label: "Grid" }], grid ? "grid" : "graph", "data-history-view", "bare")}<div class="row gap8">${section === "history" && !grid ? formatToggle("usage-tokens") : ""}</div></div>
     <div class="body usage-body">${section === "allowance" ? allowanceSec : grid ? historySec : tok.html}</div>`;
 
   return {

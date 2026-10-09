@@ -744,7 +744,7 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .pick-sep { height: 1px; flex-shrink: 0; background: var(--hairline); }
 @media (max-width: 800px) {
   .usage-bar { height: auto; min-height: 48px; flex-wrap: wrap; padding: 12px 16px; gap: 12px; }
-  .usage-bar .end { gap: 12px; flex-wrap: wrap; }
+  .usage-bar .end { gap: 12px; flex-wrap: wrap; justify-content: flex-end; flex-shrink: 1; min-width: 0; }
   .window-readout { font-size: 12px; }
   .usage-toolbar { padding-inline: 16px; }
   .usage-body .usec .block { padding-inline: 16px; }
