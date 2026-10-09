@@ -11,7 +11,8 @@ const PROVIDERS = ["claude", "codex"];
 const stack = () => `<span class="provider-stack">${logo("codex")}<span class="disc">${logo("claude")}</span></span>`;
 
 // A 16px box in a 20px slot: filled with a tick, filled with a bar, or empty.
-function check(state) {
+// The Display menu and the new view dialog use the same box.
+export function check(state) {
   const inner = state === "false"
     ? '<rect class="empty" x="2" y="2" width="16" height="16" rx="4"/><rect class="ring" x="2.5" y="2.5" width="15" height="15" rx="3.5"/>'
     : `<rect class="box" x="2" y="2" width="16" height="16" rx="4"/><path class="mark" d="${state === "true" ? "M6 9.5L9 12.5L14 7.5" : "M6 10H14"}"/>`;

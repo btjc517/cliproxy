@@ -6,7 +6,8 @@ export const S = {
   error: "",
   key: "",
   dataRange: "",     // window the loaded payload covers
-  dataViewport: "",
+  dataViewport: "",  // usage window the loaded payload covers, "start,end"
+  dataPerf: "",      // performance window asked for, "start,end", or "" for the fixed range
   dataScope: "",     // accounts merged into performance.scopes.selection, comma-joined
   ui: {},            // per-screen choices that survive a refresh
   hold: 0,           // >0 while a menu, drawer or hover would be lost by a re-render
@@ -19,49 +20,54 @@ try { S.key = localStorage.getItem(KEY_STORE) || ""; } catch (e) { /* storage bl
 
 // ---------- time ranges ----------
 
-export const RANGE_LABELS = { "24h": "24 hours", "7d": "7 days", "30d": "1 month", "180d": "6 months", all: "All time" };
-const RANGE_DEFAULT = { usage: "7d", performance: "24h" };
-const RANGE_KEY = { usage: "usRange", performance: "pfRange" };
+// The fixed ranges the backend serves, shortest first.
+const FIXED_RANGES = [["24h", 864e5], ["7d", 7 * 864e5], ["30d", 30 * 864e5], ["180d", 180 * 864e5], ["all", Infinity]];
 
-// The ranges the backend says it can serve, in order. A backend without the
-// list knows only the original two.
-export function offeredRanges(screen) {
-  const list = screen === "usage" ? S.data?.summary?.usage_range?.ranges : S.data?.summary?.performance?.ranges;
-  const keys = Array.isArray(list) ? list.filter((k) => RANGE_LABELS[k]) : [];
+// The ranges the backend says it can serve performance for. A backend without
+// the list knows only the original two.
+export function offeredRanges() {
+  const list = S.data?.summary?.performance?.ranges;
+  const keys = Array.isArray(list) ? list.filter((k) => FIXED_RANGES.some(([r]) => r === k)) : [];
   return keys.length ? keys : ["24h", "7d"];
 }
 
-// The range a screen shows: its own choice while the backend offers it, else its default.
-export function screenRange(screen) {
-  const offered = offeredRanges(screen);
-  const pick = S.ui[RANGE_KEY[screen]];
-  if (pick && offered.includes(pick)) return pick;
-  const d = RANGE_DEFAULT[screen];
-  return offered.includes(d) ? d : offered[0];
+// The shortest offered fixed range that reaches back to start: what a backend
+// without custom windows serves instead of one.
+export function fallbackRange(start, now = Date.now()) {
+  const offered = offeredRanges();
+  const fit = FIXED_RANGES.filter(([k]) => offered.includes(k)).find(([, len]) => now - start <= len + 60e3);
+  return fit ? fit[0] : offered[offered.length - 1];
 }
 
-// Usage and Performance each load their own range; every other screen shows 24 hours.
+// The windows the current screen draws, set by the router: {usage, perf}
+// windows of {start, end}, either missing. Other screens load the last 24 hours.
+let screenWants = () => null;
+export function setScreenWants(fn) { screenWants = fn; }
+
+const FIVE_MIN = 5 * 60e3;
+// What to load for a window: whole five minutes, ending by now, an hour to
+// 366 days long, so the request stays the same while now moves a little.
+export function loadSpan(v, now = Date.now()) {
+  if (!v) return null;
+  const end = Math.ceil(Math.min(v.end, now) / FIVE_MIN) * FIVE_MIN;
+  let start = Math.floor(v.start / FIVE_MIN) * FIVE_MIN;
+  start = Math.min(start, end - 3600e3);
+  start = Math.max(start, end - 366 * 864e5);
+  return { start, end };
+}
+const iso = (t) => new Date(t).toISOString().replace(/\.\d{3}Z$/, "Z");
+const spanParam = (s) => (s ? iso(s.start) + "," + iso(s.end) : "");
+
 export function wantRange() {
-  const h = location.hash;
-  if (h.startsWith("#/performance")) return screenRange("performance");
-  if (h.startsWith("#/usage")) return screenRange("usage");
-  return "24h";
+  const p = loadSpan(screenWants()?.perf);
+  return p ? fallbackRange(p.start, p.end) : "24h";
 }
+export const wantUsageViewport = () => spanParam(loadSpan(screenWants()?.usage));
+export const wantPerfWindow = () => spanParam(loadSpan(screenWants()?.perf));
 
-export function rangeTabs(screen) {
-  const cur = screenRange(screen);
-  return `<div class="tabs" role="tablist" aria-label="Time range">${offeredRanges(screen).map((k) => `<button class="tab ${k === cur ? "on" : ""}" data-range="${k}" role="tab" aria-selected="${k === cur}">${esc(RANGE_LABELS[k])}</button>`).join("")}</div>`;
-}
-
-export function bindRangeTabs(root, screen) {
-  root.querySelectorAll("[data-range]").forEach((b) => {
-    b.onclick = () => {
-      S.ui[RANGE_KEY[screen]] = b.dataset.range;
-      window.dispatchEvent(new Event("dash:render"));
-      window.dispatchEvent(new Event("dash:refresh"));
-    };
-  });
-}
+// Whether the loaded performance covers exactly the window asked for. A
+// backend without custom windows answers with the fixed fallback range.
+export const perfExact = () => !!S.dataPerf && S.data?.summary?.performance?.range === "custom";
 
 // ---------- account selection ----------
 
@@ -135,23 +141,17 @@ export function accountScope() {
 export const scopeParam = (ids) => [...ids].sort().join(",");
 
 // The selection the current screen needs merged by the backend, so its
-// percentiles stay exact. Only Overview and Performance show percentiles, and
-// only a backend that lists its ranges knows the scope parameter.
+// percentiles stay exact. Only Overview and Telemetry show percentiles for a
+// selection, and only a backend that lists its ranges knows the scope parameter.
 export function wantScope() {
   if (!Array.isArray(S.data?.summary?.performance?.ranges)) return "";
   const a = location.hash.replace(/^#\/?/, "").split("/")[0];
-  if (a && a !== "overview" && a !== "performance") return "";
+  if (a && a !== "overview" && a !== "telemetry") return "";
   const sc = accountScope();
   return sc.some ? scopeParam(sc.ids) : "";
 }
 
-// The backend's merged scope for exactly these accounts over this range, or null.
-export function selectionPerf(ids, range) {
-  if (S.dataRange !== range || !S.dataScope || S.dataScope !== scopeParam(ids)) return null;
-  return S.data?.summary?.performance?.scopes?.selection || null;
-}
-
-// ---------- per-viewer preferences (chart formats, Performance layout) ----------
+// ---------- per-viewer preferences (chart formats, the zoom hint) ----------
 
 // Stored preferences are trusted only as plain objects.
 export const plainObject = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : null);
@@ -180,33 +180,40 @@ export function setChartFormat(id, f) {
 
 let started = 0, applied = 0;
 
-// Loads /dashboard/data for the current route, with the picked accounts when
-// the screen needs them merged. A reply that arrives after a newer one, or
-// after the route moved to another window or selection, is dropped.
-export function wantUsageViewport() {
-  if (!location.hash.startsWith("#/usage") || S.ui.usSection !== "history" || S.ui.usHistoryView === "grid") return "";
-  const v = S.ui.historyViewport;
-  return v ? new Date(v.start).toISOString() + "," + new Date(v.end).toISOString() : "";
+// The query for /dashboard/data: the fixed range, the picked accounts when
+// they need merging, and the usage and performance windows the screen draws.
+export function dataQuery(want = wantRange(), scope = wantScope(), viewport = wantUsageViewport(), perfWin = wantPerfWindow()) {
+  const q = new URLSearchParams({ range: want });
+  if (scope) q.set("scope", scope);
+  if (viewport) { const [a, b] = viewport.split(","); q.set("usage_start", a); q.set("usage_end", b); }
+  if (perfWin) { const [a, b] = perfWin.split(","); q.set("perf_start", a); q.set("perf_end", b); }
+  return q.toString();
 }
 
+// Loads /dashboard/data for the current route. A reply that arrives after a
+// newer one, or after the route moved to another window or selection, is dropped.
 export async function fetchData() {
   const want = wantRange();
   const scope = wantScope();
   const my = ++started;
   const viewport = wantUsageViewport();
-  const [from, to] = viewport.split(",");
-  const res = await fetch("/dashboard/data?range=" + encodeURIComponent(want) + (scope ? "&scope=" + encodeURIComponent(scope) : "") + (viewport ? "&usage_start=" + encodeURIComponent(from) + "&usage_end=" + encodeURIComponent(to) : ""), { cache: "no-store" });
+  const perfWin = wantPerfWindow();
+  const res = await fetch("/dashboard/data?" + dataQuery(want, scope, viewport, perfWin), { cache: "no-store" });
   if (!res.ok) throw new Error("Could not read the proxy (" + res.status + ")");
   const data = await res.json();
-  if (my < applied || want !== wantRange() || scope !== wantScope() || viewport !== wantUsageViewport()) return;
+  if (my < applied || want !== wantRange() || scope !== wantScope() || viewport !== wantUsageViewport() || perfWin !== wantPerfWindow()) return;
   applied = my;
   S.data = data;
   reconcileSelection();
   S.dataRange = want;
   S.dataScope = scope;
   S.dataViewport = viewport;
+  S.dataPerf = perfWin;
   S.readAt = Date.now();
 }
+
+// Whether the loaded data is what the current screen wants.
+export const dataCurrent = () => wantRange() === S.dataRange && wantScope() === S.dataScope && wantUsageViewport() === S.dataViewport && wantPerfWindow() === S.dataPerf;
 
 export function setKey(k) {
   S.key = k || "";
@@ -356,6 +363,11 @@ const P = {
   chevronDown: "m19.5 8.25-7.5 7.5-7.5-7.5",
   chevronUpDown: "M8.25 15 12 18.75 15.75 15m-7.5-6L12 5.25 15.75 9",
   plus: "M12 4.5v15m7.5-7.5h-15",
+  star: "M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z",
+  pencil: "m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10",
+  home: "m2.25 12 8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25",
+  trash: "m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0",
+  stack: "M6 6.878V6a2.25 2.25 0 0 1 2.25-2.25h7.5A2.25 2.25 0 0 1 18 6v.878m-12 0c.235-.083.487-.128.75-.128h10.5c.263 0 .515.045.75.128m-12 0A2.25 2.25 0 0 0 4.5 9v.878m13.5-3A2.25 2.25 0 0 1 19.5 9v.878m0 0a2.246 2.246 0 0 0-.75-.128H5.25c-.263 0-.515.045-.75.128m15 0A2.25 2.25 0 0 1 21 12v6a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 18v-6c0-.98.626-1.813 1.5-2.122",
   more: "M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z",
   check: "m4.5 12.75 6 6 9-13.5",
   calendar: "M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5",
@@ -543,17 +555,6 @@ export function plan(acct) {
   return { type: p.type || "", renews, ends, source: p.source || "" };
 }
 
-// Usage totals for a set of accounts over one of the summary windows.
-export function sumUsage(ids, window) {
-  const out = { requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 };
-  const acc = S.data?.summary?.accounts || {};
-  for (const id of ids) {
-    const u = acc[id]?.[window];
-    if (!u) continue;
-    for (const k in out) out[k] += Number(u[k]) || 0;
-  }
-  return out;
-}
 export const tokens = (u) => (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0);
 export function cacheReuse(u) {
   const read = u.cache_read_tokens || 0;
@@ -565,27 +566,8 @@ export function cacheReuse(u) {
 export const costKnown = () => !!plainObject(S.data?.summary?.pricing);
 export const apiCost = (u) => Number(u?.api_cost) || 0;
 
-// Hourly buckets for the last `n` hours, per account id, oldest first.
-export function hourly(ids, n = 24) {
-  const acc = S.data?.summary?.accounts || {};
-  const per = {};
-  let starts = [];
-  for (const id of ids) {
-    const h = (acc[id]?.hourly || []).slice(-n);
-    per[id] = h;
-    if (h.length > starts.length) starts = h.map((b) => b.start || b.hour || b.time || "");
-  }
-  return { per, starts, n: Math.max(starts.length, n) };
-}
-
-// range: the window the caller shows. Data loaded for another window reads as none.
-export function perf(scope, range = "24h") {
-  if (S.dataRange !== range) return null;
-  return S.data?.summary?.performance?.scopes?.[scope] || null;
-}
-
 // Milliseconds for a timestamp, or 0 when it is missing or unset.
-const ms0 = (iso) => Date.parse(validTime(iso)) || 0;
+const ms0 =(iso) => Date.parse(validTime(iso)) || 0;
 
 // True when Go timestamp a is after b, to the nanosecond; Date.parse keeps only milliseconds.
 function laterThan(a, b) {
@@ -657,15 +639,6 @@ export function email(addr) {
 export const pill = (text, cls = "") => `<span class="pill ${cls}">${esc(text)}</span>`;
 export const warnState = (text, cls = "") => `<span class="state ${cls}" title="${esc(text)}">${warnIcon(14)}<span class="clamp">${esc(text)}</span></span>`;
 
-// Status shown next to an account name: Next pill, or a warning for problems.
-export function acctBadge(acct, nextId) {
-  const st = status(acct);
-  if (st.kind === "off") return `<span class="muted ui">Off</span>`;
-  if (st.kind === "blocked" || st.kind === "error") return warnState(st.text);
-  if (acct.id === nextId) return pill("Next");
-  return "";
-}
-
 export function meterCell(pctLeft, color = "") {
   if (pctLeft == null) return "";
   const p = Math.max(0, Math.min(100, pctLeft));
@@ -698,301 +671,12 @@ export function figure(label, value, unit = "", opts = {}) {
   return `<${tag} class="fig ${opts.on ? "on" : ""} ${opts.metric ? "" : "static"}" ${opts.metric ? `data-metric="${esc(opts.metric)}"` : ""}${opts.title ? ` title="${esc(opts.title)}"` : ""}><span class="l">${esc(label)}</span><span class="v">${value}${unit ? `<span class="u">${esc(unit)}</span>` : ""}</span>${opts.sub ? `<span class="muted">${opts.sub}</span>` : ""}</${tag}>`;
 }
 
-// ---------- time charts: lines by default, bars on request ----------
-
-// Shared axes for both forms: three y labels, gridlines at the top and middle.
-function chartFrame({ id, format, n, height, top, yfmt, plotHtml, xl, dense, marksHtml = "" }) {
-  return `<div class="chart ${format === "bars" ? "" : "linechart"} ${marksHtml ? "marked" : ""}" data-chart="${esc(id)}" data-format="${format}" data-n="${n}">
-    <div class="yax" style="height:${height}px"><span>${esc(yfmt(top))}</span><span>${esc(yfmt(top / 2))}</span><span>0</span></div>
-    <div class="plotwrap">
-      ${marksHtml ? `<div class="cmarks">${marksHtml}</div>` : ""}
-      <div class="plot ${dense ? "dense" : ""}" style="height:${height}px">
-        <div class="grid" style="top:0"></div><div class="grid" style="top:${Math.round(height / 2)}px"></div>
-        ${plotHtml}
-      </div>
-      <div class="xax">${xl}</div>
-    </div>
-  </div>`;
-}
-
-const num = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
-
-// Stacked bar chart. series: [{key, color, label}], cols: [{values: {key: n}}], labels: [{i, text}].
-// overlay: each series is drawn from the baseline behind the smaller ones (percentiles), not stacked.
-export function barChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], dense = false, overlay = false, max = null, positions = null }) {
-  const n = cols.length;
-  const vals = cols.map((c) => series.map((s) => (s.gaps && c.empty ? 0 : num(c.values[s.key]) || 0)));
-  const totals = vals.map((v) => (overlay ? Math.max(0, ...v) : v.reduce((a, b) => a + b, 0)));
-  const top = max != null ? max : niceMax(Math.max(0, ...totals));
-  drawn.set(id, { positions });
-  const colsHtml = vals.map((v, i) => {
-    let segs = "", below = 0;
-    const parts = series.map((s, k) => {
-      const h = overlay ? Math.max(0, v[k] - below) : v[k];
-      if (overlay) below = Math.max(below, v[k]);
-      return h;
-    });
-    for (let k = series.length - 1; k >= 0; k--) {
-      if (!parts[k]) continue;
-      const h = Math.max(1, Math.round((Math.min(parts[k], top) / top) * height));
-      segs += `<i style="height:${h}px;background:${series[k].color}"></i>`;
-    }
-    const spacing = positions && n > 1 ? Math.abs(positions[Math.min(n - 1, i + 1)] - positions[Math.max(0, i - 1)]) / (i > 0 && i < n - 1 ? 2 : 1) : 1;
-    const style = positions ? `style="position:absolute;left:${Math.max(0, positions[i] - spacing / 2) * 100}%;width:${Math.max(0, Math.min(1, positions[i] + spacing / 2) - Math.max(0, positions[i] - spacing / 2)) * 100}%;padding:0 1px"` : "";
-    return `<div class="col" data-i="${i}" ${style}>${segs}</div>`;
-  }).join("");
-  const xl = labels.map((l) => {
-    const pos = n > 1 ? positions ? l.i / (n - 1) : (l.i + 0.5) / n : 0.5;
-    const cls = l.i === 0 ? "first" : l.i === n - 1 ? "last" : "";
-    const left = l.i === 0 ? "0" : l.i === n - 1 ? "100%" : (pos * 100).toFixed(2) + "%";
-    return `<span class="${cls}" style="left:${left}">${esc(l.text)}</span>`;
-  }).join("");
-  return chartFrame({ id, format: "bars", n, height, top, yfmt, plotHtml: colsHtml, xl, dense });
-}
-
-// Values each line chart drew, for the hover dots.
-const drawn = new Map();
-
-// Line chart on the same axes. A series with `gaps` skips buckets marked
-// empty (no requests, so no latency to draw) and bridges them with a dotted
-// muted segment; other series draw every bucket, zeros included.
-// For a chart that runs past now (allowance left), nowX is now's fractional
-// grid index: each series then ends at {nowX, nowV} with its dot there, and
-// `proj` ([{x, v}], x fractional) is drawn dashed after it.
-// marks: [{i, color, text}], reset times drawn in a row above the plot.
-// bands: [{x0, x1, html}], stretches shaded behind the lines.
-function lineChart({ id, series, cols, height = 140, yfmt = fmt, labels = [], max = null, nowX = null, marks = [], bands = [], markerLanes = false, positions = null }) {
-  const n = cols.length;
-  const vals = series.map((s) => cols.map((c) => (s.gaps && c.empty ? null : num(c.values[s.key]))));
-  const top = max != null ? max : niceMax(Math.max(0, ...vals.flat().filter((v) => v != null)));
-  const xf = (i) => (n > 1 ? i / (n - 1) : 0.5);
-  const pointX = (i) => positions?.[i] ?? xf(i);
-  const X = (i) => (pointX(i) * 1000).toFixed(2);
-  const Y = (v) => (height - (Math.max(0, Math.min(top, v)) / top) * height).toFixed(2);
-  const dot = (cls, x, v, color) => `<i class="${cls}" style="left:${(xf(x) * 100).toFixed(2)}%;top:${Y(v)}px;background:${color}"></i>`;
-  let paths = "", dots = "";
-  series.forEach((s, k) => {
-    const v = vals[k];
-    let solid = "", bridge = "", prev = -1;
-    for (let i = 0; i < n; i++) {
-      if (v[i] == null) continue;
-      if (prev === i - 1 && prev >= 0) solid += `L${X(i)} ${Y(v[i])} `;
-      else {
-        if (prev >= 0 && s.gaps) bridge += `M${X(prev)} ${Y(v[prev])} L${X(i)} ${Y(v[i])} `;
-        solid += `M${X(i)} ${Y(v[i])} `;
-      }
-      // A reading with no neighbour would draw nothing; give it a dot.
-      if (i < n - 1 && (i === 0 || v[i - 1] == null) && v[i + 1] == null && nowX == null) dots += dot("pt", i, v[i], s.color);
-      prev = i;
-    }
-    if (nowX != null && nowX >= 0 && nowX <= n - 1 && s.nowV != null) {
-      if (solid) solid += `L${(xf(nowX) * 1000).toFixed(2)} ${Y(s.nowV)}`;
-      dots += dot("nowdot", nowX, s.nowV, s.color);
-    } else if (nowX == null && n && v[n - 1] != null) dots += dot("nowdot", n - 1, v[n - 1], s.color);
-    if (bridge) paths += `<path class="bridge" d="${bridge}" />`;
-    if (solid) paths += `<path d="${solid}" stroke="${s.color}" />`;
-    if (s.proj?.length) {
-      for (const q of s.proj) if (q.marker) dots += dot("pt", q.x, q.v, s.color);
-      paths += `<path class="proj" d="${s.proj.map((q, j) => `${j && !q.move ? "L" : "M"}${X(q.x)} ${Y(q.v)}`).join(" ")}" stroke="${s.color}" stroke-dasharray="4 4" />`;
-    }
-  });
-  drawn.set(id, { vals: series.map((s, i) => s.hoverValues || vals[i]), colors: series.map((s) => s.color), top, height, n, positions });
-  const xl = labels.map((l) => {
-    const pos = xf(l.i);
-    const cls = pos <= 0.02 ? "first" : pos >= 0.98 ? "last" : "";
-    return `<span class="${cls}" style="left:${(pos * 100).toFixed(2)}%">${esc(l.text)}</span>`;
-  }).join("");
-  const nowLine = nowX != null && nowX >= 0 && nowX <= n - 1 ? `<div class="nowline" style="left:${(xf(nowX) * 100).toFixed(2)}%"></div>` : "";
-  const svg = `<svg viewBox="0 0 1000 ${height}" preserveAspectRatio="none" width="100%" height="${height}" aria-hidden="true">${paths}</svg>`;
-  const marksHtml = marks.map((m) => `<span title="${esc(m.title || m.text)}" style="left:${(xf(m.i) * 100).toFixed(2)}%;${markerLanes ? `top:${(m.lane % 3) * 15}px;pointer-events:auto` : ""}">${icon("reset", 12, m.color)}${markerLanes ? "" : `<span>${esc(m.text)}</span>`}</span>`).join("");
-  const bandsHtml = bands.map((b) => `<div class="band" style="left:${(xf(b.x0) * 100).toFixed(2)}%;width:${((xf(b.x1) - xf(b.x0)) * 100).toFixed(2)}%">${b.html || ""}</div>`).join("");
-  return chartFrame({ id, format: "line", n, height, top, yfmt, plotHtml: bandsHtml + nowLine + svg + dots, xl, marksHtml });
-}
-
-// A time chart in the viewer's chosen form. Same options as barChart.
-export function timeChart(o) {
-  return o.format === "bars" ? barChart(o) : lineChart(o);
-}
-
+// A round number at or above v for the top of a y axis.
 export function niceMax(v) {
   if (v <= 0) return 1;
   const exp = Math.pow(10, Math.floor(Math.log10(v)));
   for (const m of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * exp >= v) return m * exp;
   return 10 * exp;
-}
-
-// Hover for timeChart and barChart. tipFor(i) returns the tooltip html, or
-// {html, small} for a one-line note, or "" for nothing.
-export function bindChart(root, id, tipFor) {
-  const chart = root.querySelector(`[data-chart="${id}"]`);
-  if (!chart) return;
-  const plot = chart.querySelector(".plot");
-  const n = Number(chart.dataset.n) || 0;
-  const line = chart.dataset.format !== "bars";
-  let tip = null, guide = null, hot = null, marks = [], held = false, cur = -1;
-  const clear = () => {
-    chart.classList.remove("hovering");
-    if (hot) hot.classList.remove("hot");
-    for (const m of marks) m.remove();
-    if (tip) tip.remove();
-    if (guide) guide.remove();
-    hot = tip = guide = null;
-    marks = [];
-    cur = -1;
-    if (held) S.hold = Math.max(0, S.hold - 1);
-    held = false;
-  };
-  plot.addEventListener("mousemove", (e) => {
-    if (!n || plot.classList.contains("selecting") || plot.classList.contains("range-selected")) return;
-    const pr = plot.getBoundingClientRect();
-    const f = (e.clientX - pr.left) / pr.width;
-    const positions = drawn.get(id)?.positions;
-    const i = positions ? positions.reduce((best, x, j) => Math.abs(x - f) < Math.abs(positions[best] - f) ? j : best, 0) : Math.max(0, Math.min(n - 1, line ? Math.round(f * (n - 1)) : Math.floor(f * n)));
-    if (i === cur) return;
-    const res = tipFor(i);
-    if (!res) return clear();
-    cur = i;
-    const small = typeof res === "object" && res.small;
-    const html = typeof res === "object" ? res.html : res;
-    if (!held) { S.hold++; held = true; }
-    let gx;
-    if (line) {
-      gx = positions ? Math.max(0, Math.min(pr.width, positions[i] * pr.width)) : n > 1 ? (i / (n - 1)) * pr.width : pr.width / 2;
-      if (!guide) { guide = document.createElement("div"); guide.className = "guide"; plot.appendChild(guide); }
-      guide.style.left = gx + "px";
-      for (const m of marks) m.remove();
-      marks = [];
-      const d = drawn.get(id);
-      if (d) d.vals.forEach((v, k) => {
-        if (v[i] == null) return;
-        const m = document.createElement("i");
-        m.className = "hdot";
-        m.style.cssText = `left:${gx}px;top:${d.height - (Math.max(0, Math.min(d.top, v[i])) / d.top) * d.height}px;background:${d.colors[k]}`;
-        plot.appendChild(m);
-        marks.push(m);
-      });
-    } else {
-      const col = plot.querySelector(`.col[data-i="${i}"]`);
-      if (hot) hot.classList.remove("hot");
-      hot = col;
-      if (col) col.classList.add("hot");
-      chart.classList.add("hovering");
-      const cr = col ? col.getBoundingClientRect() : pr;
-      gx = cr.left - pr.left + cr.width / 2;
-    }
-    if (!tip) { tip = document.createElement("div"); plot.appendChild(tip); }
-    tip.className = small ? "tip sm" : "tip";
-    tip.innerHTML = html;
-    const w = tip.offsetWidth;
-    let x;
-    if (small) x = Math.max(0, Math.min(gx - w / 2, pr.width - w));
-    else {
-      x = gx - w - 12;
-      if (x < 0) x = gx + 12;
-      if (x + w > pr.width) x = Math.max(0, pr.width - w);
-    }
-    tip.style.left = x + "px";
-    tip.style.top = small ? "14px" : "-14px";
-  });
-  plot.addEventListener("mouseleave", clear);
-  return clear;
-}
-
-// Marks above a line chart keep apart and in order: each starts 8px after
-// the one before, and from the right edge back they are pulled left to fit.
-// Only marks that would then start left of the chart are hidden.
-export function spaceMarks(root, id) {
-  const lane = root.querySelector(`[data-chart="${id}"] .cmarks`);
-  if (!lane) return;
-  for (const el of lane.children) { el.classList.remove("hide"); el.style.transform = ""; }
-  const lr = lane.getBoundingClientRect();
-  if (!lr.width) return; // not laid out yet: nothing to measure against
-  const items = [...lane.children].map((el) => {
-    const r = el.getBoundingClientRect();
-    return { el, at: r.left, w: r.width, x: r.left };
-  }).sort((a, b) => a.at - b.at);
-  for (let k = 1; k < items.length; k++) items[k].x = Math.max(items[k].x, items[k - 1].x + items[k - 1].w + 8);
-  for (let k = items.length - 1; k >= 0; k--) {
-    const limit = k === items.length - 1 ? lr.right : items[k + 1].x - 8;
-    items[k].x = Math.min(items[k].x, limit - items[k].w);
-  }
-  for (const it of items) {
-    if (it.x < lr.left - 1) it.el.classList.add("hide");
-    else if (it.x !== it.at) it.el.style.transform = `translateX(${it.x - it.at - 6}px)`;
-  }
-}
-
-// Line or bars switch for one chart; the choice is remembered per viewer.
-export function formatToggle(id) {
-  const f = chartFormat(id);
-  const b = (v, path, label) => `<button class="${f === v ? "on" : ""}" data-fmt="${esc(id)}" data-v="${v}" aria-label="${label}" aria-pressed="${f === v}" title="${label}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="${path}" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
-  return `<div class="fmtseg" role="group" aria-label="Chart type">${b("line", P.line, "Line chart")}${b("bars", P.usage, "Bar chart")}</div>`;
-}
-
-export function bindFormatToggles(root, after) {
-  root.querySelectorAll("[data-fmt]").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      setChartFormat(btn.dataset.fmt, btn.dataset.v);
-      if (after) after(); else window.dispatchEvent(new Event("dash:render"));
-    };
-  });
-}
-
-// ---------- time axis labels and bucket names ----------
-
-const DAY_MS = 864e5;
-const dayShort = (t) => day(t).split(" ").slice(0, 2).join(" "); // "Mon 28"
-const dayMonth = (t) => day(t).split(" ").slice(1).join(" ");     // "28 Sep"
-
-// X labels for buckets starting at `starts` (ms), each `step` ms long. Hours
-// get a "Now" at the right; days and weeks end on their date.
-export function timeLabels(starts, step) {
-  const n = starts.length;
-  let out = [];
-  if (!n) return out;
-  const span = starts[n - 1] - starts[0] + step;
-  if (step < DAY_MS && span <= 30 * 3600e3) {
-    starts.forEach((t, i) => { const c = clock(t); if (i < n - 2 && c.endsWith(":00") && Number(c.slice(0, 2)) % 4 === 0) out.push({ i, text: c }); });
-  } else if (step < DAY_MS) {
-    starts.forEach((t, i) => { if (i < n - 2 && dayKey(t) !== dayKey(i ? starts[i - 1] : t - step)) out.push({ i, text: dayShort(t) }); });
-  } else if (n <= 10) {
-    starts.forEach((t, i) => out.push({ i, text: dayShort(t) }));
-  } else if (step < 7 * DAY_MS && n <= 62) {
-    const every = Math.ceil(n / 7);
-    starts.forEach((t, i) => { if ((n - 1 - i) % every === 0) out.push({ i, text: dayMonth(t) }); });
-  } else {
-    starts.forEach((t, i) => { const m = day(t).split(" ")[2]; if (!i || m !== day(starts[i - 1]).split(" ")[2]) out.push({ i, text: m }); });
-  }
-  if (out.length > 8) {
-    const every = Math.ceil(out.length / 8);
-    out = out.filter((l, k) => k % every === 0);
-  }
-  if (step < DAY_MS) {
-    out = out.filter((l) => n - 1 - l.i >= Math.max(2, n * 0.06));
-    out.push({ i: n - 1, text: "Now" });
-  }
-  return out;
-}
-
-// "Mon 5 Oct 14:00 to 15:00", "Mon 5 Oct", or "Mon 28 Sep to Sun 4 Oct".
-export function bucketTitle(starts, i, step) {
-  const t = starts[i];
-  const next = starts[i + 1];
-  const name = (x) => (isToday(x) ? "Today" : day(x));
-  if (step < DAY_MS) return `${name(t)} ${clock(t)} to ${next ? clock(next) : "now"}`;
-  if (step < 7 * DAY_MS) return name(t);
-  return `${day(t)} to ${day((next || t + step) - 1)}`;
-}
-
-// "19:00", "Mon 18:00" or "Mon 28 Sep": short enough for a one-line note.
-export function whenShort(t, step) {
-  if (step >= DAY_MS) return day(t);
-  return isToday(t) ? clock(t) : dayShort(t).split(" ")[0] + " " + clock(t);
-}
-
-export function tipRows(rows) {
-  return rows.map((r) => r === "hr" ? "<hr>" : `<div class="r"><span class="k">${r.color ? `<i style="background:${r.color}"></i>` : ""}<span class="clamp">${esc(r.k)}</span></span><span class="${r.cls || ""}">${esc(r.v)}</span></div>`).join("");
 }
 
 // ---------- popovers, toasts, writes ----------
