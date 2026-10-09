@@ -12,15 +12,20 @@ const (
 	MinPerfSpan = time.Hour
 	MaxPerfSpan = 366 * 24 * time.Hour
 	// maxPerfBuckets is the most buckets a custom window aims for. Snapping
-	// the ends out to bucket boundaries can add one more, and windows longer
-	// than maxPerfBuckets days stay in one day buckets, so they have more.
+	// the ends out to bucket boundaries can add one more.
 	maxPerfBuckets = 200
 )
 
 // perfStepHours are the bucket lengths, in local hours, a custom window picks
-// from, finest first. Each one divides a local day, so every bucket is a run
-// of whole stored hours.
-var perfStepHours = []int{1, 3, 6, 12, 24}
+// from, finest first: parts of a local day, which are runs of whole stored
+// hours, then runs of 1, 2 and 7 whole local days. A 366 day window fits in
+// 2 day buckets; 7 days is there for longer spans.
+var perfStepHours = []int{1, 3, 6, 12, 24, 48, 168}
+
+// dayGridAnchor is the local date multi-day buckets count from: Monday
+// 5 January 1970, so 7 day buckets run Monday to Sunday and a bucket never
+// moves when the window pans.
+var dayGridAnchor = time.Date(1970, time.January, 5, 0, 0, 0, 0, time.UTC)
 
 // ErrPerfWindow reports a custom performance window that is out of order,
 // shorter than MinPerfSpan or longer than MaxPerfSpan.
@@ -38,22 +43,46 @@ func ValidPerfWindow(from, to time.Time) error {
 // perfStep picks the bucket length, in local hours, for a custom window: the
 // finest step that gives at most maxPerfBuckets buckets over the whole window,
 // and whole local days when the window starts before hourlySince, where only
-// the per day rollups are kept.
+// the per day rollups are kept. Past the longest step it returns that step.
 func perfStep(from, to, hourlySince time.Time) int {
 	span := to.Sub(from)
 	for _, hours := range perfStepHours {
-		if hours >= 24 {
-			break
+		if hours < 24 && bucketStart(from, hourlySince.Location(), hours).Before(hourlySince) {
+			continue
 		}
 		step := time.Duration(hours) * time.Hour
-		if bucketStart(from, hourlySince.Location(), hours).Before(hourlySince) {
-			break
-		}
 		if (span+step-1)/step <= maxPerfBuckets {
 			return hours
 		}
 	}
-	return 24
+	return perfStepHours[len(perfStepHours)-1]
+}
+
+// perfBucketStart is the start of the bucket of hours local hours that holds
+// at. Up to a day it is bucketStart. Longer buckets are runs of hours/24
+// whole local days counted from dayGridAnchor.
+func perfBucketStart(at time.Time, loc *time.Location, hours int) time.Time {
+	if hours <= 24 {
+		return bucketStart(at, loc, hours)
+	}
+	days := hours / 24
+	local := at.In(loc)
+	date := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
+	offset := int(date.Sub(dayGridAnchor)/localDay) % days
+	if offset < 0 {
+		offset += days
+	}
+	return localDayStart(local.Year(), local.Month(), local.Day()-offset, loc)
+}
+
+// perfNextBucketStart is the start of the bucket after the one that starts at
+// start.
+func perfNextBucketStart(start time.Time, loc *time.Location, hours int) time.Time {
+	if hours <= 24 {
+		return nextBucketStart(start, loc, hours)
+	}
+	local := start.In(loc)
+	return localDayStart(local.Year(), local.Month(), local.Day()+hours/24, loc)
 }
 
 // perfWindowBounds returns the bucket bounds of a custom window: from the
@@ -66,13 +95,13 @@ func perfWindowBounds(now, from, to time.Time, hours int) []time.Time {
 	if end.After(now) {
 		end = now
 	}
-	bounds := []time.Time{bucketStart(from, loc, hours).In(loc)}
+	bounds := []time.Time{perfBucketStart(from, loc, hours).In(loc)}
 	if !end.After(from) {
 		return bounds
 	}
 	// The walk stops at end; the cap only guards against a broken zone.
 	for limit := 0; bounds[len(bounds)-1].Before(end) && limit < 2*int(MaxPerfSpan/time.Hour); limit++ {
-		bounds = append(bounds, nextBucketStart(bounds[len(bounds)-1], loc, hours).In(loc))
+		bounds = append(bounds, perfNextBucketStart(bounds[len(bounds)-1], loc, hours).In(loc))
 	}
 	return bounds
 }

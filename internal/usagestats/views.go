@@ -23,6 +23,10 @@ const (
 	MaxViews    = 50
 	maxViewID   = 40
 	maxViewName = 60
+	// maxViewsFile is the largest views file read back. A stored file can be
+	// bigger than the request that made it: panels without options gain
+	// "options":{} and encoding/json writes <, > and & as six byte escapes.
+	maxViewsFile = 1 << 20
 )
 
 // viewPanelTypes are the panel types a view may hold.
@@ -79,16 +83,22 @@ func validViewID(id string) bool {
 	return true
 }
 
-// DecodeViews reads and checks a views document. It rejects a body over
-// MaxViewsBody bytes, unknown fields, trailing data and any value outside the
-// rules below, with an error that names the problem.
+// DecodeViews reads and checks a views document sent by a client. It rejects
+// a body over MaxViewsBody bytes, unknown fields, trailing data and any value
+// outside the rules below, with an error that names the problem.
 func DecodeViews(body io.Reader) (DashboardViews, error) {
-	data, errRead := io.ReadAll(io.LimitReader(body, MaxViewsBody+1))
+	return decodeViews(body, MaxViewsBody, "body is larger than 64 KB")
+}
+
+// decodeViews is DecodeViews with a size limit in bytes and the error for a
+// document over it.
+func decodeViews(body io.Reader, limit int64, tooLarge string) (DashboardViews, error) {
+	data, errRead := io.ReadAll(io.LimitReader(body, limit+1))
 	if errRead != nil {
 		return DashboardViews{}, fmt.Errorf("read body: %w", errRead)
 	}
-	if len(data) > MaxViewsBody {
-		return DashboardViews{}, errors.New("body is larger than 64 KB")
+	if int64(len(data)) > limit {
+		return DashboardViews{}, errors.New(tooLarge)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -193,7 +203,7 @@ func ReadViews(path string) (DashboardViews, error) {
 	if errRead != nil {
 		return empty, errRead
 	}
-	views, errDecode := DecodeViews(bytes.NewReader(data))
+	views, errDecode := decodeViews(bytes.NewReader(data), maxViewsFile, "file is larger than 1 MB")
 	if errDecode != nil {
 		return empty, fmt.Errorf("%s: %w", filepath.Base(path), errDecode)
 	}
@@ -201,13 +211,13 @@ func ReadViews(path string) (DashboardViews, error) {
 }
 
 // WriteViews checks views and replaces the views file at path atomically,
-// with mode 0600. It returns what was stored.
+// with mode 0600, as compact JSON. It returns what was stored.
 func WriteViews(path string, views DashboardViews) (DashboardViews, error) {
 	if errCheck := views.check(); errCheck != nil {
 		return DashboardViews{}, errCheck
 	}
 	views = views.normalized()
-	data, errMarshal := json.MarshalIndent(views, "", "  ")
+	data, errMarshal := json.Marshal(views)
 	if errMarshal != nil {
 		return DashboardViews{}, errMarshal
 	}

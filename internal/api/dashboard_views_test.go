@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -105,6 +106,96 @@ func TestDashboardViewsRefusals(t *testing.T) {
 		if rec := viewsRequest(engine, method, "127.0.0.1:5000", host, "", testViewsBody); rec.Code != http.StatusNotFound {
 			t.Fatalf("dashboard off %s: status %d, want 404", method, rec.Code)
 		}
+	}
+}
+
+// A PUT goes through only when the Origin has the same scheme, hostname and
+// effective port as the request. Over TLS the request scheme is https.
+func TestDashboardViewsOriginMatchesSchemeHostAndPort(t *testing.T) {
+	server, engine, _ := newViewsTestServer(t)
+	put := func(host, origin string, overTLS bool) int {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/dashboard/views", strings.NewReader(testViewsBody))
+		req.RemoteAddr = "127.0.0.1:5000"
+		req.Host = host
+		req.Header.Set("Origin", origin)
+		if overTLS {
+			req.TLS = &tls.ConnectionState{}
+		}
+		engine.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for _, tc := range []struct {
+		name, host, origin string
+		overTLS            bool
+		want               int
+	}{
+		{"same http origin", "desktop-home.ts.net:8317", "http://desktop-home.ts.net:8317", false, http.StatusOK},
+		{"https page, http server", "desktop-home.ts.net:8317", "https://desktop-home.ts.net:8317", false, http.StatusForbidden},
+		{"http page, https server", "dash.example", "http://dash.example", true, http.StatusForbidden},
+		{"same https origin", "dash.example", "https://dash.example", true, http.StatusOK},
+		{"https explicit 443 origin", "dash.example", "https://dash.example:443", true, http.StatusOK},
+		{"https explicit 443 host", "dash.example:443", "https://dash.example", true, http.StatusOK},
+		{"https other port", "dash.example", "https://dash.example:8443", true, http.StatusForbidden},
+		{"http explicit 80 origin", "dash.example", "http://dash.example:80", false, http.StatusOK},
+		{"http explicit 80 host", "dash.example:80", "http://dash.example", false, http.StatusOK},
+		{"http 443 is not default", "dash.example", "http://dash.example:443", false, http.StatusForbidden},
+		{"other port", "127.0.0.1:8317", "http://127.0.0.1:9999", false, http.StatusForbidden},
+		{"other host", "127.0.0.1:8317", "http://localhost:8317", false, http.StatusForbidden},
+		{"host case", "Dash.Example:8317", "http://dash.example:8317", false, http.StatusOK},
+		{"ipv6 same", "[::1]:8317", "http://[::1]:8317", false, http.StatusOK},
+		{"ipv6 default port", "[fd7a:115c:a1e0::1]", "http://[FD7A:115C:A1E0::1]:80", false, http.StatusOK},
+		{"ipv6 other port", "[::1]:8317", "http://[::1]:9999", false, http.StatusForbidden},
+		{"ipv6 other address", "[::1]:8317", "http://[::2]:8317", false, http.StatusForbidden},
+		{"ipv6 without brackets", "[::1]:8317", "http://::1:8317", false, http.StatusForbidden},
+		{"null origin", "127.0.0.1:8317", "null", false, http.StatusForbidden},
+		{"file origin", "127.0.0.1:8317", "file://", false, http.StatusForbidden},
+		{"origin with path", "127.0.0.1:8317", "http://127.0.0.1:8317/dashboard", false, http.StatusForbidden},
+		{"origin with user", "127.0.0.1:8317", "http://me@127.0.0.1:8317", false, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := put(tc.host, tc.origin, tc.overTLS); got != tc.want {
+				t.Fatalf("Host %q Origin %q TLS %v: status %d, want %d", tc.host, tc.origin, tc.overTLS, got, tc.want)
+			}
+		})
+	}
+
+	// On a TLS listener, a connection the multiplexer hands over wrapped
+	// (r.TLS nil) still counts as https.
+	server.server = &http.Server{TLSConfig: &tls.Config{}}
+	if got := put("dash.example", "https://dash.example", false); got != http.StatusOK {
+		t.Fatalf("TLS server, wrapped connection, https origin: status %d, want 200", got)
+	}
+	if got := put("dash.example", "http://dash.example", false); got != http.StatusForbidden {
+		t.Fatalf("TLS server, http origin: status %d, want 403", got)
+	}
+}
+
+// The largest body the server accepts reads back after it is saved.
+func TestDashboardViewsLargestBodyReadsBack(t *testing.T) {
+	_, engine, _ := newViewsTestServer(t)
+	host := "127.0.0.1:8317"
+	var views []string
+	for i := 0; i < 50; i++ {
+		var panels []string
+		for _, panelType := range []string{"allowance", "available", "tokens", "cost", "requests", "output", "cache", "ttft", "latency", "throughput", "failures", "activity"} {
+			panels = append(panels, `{"type":"`+panelType+`","options":{"format":"bars","mode":"weekly"}}`)
+		}
+		id := strings.Repeat("v", 38) + string(rune('a'+i/26)) + string(rune('a'+i%26))
+		views = append(views, `{"id":"`+id+`","name":"`+strings.Repeat("é", 60)+`","panels":[`+strings.Join(panels, ",")+
+			`],"columns":["account","tokens","requests","input","cache_write","cache_read","output","cost","cache_reuse"],"window":"last7d","accounts":["`+
+			strings.Repeat("a", 200)+`"],"builtin":false}`)
+	}
+	body := `{"views":[` + strings.Join(views, ",") + `],"default":""}`
+	if len(body) < 60<<10 || len(body) > 64<<10 {
+		t.Fatalf("body is %d bytes, want just under 64 KB", len(body))
+	}
+	if rec := viewsRequest(engine, http.MethodPut, "127.0.0.1:5000", host, "", body); rec.Code != http.StatusOK {
+		t.Fatalf("PUT: status %d %s", rec.Code, rec.Body.String())
+	}
+	got := viewsRequest(engine, http.MethodGet, "127.0.0.1:5000", host, "", "")
+	if got.Code != http.StatusOK || strings.TrimSpace(got.Body.String()) != body {
+		t.Fatalf("GET after the largest PUT: status %d, %d bytes, want 200 and the %d bytes sent", got.Code, got.Body.Len(), len(body))
 	}
 }
 

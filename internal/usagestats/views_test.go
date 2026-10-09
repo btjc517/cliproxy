@@ -181,3 +181,92 @@ func TestViewsPathSitsNextToStatsFile(t *testing.T) {
 		t.Fatalf("views path %q", got)
 	}
 }
+
+// largestValidViews builds the biggest views document the contract allows,
+// within a few bytes of MaxViewsBody when sent compact: 50 views of 12
+// panels with 40 character ids and 60 character names, padded with account
+// ids.
+func largestValidViews(t *testing.T) []byte {
+	t.Helper()
+	types := []string{"allowance", "available", "tokens", "cost", "requests", "output", "cache", "ttft", "latency", "throughput", "failures", "activity"}
+	views := DashboardViews{Default: strings.Repeat("v", 38) + "00"}
+	for i := 0; i < MaxViews; i++ {
+		view := DashboardView{
+			ID:       fmt.Sprintf("%s%02d", strings.Repeat("v", 38), i),
+			Name:     strings.Repeat("é", 59) + "x",
+			Columns:  []string{"account", "tokens", "requests", "input", "cache_write", "cache_read", "output", "cost", "cache_reuse"},
+			Window:   "around_now",
+			Accounts: []string{},
+			Builtin:  i%2 == 0,
+		}
+		for _, panelType := range types {
+			view.Panels = append(view.Panels, ViewPanel{Type: panelType, Options: json.RawMessage(`{"format":"bars","mode":"weekly"}`)})
+		}
+		views.Views = append(views.Views, view)
+	}
+	size := func() int {
+		data, errMarshal := json.Marshal(views)
+		if errMarshal != nil {
+			t.Fatal(errMarshal)
+		}
+		return len(data)
+	}
+	for i := 0; ; i++ {
+		view := &views.Views[i%MaxViews]
+		view.Accounts = append(view.Accounts, fmt.Sprintf("claude-%040d", i))
+		if size() > MaxViewsBody {
+			view.Accounts = view.Accounts[:len(view.Accounts)-1]
+			break
+		}
+	}
+	data, _ := json.Marshal(views)
+	if len(data) < MaxViewsBody-64 || len(data) > MaxViewsBody {
+		t.Fatalf("largest body is %d bytes, want just under %d", len(data), MaxViewsBody)
+	}
+	return data
+}
+
+// The largest request the server accepts must read back after it is saved.
+func TestLargestValidViewsSaveAndReadBack(t *testing.T) {
+	body := largestValidViews(t)
+	views, errDecode := DecodeViews(strings.NewReader(string(body)))
+	if errDecode != nil {
+		t.Fatalf("largest valid body refused: %v", errDecode)
+	}
+	path := filepath.Join(t.TempDir(), ViewsFileName)
+	stored, errWrite := WriteViews(path, views)
+	if errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	read, errRead := ReadViews(path)
+	if errRead != nil {
+		t.Fatalf("saved views do not read back: %v", errRead)
+	}
+	got, _ := json.Marshal(read)
+	want, _ := json.Marshal(stored)
+	if string(got) != string(want) || string(got) != string(body) {
+		t.Fatalf("read back %d bytes, want the %d bytes sent", len(got), len(body))
+	}
+	if data, _ := os.ReadFile(path); len(data) != len(body) {
+		t.Fatalf("file is %d bytes, want the %d compact bytes sent", len(data), len(body))
+	}
+
+	// A browser sends <, > and & raw, and encoding/json stores each as a six
+	// byte escape, so the file can be several times the request.
+	raw := `{"views":[{"id":"v","name":"<&>","panels":[{"type":"cost"}],"columns":[],"window":"last24h","accounts":["` +
+		strings.Repeat("&", MaxViewsBody-200) + `"],"builtin":false}],"default":""}`
+	escaped, errDecode := DecodeViews(strings.NewReader(raw))
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	if _, errWrite := WriteViews(path, escaped); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	back, errRead := ReadViews(path)
+	if errRead != nil {
+		t.Fatalf("escaped views do not read back: %v", errRead)
+	}
+	if back.Views[0].Accounts[0] != escaped.Views[0].Accounts[0] || back.Views[0].Name != "<&>" {
+		t.Fatal("escaped views read back changed")
+	}
+}

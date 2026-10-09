@@ -19,21 +19,58 @@ func (s *Server) dashboardViewsPath() string {
 	return usagestats.Default().ViewsPath()
 }
 
+// servesTLS reports whether Start put this server's listener behind TLS. It
+// reads the listener's state, not the config, which can change on reload
+// without a restart.
+func (s *Server) servesTLS() bool {
+	return s.server != nil && s.server.TLSConfig != nil
+}
+
 // sameOrigin reports whether a browser request comes from a page served by
-// this host: true when there is no Origin header (a script or curl), or when
-// the Origin's host and port equal the request's Host. The server's CORS
-// middleware allows every origin, so this is what stops a page on another
-// site, opened in a browser on the tailnet, from changing the views.
-func sameOrigin(r *http.Request) bool {
+// this server. A request without an Origin header (a script or curl) passes.
+// Otherwise the Origin must be a bare http or https origin whose scheme,
+// hostname and effective port (80 or 443 when left out) equal the request's.
+// The request is https when it arrived over TLS or when serverTLS says the
+// listener is TLS: the multiplexer hands a TLS connection without ALPN to
+// net/http wrapped, which leaves r.TLS nil. X-Forwarded-Proto is not used,
+// because nothing in this server trusts it. An Origin of "null" (sandboxed
+// or file pages) fails. The server's CORS middleware allows every origin, so
+// this is what stops a page on another site, open in a browser on the
+// tailnet, from changing the views.
+func sameOrigin(r *http.Request, serverTLS bool) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true
 	}
 	parsed, errParse := url.Parse(origin)
-	if errParse != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+	if errParse != nil || parsed.User != nil || parsed.Opaque != "" || (parsed.Path != "" && parsed.Path != "/") ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Hostname() == "" {
 		return false
 	}
-	return strings.EqualFold(parsed.Host, r.Host)
+	scheme := "http"
+	if r.TLS != nil || serverTLS {
+		scheme = "https"
+	}
+	if !strings.EqualFold(parsed.Scheme, scheme) {
+		return false
+	}
+	requestHost := &url.URL{Host: r.Host}
+	if requestHost.Hostname() == "" {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), requestHost.Hostname()) &&
+		effectivePort(parsed.Port(), scheme) == effectivePort(requestHost.Port(), scheme)
+}
+
+// effectivePort is port, or the scheme's default port when port is empty.
+func effectivePort(port, scheme string) string {
+	if port != "" {
+		return port
+	}
+	if scheme == "https" {
+		return "443"
+	}
+	return "80"
 }
 
 // dashboardViewsAllowed applies the read-only dashboard's access rule to the
@@ -79,7 +116,7 @@ func (s *Server) putDashboardViews(c *gin.Context) {
 	if !s.dashboardViewsAllowed(c) {
 		return
 	}
-	if !sameOrigin(c.Request) {
+	if !sameOrigin(c.Request, s.servesTLS()) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "cross-origin request refused"})
 		return
 	}

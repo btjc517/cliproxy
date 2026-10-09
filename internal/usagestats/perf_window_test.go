@@ -30,7 +30,11 @@ func TestPerfStepPicksFinestStepUnder200Buckets(t *testing.T) {
 		{"51 days", 51 * 24 * time.Hour, longAgo, 12},
 		{"100 days", 100 * 24 * time.Hour, longAgo, 12},
 		{"101 days", 101 * 24 * time.Hour, longAgo, 24},
-		{"366 days", 366 * 24 * time.Hour, longAgo, 24},
+		{"200 days", 200 * 24 * time.Hour, longAgo, 24},
+		{"201 days", 201 * 24 * time.Hour, longAgo, 48},
+		{"366 days", 366 * 24 * time.Hour, longAgo, 48},
+		{"400 days", 400 * 24 * time.Hour, longAgo, 48},
+		{"401 days, past the API limit", 401 * 24 * time.Hour, longAgo, 168},
 		{"one hour in the rolled up days", time.Hour, now.Add(-30 * time.Minute), 24},
 		{"seven days reaching the rolled up days", 7 * 24 * time.Hour, now.Add(-3 * 24 * time.Hour), 24},
 	} {
@@ -40,6 +44,74 @@ func TestPerfStepPicksFinestStepUnder200Buckets(t *testing.T) {
 				t.Fatalf("perfStep(%v) = %dh, want %dh", tc.span, got, tc.want)
 			}
 		})
+	}
+}
+
+// A full 366 day window uses 2 day buckets: about 200 of them, each two local
+// days long across the DST changes, on a grid that does not move when the
+// window pans by a day.
+func TestPerformanceBetweenYearUsesTwoDayBuckets(t *testing.T) {
+	london := mustZone(t, "Europe/London")
+	now := time.Date(2026, 10, 9, 14, 20, 0, 0, london)
+	store := newTestStore(now)
+	store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", RequestedAt: now.Add(-time.Hour), TTFT: time.Second, Latency: 2 * time.Second})
+	store.record(coreusage.Record{AuthID: "claude-a", Provider: "claude", RequestedAt: now.AddDate(0, -6, 0), TTFT: time.Second, Latency: 2 * time.Second})
+
+	from := now.AddDate(0, 0, -366)
+	perf := store.PerformanceBetween(from, now, nil, nil)
+	if perf.BucketSeconds != 2*86400 {
+		t.Fatalf("bucket %ds, want 2 days", perf.BucketSeconds)
+	}
+	all := perf.Scopes["all"]
+	if len(all.Series) > maxPerfBuckets+1 || len(all.Series) < 183 {
+		t.Fatalf("series has %d points, want 183 to %d", len(all.Series), maxPerfBuckets+1)
+	}
+	if all.Requests != 2 {
+		t.Fatalf("requests %d, want 2", all.Requests)
+	}
+	for i, point := range all.Series {
+		start := point.Start.In(london)
+		if start.Hour() != 0 || start.Minute() != 0 {
+			t.Fatalf("point %d starts at %v, want local midnight", i, start)
+		}
+		if i > 0 {
+			prev := all.Series[i-1].Start.In(london)
+			if next := time.Date(prev.Year(), prev.Month(), prev.Day()+2, 0, 0, 0, 0, london); !start.Equal(next) {
+				t.Fatalf("point %d starts %v, want two local days after %v", i, start, prev)
+			}
+		}
+	}
+	if first := all.Series[0].Start; first.After(from) || from.Sub(first) >= 48*time.Hour {
+		t.Fatalf("first point %v does not hold the window start %v", first, from)
+	}
+	panned := store.PerformanceBetween(from.AddDate(0, 0, 1), now, nil, nil).Scopes["all"].Series
+	grid := make(map[int64]bool, len(all.Series))
+	for _, point := range all.Series {
+		grid[point.Start.Unix()] = true
+	}
+	for _, point := range panned {
+		if !grid[point.Start.Unix()] {
+			t.Fatalf("panning a day moved the grid: %v is not a bucket start", point.Start)
+		}
+	}
+}
+
+// 7 day buckets run Monday to Sunday in local time, across DST changes.
+func TestPerfWindowBoundsWeeksStartOnMonday(t *testing.T) {
+	london := mustZone(t, "Europe/London")
+	now := time.Date(2026, 10, 9, 14, 20, 0, 0, london)
+	bounds := perfWindowBounds(now, now.AddDate(0, 0, -400), now, 168)
+	if first := bounds[0]; first.After(now.AddDate(0, 0, -400)) {
+		t.Fatalf("first bound %v after the window start", first)
+	}
+	for i, bound := range bounds {
+		local := bound.In(london)
+		if local.Weekday() != time.Monday || local.Hour() != 0 || local.Minute() != 0 {
+			t.Fatalf("bound %d is %v, want a local Monday midnight", i, local)
+		}
+	}
+	if last := bounds[len(bounds)-1]; !last.Equal(time.Date(2026, 10, 12, 0, 0, 0, 0, london)) {
+		t.Fatalf("last bound %v, want the Monday after now", last)
 	}
 }
 
