@@ -84,13 +84,39 @@ var dashboardAccountFields = []string{
 	"disabled", "unavailable", "next_retry_after", "priority", "quota",
 }
 
+// parsePerfWindow reads ?perf_start= and ?perf_end=. Both empty means no
+// custom window and gives zero times. Otherwise both must be RFC3339 dates
+// between 1970 and 2100, in order, 1 hour to 366 days apart.
+func parsePerfWindow(rawStart, rawEnd string) (time.Time, time.Time, error) {
+	if rawStart == "" && rawEnd == "" {
+		return time.Time{}, time.Time{}, nil
+	}
+	if rawStart == "" || rawEnd == "" {
+		return time.Time{}, time.Time{}, errors.New("perf_start and perf_end must be given together")
+	}
+	start, errStart := time.Parse(time.RFC3339, rawStart)
+	end, errEnd := time.Parse(time.RFC3339, rawEnd)
+	if errStart != nil || errEnd != nil {
+		return time.Time{}, time.Time{}, errors.New("perf_start and perf_end must be RFC3339 dates such as 2026-10-08T14:00:00Z")
+	}
+	if start.Year() < 1970 || end.Year() > 2100 {
+		return time.Time{}, time.Time{}, errors.New("perf_start and perf_end must fall between 1970 and 2100")
+	}
+	if errWindow := usagestats.ValidPerfWindow(start, end); errWindow != nil {
+		return time.Time{}, time.Time{}, errors.New("perf_start must come before perf_end, 1 hour to 366 days apart")
+	}
+	return start, end, nil
+}
+
 // GetDashboardData returns what the /dashboard page renders: this server,
 // routing settings, each credential's state, quota snapshot and plan, and the
 // usage summary with performance and per-credential usage over the range
 // named by ?range= (24h, 7d, 14d, 30d, 180d or all). A missing or unknown
 // range falls back to 24h, which summary.range reports. ?scope= takes comma
 // separated credential ids and adds a "selection" performance scope that
-// merges them. The caller is responsible for restricting who may reach it.
+// merges them. ?perf_start= and ?perf_end= (RFC3339, see parsePerfWindow)
+// replace summary.performance with that window, Range "custom". The caller is
+// responsible for restricting who may reach it.
 func (h *Handler) GetDashboardData(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -107,6 +133,11 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "usage window must be valid RFC3339 dates, ordered and at most 366 days"})
 			return
 		}
+	}
+	perfStart, perfEnd, errPerf := parsePerfWindow(c.Query("perf_start"), c.Query("perf_end"))
+	if errPerf != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errPerf.Error()})
+		return
 	}
 
 	now := time.Now()
@@ -148,6 +179,9 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 		}
 	}
 	summary := usagestats.Default().SummaryForSelection(100, window, selection, authIDs)
+	if !perfStart.IsZero() {
+		summary.Performance = usagestats.Default().PerformanceBetween(perfStart, perfEnd, selection, authIDs)
+	}
 	if !usageStart.IsZero() {
 		custom := usagestats.Default().UsageBetween(usageStart, usageEnd)
 		custom.Ranges = summary.UsageRange.Ranges
