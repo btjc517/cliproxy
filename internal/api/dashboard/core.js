@@ -108,17 +108,28 @@ export function setAccountSelection(ids) {
   setPref("accounts", S.ui.accounts || undefined);
 }
 
+// Drops picked ids that the latest data no longer lists, so a removed account
+// cannot come back picked. Called whenever fresh data arrives.
+export function reconcileSelection() {
+  const sel = accountSelection();
+  if (!sel) return;
+  const ids = new Set(accounts().map((a) => a.id));
+  if (sel.some((id) => !ids.has(id))) setAccountSelection(sel);
+}
+
 // The accounts every screen shows. prov is the one provider they all belong
 // to, or "all"; some is true when they leave out an account of that provider.
+// No pick means every provider, even when only one has accounts right now,
+// so history and sessions of removed accounts still count.
 export function accountScope() {
   const all = accounts();
   const sel = accountSelection();
   const picked = sel ? all.filter((a) => sel.includes(a.id)) : [];
-  const shown = picked.length ? picked : all;
-  const providers = [...new Set(shown.map((a) => a.provider))];
+  if (!picked.length) return { all, shown: all, ids: all.map((a) => a.id), prov: "all", some: false };
+  const providers = [...new Set(picked.map((a) => a.provider))];
   const prov = providers.length === 1 ? providers[0] : "all";
-  const some = shown.length < all.filter((a) => prov === "all" || a.provider === prov).length;
-  return { all, shown, ids: shown.map((a) => a.id), prov, some };
+  const some = picked.length < all.filter((a) => prov === "all" || a.provider === prov).length;
+  return { all, shown: picked, ids: picked.map((a) => a.id), prov, some };
 }
 
 export const scopeParam = (ids) => [...ids].sort().join(",");
@@ -190,6 +201,7 @@ export async function fetchData() {
   if (my < applied || want !== wantRange() || scope !== wantScope() || viewport !== wantUsageViewport()) return;
   applied = my;
   S.data = data;
+  reconcileSelection();
   S.dataRange = want;
   S.dataScope = scope;
   S.dataViewport = viewport;

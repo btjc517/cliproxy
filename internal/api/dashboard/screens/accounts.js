@@ -69,7 +69,7 @@ export function view(ctx) {
     };
   });
   const html = `
-    <div class="bar">${accountPicker()}<a class="btn" href="#/accounts/add">${icon("plus", 14, "var(--fg)")}Add account</a></div>
+    <div class="bar"><div class="end"><a class="btn" href="#/accounts/add">${icon("plus", 14, "var(--fg)")}Add account</a>${accountPicker()}</div></div>
     <div class="body">
       ${table(cols, rows, { empty: "No accounts signed in yet." })}
       <div class="tfoot">${list.length} of ${all.length}</div>

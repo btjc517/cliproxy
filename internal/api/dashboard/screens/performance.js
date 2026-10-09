@@ -331,12 +331,13 @@ export function view() {
   const g = grid(ctx, l);
 
   const html = `
-    <div class="bar wrap">${accountPicker()}
+    <div class="bar wrap">
       <div class="end wide"><span class="muted nowrap readat">${esc(readAt())}</span>${rangeTabs("performance")}
         <div class="views">
           <button class="iconbtn ${l.table ? "on" : ""}" data-table aria-pressed="${l.table}" aria-label="${l.table ? "Hide" : "Show"} the By account table" title="${l.table ? "Hide" : "Show"} table">${icon("table")}</button>
           <button class="iconbtn" data-customise aria-label="Customise charts" title="Customise charts">${icon("adjust")}</button>
         </div>
+        ${accountPicker()}
       </div>
     </div>
     <div class="body">

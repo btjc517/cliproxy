@@ -1,7 +1,8 @@
 // The account picker on every screen that filters by account. It edits the one
 // shared selection (accountScope in core.js). Built from the Paper board
 // "v2 · D · Provider and graph states": a provider menu with each provider's
-// accounts in a second menu to its right.
+// accounts in a second menu beside it. The trigger sits at the right end of
+// the bar, so that menu opens to the left.
 import { S, accounts, accountScope, setAccountSelection, wantScope, esc, logo, icon, email, providerTitle } from "../core.js";
 import { accountColor } from "./common.js";
 
@@ -20,12 +21,10 @@ function check(state) {
 // The closed trigger: provider icons and what the selection covers.
 export function accountPicker() {
   const sc = accountScope();
-  const provs = [...new Set(sc.shown.map((a) => a.provider))];
-  const label = sc.shown.length === sc.all.length ? "All accounts"
-    : !sc.some ? providerTitle(sc.prov)
+  const label = !sc.some ? (sc.prov === "all" ? "All accounts" : providerTitle(sc.prov))
     : sc.shown.length === 1 ? String(sc.shown[0].email).split("@")[0]
     : `${sc.shown.length} accounts`;
-  return `<button class="btn account-picker" data-account-picker aria-label="Accounts: ${esc(label)}" aria-haspopup="menu" aria-expanded="false">${provs.length === 1 ? logo(provs[0]) : stack()}<span class="clamp">${esc(label)}</span>${icon("chevronDown", 12)}</button>`;
+  return `<button class="btn account-picker" data-account-picker aria-label="Accounts: ${esc(label)}" aria-haspopup="menu" aria-expanded="false">${sc.prov === "all" ? stack() : logo(sc.prov)}<span class="clamp">${esc(label)}</span>${icon("chevronDown", 12)}</button>`;
 }
 
 // The open menu's close, so a second press on the trigger closes it.
@@ -69,22 +68,23 @@ function open(anchor) {
     sub.innerHTML = hovered ? all.filter((a) => a.provider === hovered).map((a) =>
       row(`data-account="${esc(a.id)}"`, selected.has(a.id) ? "true" : "false", `<i class="sq" style="background:${accountColor(a.id)}"></i>`, email(a.email))).join("") : "";
   };
-  // The menu hangs under the trigger, left-aligned when it fits. The account
-  // menu sits to its right, its first row level with the provider row; on the
-  // left when the right has no room, and underneath on a phone.
+  // The trigger sits at the right end of each bar, so the menu hangs under it
+  // aligned to its right edge. The account menu opens to its left, its first
+  // row level with the provider row; to the right when the left has no room,
+  // and underneath on a phone.
   const place = () => {
     const vw = window.innerWidth, vh = window.innerHeight, r = anchor.getBoundingClientRect();
     const mw = main.offsetWidth, mh = main.offsetHeight;
-    const left = r.left + mw <= vw - 8 ? r.left : Math.max(8, r.right - mw);
+    const left = Math.max(8, Math.min(r.right - mw, vw - mw - 8));
     const top = Math.max(8, Math.min(r.bottom + 6, vh - mh - 8));
     main.style.left = left + "px";
     main.style.top = top + "px";
     const item = hovered && main.querySelector(`[data-provider="${hovered}"]`);
     if (!item) return;
     const sw = sub.offsetWidth, sh = sub.offsetHeight;
-    let x = left + mw + 4, y = item.getBoundingClientRect().top - 8;
-    if (x + sw > vw - 8) x = left - 4 - sw;
-    if (x < 8) { x = Math.max(8, Math.min(left, vw - sw - 8)); y = top + mh + 4; }
+    let x = left - 4 - sw, y = item.getBoundingClientRect().top - 8;
+    if (x < 8) x = left + mw + 4;
+    if (x + sw > vw - 8) { x = Math.max(8, Math.min(left + mw - sw, vw - sw - 8)); y = top + mh + 4; }
     sub.style.left = x + "px";
     sub.style.top = Math.max(8, Math.min(y, vh - sh - 8)) + "px";
   };
@@ -101,7 +101,14 @@ function open(anchor) {
     place();
   };
 
-  const close = (refocus) => {
+  const apply = (refocus) => {
+    window.dispatchEvent(new Event("dash:render"));
+    if (S.data && wantScope() !== S.dataScope) window.dispatchEvent(new Event("dash:refresh"));
+    if (refocus) document.querySelector("[data-account-picker]")?.focus();
+  };
+  // pressing: closed by a press outside the menu. The screen is redrawn only
+  // after that press's click has run, so the click still reaches its control.
+  const close = (refocus, pressing = false) => {
     if (closed) return;
     closed = true;
     active = null;
@@ -114,11 +121,16 @@ function open(anchor) {
     anchor.setAttribute("aria-expanded", "false");
     // Nothing picked falls back to all accounts.
     setAccountSelection([...selected]);
-    window.dispatchEvent(new Event("dash:render"));
-    if (S.data && wantScope() !== S.dataScope) window.dispatchEvent(new Event("dash:refresh"));
-    if (refocus) document.querySelector("[data-account-picker]")?.focus();
+    if (!pressing) { apply(refocus); return; }
+    const done = () => {
+      document.removeEventListener("pointerup", done, true);
+      document.removeEventListener("pointercancel", done, true);
+      setTimeout(() => apply(false), 0);
+    };
+    document.addEventListener("pointerup", done, true);
+    document.addEventListener("pointercancel", done, true);
   };
-  const away = (e) => { if (!pop.contains(e.target) && !anchor.contains(e.target)) close(false); };
+  const away = (e) => { if (!pop.contains(e.target) && !anchor.contains(e.target)) close(false, true); };
   const onHash = () => close(false);
   const keydown = (e) => {
     if (e.key === "Escape" || e.key === "Tab") { if (e.key === "Escape") e.preventDefault(); close(true); return; }

@@ -172,7 +172,7 @@ svg { display: block; flex-shrink: 0; }
 .bar { height: 48px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 24px 0 16px; border-bottom: 1px solid var(--hairline); }
 .bar.titled { padding-left: 24px; }
 .bar .title { font-size: 13px; font-weight: 500; }
-.bar .end { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.bar .end { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
 .crumbs { display: flex; align-items: center; gap: 8px; font-size: 13px; min-width: 0; padding-left: 8px; }
 .crumbs a { color: var(--muted-fg); }
 .crumbs a:hover { color: var(--fg); }
@@ -669,7 +669,7 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
   .floater { position: fixed; bottom: 16px; }
   .drawer { top: auto; left: 8px; right: 8px; width: auto; max-height: 90vh; }
   .bar.wrap { height: auto; min-height: 48px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; row-gap: 6px; }
-  .bar.wrap .end { flex-wrap: wrap; row-gap: 6px; flex-shrink: 1; min-width: 0; }
+  .bar.wrap .end { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; flex-shrink: 1; min-width: 0; }
   .bar .end .readat { display: none; }
   .pgrid { grid-template-columns: 1fr; }
   .pcard { padding: 16px; }

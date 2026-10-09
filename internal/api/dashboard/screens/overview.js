@@ -86,7 +86,7 @@ export function view() {
   const today = all.filter((s) => isToday(s.last_seen)).length;
 
   const html = `
-    <div class="bar">${accountPicker()}<span class="muted nowrap">${esc(readAt("Live, read"))}</span></div>
+    <div class="bar"><div class="end"><span class="muted nowrap">${esc(readAt("Live, read"))}</span>${accountPicker()}</div></div>
     <div class="body">
       ${groups ? `<div class="allow">${groups}</div>` : `<div class="empty">No accounts signed in.</div>`}
       ${tl.html}
