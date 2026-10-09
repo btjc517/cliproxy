@@ -623,10 +623,26 @@ func (s *Store) knownSelectionLocked(ids, known []string) map[string]struct{} {
 // buckets of those credentials the same way as the provider scopes, so its
 // percentiles come from the merged histograms.
 func (s *Store) performanceLocked(now time.Time, window Window, selection map[string]struct{}) Performance {
-	loc := now.Location()
-	since, hasData := s.perfSinceLocked(loc)
+	since, hasData := s.perfSinceLocked(now.Location())
 	bounds, bucketLength := window.span(now, since)
-	count := len(bounds) - 1
+	performance := Performance{
+		Range:         window.Key,
+		BucketSeconds: int64(bucketLength / time.Second),
+		Ranges:        availableRanges(now, since),
+		Scopes:        s.perfScopesLocked(now.Location(), bounds, window.daily(), selection),
+	}
+	if hasData {
+		performance.Since = &since
+	}
+	return performance
+}
+
+// perfScopesLocked builds every performance scope over bounds: "all", each
+// provider, each credential and, for a non-empty selection, SelectionScope.
+// daily says the buckets are whole local days, so the daily rollups, placed
+// at noon of their date in loc, are read as well as the hourly buckets.
+func (s *Store) perfScopesLocked(loc *time.Location, bounds []time.Time, daily bool, selection map[string]struct{}) map[string]Perf {
+	count := max(len(bounds)-1, 0)
 	scopes := make(map[string]*perfAccumulator)
 	scope := func(key string) *perfAccumulator {
 		acc := scopes[key]
@@ -671,7 +687,7 @@ func (s *Store) performanceLocked(now time.Time, window Window, selection map[st
 			addTo(targets, time.Unix(hourUnix, 0), bucket)
 		}
 	}
-	if window.daily() {
+	if daily {
 		for authID, days := range s.perfDaily {
 			targets := targetsFor(authID)
 			for date, bucket := range days {
@@ -681,19 +697,11 @@ func (s *Store) performanceLocked(now time.Time, window Window, selection map[st
 			}
 		}
 	}
-	performance := Performance{
-		Range:         window.Key,
-		BucketSeconds: int64(bucketLength / time.Second),
-		Ranges:        availableRanges(now, since),
-		Scopes:        make(map[string]Perf, len(scopes)),
-	}
-	if hasData {
-		performance.Since = &since
-	}
+	built := make(map[string]Perf, len(scopes))
 	for key, acc := range scopes {
-		performance.Scopes[key] = acc.build(bounds)
+		built[key] = acc.build(bounds)
 	}
-	return performance
+	return built
 }
 
 // rollUpPerfLocked moves hourly timing that started before cutoff into its

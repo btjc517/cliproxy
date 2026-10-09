@@ -94,6 +94,10 @@ type Server struct {
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
 	managementRoutesEnabled atomic.Bool
 
+	// viewsPathOverride, when set, replaces the saved dashboard views file
+	// next to the usage stats file. Tests use it.
+	viewsPathOverride string
+
 	// envManagementSecret indicates whether MANAGEMENT_PASSWORD is configured.
 	envManagementSecret bool
 
