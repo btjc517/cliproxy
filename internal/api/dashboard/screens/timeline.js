@@ -1,70 +1,54 @@
-// Overview timeline: each account's weekly allowance left over a 30-day
-// window that starts at the start of yesterday. History comes from the
-// allowance series, the rest is projected at the current burn: the weekly
-// cycle repeats from each reset until the plan ends.
+// Overview timeline: each account's weekly allowance left over a window that
+// opens on the start of yesterday to 30 days on, and zooms and pans like
+// every other time graph. History comes from the allowance series, the rest
+// is projected at the current burn: the weekly cycle repeats from each reset
+// until the plan ends.
 import {
-  S, esc, icon, logo, warnIcon, clock, day, dayKey, weekdayTime, planDay, status, limits, left, plan, queue, providerTitle, validTime,
+  esc, icon, logo, warnIcon, clock, day, dayKey, weekdayTime, planDay, status, limits, left, plan, queue, providerTitle, validTime,
 } from "../core.js";
 import { allowanceSeries, trajectory } from "./burn.js";
 import { accountColor } from "./common.js";
+import { HOUR, DAY, addDays, midnight, fracOf, timeAt, timeTicks, timeState, bindTime, selectionLabel, backToNow } from "./timeaxis.js";
+import { card } from "./tplot.js";
 
-const HOUR = 3600e3, WEEK = 7 * 864e5;
+const WEEK = 7 * DAY;
 const DAYS = 30;          // yesterday, today and 28 days ahead
-const STEP = 30 * 60e3;   // availability is sampled every half hour
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const KEY = "ovTimeline";
 
-// The calendar day `n` days after a YYYY-MM-DD key.
-function addDays(key, n) {
-  const [y, m, d] = key.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
-}
 // The same day next month, or the month's last day when it is shorter.
 function addMonth(key) {
   const [y, m, d] = key.split("-").map(Number);
   const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
   return new Date(Date.UTC(y, m, Math.min(d, last))).toISOString().slice(0, 10);
 }
-// 00:00 on a calendar day in the proxy's time zone.
-function midnight(key) {
-  const [y, m, d] = key.split("-").map(Number);
-  let t = Date.UTC(y, m - 1, d);
-  for (let k = 0; k < 3; k++) {
-    const dk = dayKey(t);
-    const [hh, mm] = clock(t).split(":").map(Number);
-    let off = hh * 60 + mm;
-    if (dk < key) off -= 1440;
-    else if (dk > key) off += 1440;
-    if (!off) break;
-    t -= off * 60e3;
-  }
-  return t;
+
+// The timeline's own window and selection.
+export const timelineTime = () => timeState(KEY, {
+  defaultWindow: (now) => { const first = addDays(dayKey(now), -1); return { start: midnight(first), end: midnight(addDays(first, DAYS)) }; },
+  future: true,
+});
+
+// The window, and where a time falls across it.
+function frame(v) {
+  const x = (t) => Math.max(0, Math.min(1, fracOf(v, t)));
+  return { start: v.start, end: v.end, x, at: (f) => timeAt(v, f) };
 }
 
-// The window, and where a time falls across it. Every day takes the same
-// width, so a day with a clock change is drawn a little squeezed or stretched.
-function frame(now) {
-  const first = addDays(dayKey(now), -1);
-  const keys = Array.from({ length: DAYS + 1 }, (_, i) => addDays(first, i));
-  const bounds = keys.map(midnight);
-  const start = bounds[0], end = bounds[DAYS];
-  const x = (t) => {
-    if (t <= start) return 0;
-    if (t >= end) return 1;
-    let d = 0;
-    while (d < DAYS - 1 && bounds[d + 1] <= t) d++;
-    return (d + (t - bounds[d]) / (bounds[d + 1] - bounds[d])) / DAYS;
-  };
-  const at = (f) => {
-    const p = Math.max(0, Math.min(1, f)) * DAYS;
-    const d = Math.min(DAYS - 1, Math.floor(p));
-    return bounds[d] + (p - d) * (bounds[d + 1] - bounds[d]);
-  };
-  return { keys, bounds, start, end, x, at };
+// Midnights across a window and a day either side, for snapping a selection.
+function dayBounds(v) {
+  const out = [];
+  for (let k = addDays(dayKey(v.start), -1), g = 0; g < 400; g++, k = addDays(k, 1)) {
+    const t = midnight(k);
+    out.push(t);
+    if (t > v.end) break;
+  }
+  return out;
 }
 
 // ---------- one account ----------
 
-function model(a, now, fr) {
+export function model(a, now, fr) {
   const st = status(a);
   const w = limits(a).week;
   const ser = allowanceSeries(a.id, true);
@@ -140,7 +124,7 @@ function model(a, now, fr) {
 }
 
 // Percent left at time t, or null outside what is drawn.
-function valueAt(m, t) {
+export function valueAt(m, t) {
   const p = m.pts;
   if (!p.length || t < p[0].t || t > m.drawEnd) return null;
   let j = 0;
@@ -155,7 +139,7 @@ const held = (m, t) => !!m.hold && t >= m.hold[0] && t < m.hold[1];
 // Can the account take a session at time t? The account's status decides
 // first: off, blocked or in error never; resting or unavailable not until its
 // known recovery time. Then the allowance left, when there is a reading.
-function available(m, t, now) {
+export function available(m, t, now) {
   const k = m.st.kind;
   if (k === "off" || k === "blocked" || k === "error" || t >= m.endAt) return false;
   if (t >= now && held(m, t)) return false;
@@ -167,7 +151,7 @@ function available(m, t, now) {
 
 // The warning for a hold: resting until a time while allowance is left,
 // used up when there is none, or unavailable with no recovery time.
-function holdText(m, now) {
+export function holdText(m, now) {
   const to = m.hold[1];
   if (to === Infinity) return m.st.text || "Unavailable";
   if (m.now == null || m.now <= 0) return m.st.kind === "usedup" || m.now === 0 ? "Used up" : m.st.text;
@@ -198,7 +182,7 @@ function renewals(p, fr) {
   return out;
 }
 
-function rowHtml(m, color, fr, now) {
+function rowHtml(m, color, fr, now, idx) {
   const X = (t) => (fr.x(t) * 1000).toFixed(2);
   const Y = (v) => (44 - (Math.max(0, Math.min(100, v)) / 100) * 24).toFixed(2);
   let svg = `<path d="M0 44 L1000 44" stroke="var(--chart-grid)" />`;
@@ -260,13 +244,15 @@ function rowHtml(m, color, fr, now) {
     const text = "Renews " + planDay(r).split(" ").slice(1).join(" ");
     over += `<span class="tl-mark ${x > 0.86 ? "flip" : ""}" style="left:${pc(x)}"><span>${icon("card", 12, "var(--fg)")}${esc(text)}</span></span>`;
   }
-  return `<div class="tl-row">${nameCell(m.a, color)}<div class="area" data-tl-row><svg class="tlsvg" viewBox="0 0 1000 48" preserveAspectRatio="none" aria-hidden="true">${svg}</svg>${over}</div></div>`;
+  return `<div class="tl-row">${nameCell(m.a, color)}<div class="area" data-tl-row data-row="${idx}" data-tplot="${KEY}"><div class="tp-content"><svg class="tlsvg" viewBox="0 0 1000 48" preserveAspectRatio="none" aria-hidden="true">${svg}</svg>${over}</div></div></div>`;
 }
 
 function stripHtml(models, fr, now) {
-  // Half-hour steps, split at now so a hold that starts now starts there.
+  // Half-hour steps or finer than 600 across the window, split at now so a
+  // hold that starts now starts there.
+  const step = Math.max(30 * 60e3, (fr.end - fr.start) / 600);
   const cuts = [];
-  for (let t = fr.start; t < fr.end; t += STEP) cuts.push(t);
+  for (let t = fr.start; t < fr.end; t += step) cuts.push(t);
   if (now > fr.start && now < fr.end && !cuts.includes(now)) cuts.push(now);
   cuts.sort((a, b) => a - b);
   const segs = [];
@@ -288,35 +274,59 @@ function stripHtml(models, fr, now) {
   }).join("");
 }
 
-function calendarHtml(fr, now) {
-  const nowCol = Math.min(DAYS - 1, Math.floor(fr.x(now) * DAYS));
+// The month and day row over the rows: a day number under every day while
+// the window is short enough to name each, else the shared tick labels.
+function calendarHtml(fr, v, now) {
   let months = "", days = "";
-  fr.keys.slice(0, DAYS).forEach((k, d) => {
-    if (d === 0 || k.endsWith("-01")) months += `<span class="m" style="left:${pc(d / DAYS)}">${MONTHS[Number(k.slice(5, 7)) - 1]}</span>`;
-    days += `<span style="${d === nowCol ? "visibility:hidden" : ""}">${Number(k.slice(8))}</span>`;
-  });
+  const span = v.end - v.start;
+  if (span <= 45 * DAY) {
+    let lastMonth = "";
+    for (let k = dayKey(v.start), g = 0; g < 50; g++, k = addDays(k, 1)) {
+      const a = midnight(k), b = midnight(addDays(k, 1));
+      if (a >= v.end) break;
+      const x0 = fr.x(a), x1 = fr.x(b);
+      const m = MONTHS[Number(k.slice(5, 7)) - 1];
+      if (m !== lastMonth) { months += `<span class="m" style="left:${pc(x0)}">${m}</span>`; lastMonth = m; }
+      const isNow = now >= a && now < b;
+      if (x1 - x0 > 0.012) days += `<span style="left:${pc(x0)};width:${pc(x1 - x0)};${isNow ? "visibility:hidden" : ""}">${Number(k.slice(8))}</span>`;
+    }
+  } else {
+    days = timeTicks(v, 10).map((tk) => `<span class="tk" style="left:${pc(fr.x(tk.t))}">${esc(tk.text)}</span>`).join("");
+  }
   return `<div class="tl-cal"><div class="lab"></div><div class="area">${months}<div class="days">${days}</div></div></div>`;
 }
 
-function layersHtml(fr, now) {
+function layersHtml(fr, v, now) {
   let weeks = "";
-  for (let d = 1; d < DAYS; d++) {
-    const [y, m, dd] = fr.keys[d].split("-").map(Number);
-    if (new Date(Date.UTC(y, m - 1, dd)).getUTCDay() === 0) weeks += `<i class="tl-week" style="left:${pc(d / DAYS)}"></i>`;
+  if (v.end - v.start <= 45 * DAY) {
+    for (let k = dayKey(v.start), g = 0; g < 50; g++, k = addDays(k, 1)) {
+      const t = midnight(k);
+      if (t >= v.end) break;
+      const [y, m, dd] = k.split("-").map(Number);
+      if (t > v.start && new Date(Date.UTC(y, m - 1, dd)).getUTCDay() === 1) weeks += `<i class="tl-week" style="left:${pc(fr.x(t))}"></i>`;
+    }
+  } else {
+    weeks = timeTicks(v, 10).map((tk) => `<i class="tl-week" style="left:${pc(fr.x(tk.t))}"></i>`).join("");
   }
+  const nowIn = now >= v.start && now <= v.end;
   const x = pc(fr.x(now));
   return {
     back: `<div class="tl-layer">${weeks}</div>`,
-    front: `<div class="tl-layer"><i class="tl-now" style="left:${x}"></i><span class="tl-pill" style="left:${x}">Now</span></div>`,
+    front: nowIn ? `<div class="tl-layer"><i class="tl-now" style="left:${x}"></i><span class="tl-pill" style="left:${x}">Now</span></div>` : "",
   };
 }
+
+const stamp = (t, now) => (Math.abs(t - now) < 6 * DAY ? weekdayTime(t) : `${day(t)} ${clock(t)}`);
 
 // accts: the accounts the account picker leaves, in any order.
 export function timeline(accts) {
   if (!accts.length) return { html: "", mount() {} };
   const now = Date.now();
-  const fr = frame(now);
+  const ts = timelineTime();
+  const v = ts.window;
+  const fr = frame(v);
   const rows = [];
+  const strips = {};
   let body = "";
   for (const provider of ["claude", "codex"]) {
     const ids = new Set(accts.filter((a) => a.provider === provider).map((a) => a.id));
@@ -324,17 +334,19 @@ export function timeline(accts) {
     const q = queue(provider);
     const list = [...q.order, ...q.rest].filter((a) => ids.has(a.id));
     const models = list.map((a) => model(a, now, fr));
-    body += `<div class="tl-grp"><div class="lab">${logo(provider)}<b>${providerTitle(provider)}</b><span class="muted">accounts available</span></div><div class="area tl-strip">${stripHtml(models, fr, now)}</div></div>`;
+    strips[provider] = models;
+    body += `<div class="tl-grp"><div class="lab">${logo(provider)}<b>${providerTitle(provider)}</b><span class="muted">accounts available</span></div><div class="area tl-strip" data-strip-provider="${provider}" data-tplot="${KEY}"><div class="tp-content">${stripHtml(models, fr, now)}</div></div></div>`;
     models.forEach((m) => {
-      const color = accountColor(m.a.id);
+      body += rowHtml(m, accountColor(m.a.id), fr, now, rows.length);
       rows.push(m);
-      body += rowHtml(m, color, fr, now);
     });
   }
-  const layers = layersHtml(fr, now);
+  const layers = layersHtml(fr, v, now);
+  const what = ts.moved ? "Weekly allowance left per account at the current burn, with resets and monthly renewals." : "Next 30 days. Weekly allowance left per account at the current burn, with resets and monthly renewals.";
+  const end = ts.range ? selectionLabel(ts.range, "data-tl-clear") : ts.moved ? backToNow("data-tl-home") : "";
   const html = `<div class="tlsec">
-    <div class="tlhead"><div class="t"><b>Timeline</b><span class="muted">Next 30 days. Weekly allowance left per account at the current burn, with resets and monthly renewals.</span></div></div>
-    <div class="tlwrap"><div class="tl" data-tl>${layers.back}${calendarHtml(fr, now)}${body}${layers.front}</div></div>
+    <div class="tlhead"><div class="t"><b>Timeline</b><span class="muted">${what}</span></div>${end ? `<div class="tlend">${end}</div>` : ""}</div>
+    <div class="tlwrap"><div class="tl" data-tl>${layers.back}${calendarHtml(fr, v, now)}${body}${layers.front}</div></div>
   </div>`;
 
   const mount = (root) => {
@@ -367,56 +379,42 @@ export function timeline(accts) {
         edge = r + shift;
       }
     });
-    // Hover: date, time and percent left under the pointer.
-    let tip = null, guide = null, holding = false;
-    const clear = () => {
-      if (tip) tip.remove();
-      if (guide) guide.remove();
-      tip = guide = null;
-      if (holding) S.hold = Math.max(0, S.hold - 1);
-      holding = false;
-    };
-    // The tip sits above the hovered area, or below it near the top.
-    const showTip = (area, e, html) => {
-      if (!holding) { S.hold++; holding = true; }
-      if (!tip) { tip = document.createElement("div"); tip.className = "tip sm"; tl.appendChild(tip); }
-      tip.innerHTML = html;
-      const ar = area.getBoundingClientRect(), tr = tl.getBoundingClientRect();
-      const w = tip.offsetWidth, h = tip.offsetHeight;
-      const x = Math.max(0, Math.min(e.clientX - tr.left + 12, tr.width - w));
-      let y = ar.top - tr.top - h - 4;
-      if (y < 0) y = ar.bottom - tr.top + 4;
-      tip.style.left = x + "px";
-      tip.style.top = y + "px";
-    };
-    tl.querySelectorAll("[data-tl-row]").forEach((area, idx) => {
-      const m = rows[idx];
-      area.addEventListener("mousemove", (e) => {
-        const ar = area.getBoundingClientRect();
-        const t = fr.at((e.clientX - ar.left) / ar.width);
-        const v = valueAt(m, t);
-        if (v == null) return clear();
-        if (!guide) { guide = document.createElement("i"); guide.className = "tl-guide"; }
-        if (guide.parentElement !== area) area.appendChild(guide);
-        guide.style.left = e.clientX - ar.left + "px";
-        const when = `${day(t)}, ${clock(t)}`;
-        const note = held(m, t) ? (m.hold[1] === Infinity ? m.st.text || "Unavailable" : "Resting, not used for new sessions") : t > now ? "At the current burn" : "";
-        showTip(area, e, `<div class="h"><span>${esc(when)}</span><span>${v <= 0 ? "Out" : Math.round(v) + "% left"}</span></div>${note ? `<div class="s">${esc(note)}</div>` : ""}`);
-      });
-      area.addEventListener("mouseleave", clear);
-    });
-    // Strip hover: how many accounts are available, from when to when, so a
-    // stretch too narrow for its label can still be read.
-    const stamp = (t) => (Math.abs(t - now) < 6 * 864e5 ? weekdayTime(t) : `${day(t)} ${clock(t)}`);
-    tl.querySelectorAll(".tl-strip").forEach((strip) => {
-      strip.addEventListener("mousemove", (e) => {
-        const seg = e.target.closest(".tl-strip > div");
-        if (!seg) return clear();
-        const n = Number(seg.dataset.n);
-        const head = n === 0 ? "None available" : `${n} of ${seg.dataset.total} available`;
-        showTip(strip, e, `<div class="h"><span>${esc(head)}</span></div><div class="s">${esc(`${stamp(Number(seg.dataset.from))} to ${stamp(Number(seg.dataset.to))}`)}</div>`);
-      });
-      strip.addEventListener("mouseleave", clear);
+    const clear = root.querySelector("[data-tl-clear]");
+    if (clear) clear.onclick = () => ts.setRange(null);
+    const home = root.querySelector("[data-tl-home]");
+    if (home) home.onclick = () => ts.setWindow(ts.defaultWindow());
+    // The shared controller: zoom, pan, selection and the crosshair. A row
+    // answers with its account's allowance, a strip with its count.
+    bindTime(tl, {
+      key: KEY,
+      window: v,
+      range: ts.range,
+      grid: v.end - v.start > 3 * DAY ? { bounds: dayBounds(v) } : { origin: 0, step: HOUR },
+      future: true,
+      defaultWindow: ts.defaultWindow,
+      setWindow: ts.setWindow,
+      setRange: ts.setRange,
+      probe(t, el, hovered) {
+        const when = t > now ? `${stamp(t, now)}, at this rate` : stamp(t, now);
+        if (el.dataset.stripProvider) {
+          const models = strips[el.dataset.stripProvider] || [];
+          const n = models.filter((m) => available(m, t, now)).length;
+          const text = n === 0 ? "None" : `${n} of ${models.length}`;
+          return { chip: text, chipTop: 0, card: hovered ? card({ title: when, rows: [{ lead: `<span class="lg">${logo(el.dataset.stripProvider)}</span>`, k: `${providerTitle(el.dataset.stripProvider)} accounts available`, v: text, cls: n ? "" : "err" }] }) : "", cardTop: 24 };
+        }
+        const m = rows[Number(el.dataset.row)];
+        const val = m ? valueAt(m, t) : null;
+        if (val == null) return null;
+        const note = held(m, t) ? (m.hold[1] === Infinity ? m.st.text || "Unavailable" : "Resting, not used for new sessions") : "";
+        const y = 1 - (44 - (Math.max(0, Math.min(100, val)) / 100) * 24) / 48;
+        return {
+          chip: val <= 0 ? "Out" : Math.round(val) + "%",
+          chipTop: 0,
+          dots: [{ y, color: accountColor(m.a.id) }],
+          card: hovered ? card({ title: when, warn: note, rows: [{ k: m.a.email || m.a.id, v: val <= 0 ? "Out" : Math.round(val) + "% left", color: accountColor(m.a.id) }] }) : "",
+          cardTop: 48,
+        };
+      },
     });
   };
   return { html, mount };

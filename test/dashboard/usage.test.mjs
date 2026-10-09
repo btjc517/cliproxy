@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { projectedAt, projectionPoints, allowanceRange, trajectory } from '../../internal/api/dashboard/screens/burn.js';
-import { defaultWindow, zoomWindow, panWindow, HOUR, DAY, WEEK, MIN_SPAN, MAX_SPAN } from '../../internal/api/dashboard/screens/viewport.js';
+import { zoomWindow, panWindow, HOUR, DAY, WEEK, MIN_SPAN, MAX_SPAN } from '../../internal/api/dashboard/screens/timeaxis.js';
+import { viewWindow } from '../../internal/api/dashboard/screens/views.js';
+const defaultWindow=(kind,t)=>viewWindow(kind==='allowance'?'around_now':'last7d',t);
 import { S, accountScope, setAccountSelection, fetchData } from '../../internal/api/dashboard/core.js';
 // The dashboard keeps the account selection in localStorage; Node has none.
 const store=new Map();
@@ -79,22 +81,25 @@ test('exhaustion uses observed history rather than forecasting permanently idle 
 });
 
 test('a response for an old visible window cannot overwrite a newer window', async()=>{
- const {fetchData,wantUsageViewport}=await import('../../internal/api/dashboard/core.js');
- globalThis.location={hash:'#/usage'};
- S.ui={usSection:'history',historyViewport:defaultWindow('history',now)};
+ const {fetchData,wantUsageViewport,setScreenWants}=await import('../../internal/api/dashboard/core.js');
+ globalThis.location={hash:'#/telemetry/usage'};
+ S.ui={};
+ let win=defaultWindow('history',Date.now());
+ setScreenWants(()=>({usage:win,perf:win}));
  const pending=[];
  const oldFetch=globalThis.fetch;
  globalThis.fetch=(url)=>new Promise(resolve=>pending.push({url,resolve}));
  try {
   const older=fetchData();
-  S.ui.historyViewport=panWindow(S.ui.historyViewport,-1);
+  win=panWindow(win,-1);
   const expected=wantUsageViewport();
   const newer=fetchData();
   assert.match(pending[1].url,/usage_start=/);
+  assert.match(pending[1].url,/perf_start=/);
   pending[1].resolve({ok:true,json:async()=>({tag:'newer'})}); await newer;
   pending[0].resolve({ok:true,json:async()=>({tag:'older'})}); await older;
   assert.equal(S.data.tag,'newer');assert.equal(S.dataViewport,expected);
- } finally {globalThis.fetch=oldFetch;delete globalThis.location;}
+ } finally {globalThis.fetch=oldFetch;delete globalThis.location;setScreenWants(()=>null);}
 });
 
 
@@ -118,9 +123,9 @@ test('unknown burn still draws the known refill without a fabricated decline',()
  assert.deepEqual(partial,[{x:tr.reset,v:100,move:true,marker:true}]);
 });
 
-test('chart renderer keeps unknown intervals disconnected and reset points visible',async()=>{
- const {timeChart}=await import('../../internal/api/dashboard/core.js');
- const html=timeChart({id:'reset-test',format:'line',cols:[{values:{}},{values:{}}],series:[{key:'a',color:'#123456',proj:[{x:0,v:0},{x:.25,v:0},{x:.25,v:100,marker:true},{x:.75,v:100,move:true,marker:true}]}],height:100,max:100});
- assert.match(html,/M0.00 100.00 L250.00 100.00 L250.00 0.00 M750.00 0.00/);
- assert.equal((html.match(/class="pt"/g)||[]).length,2);
+test('line renderer keeps unknown intervals disconnected',async()=>{
+ const {lines}=await import('../../internal/api/dashboard/screens/tplot.js');
+ const v={start:0,end:1000};
+ const html=lines([{color:'#123456',pts:[{t:0,v:0},{t:250,v:0},null,{t:750,v:100},{t:1000,v:100}]}],v,100,100);
+ assert.match(html,/d="M0.00 100.00 L250.00 100.00 M750.00 0.00 L1000.00 0.00 "/);
 });
