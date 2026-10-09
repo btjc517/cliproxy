@@ -65,14 +65,71 @@ export function bindRangeTabs(root, screen) {
 
 // ---------- account selection ----------
 
-// The ids the chips pick under ui key `key`, when they leave some but not all
-// of the pressed provider's accounts; otherwise none.
-export function pickedIds(key) {
-  const prov = S.ui[key] || "all";
-  if (prov === "all") return [];
-  const all = accounts().filter((a) => a.provider === prov).map((a) => a.id);
-  const picked = (S.ui[key + "Pick"]?.[prov] || []).filter((id) => all.includes(id));
-  return picked.length > 0 && picked.length < all.length ? picked : [];
+// One account selection shared by every screen: null for all accounts, or the
+// picked ids. It lives in S.ui.accounts and in this viewer's preferences, so it
+// carries across screens and survives a reload.
+const LEGACY_PROV_KEYS = ["ovProv", "pfProv", "acProv", "seProv"];
+
+// The pick made with the per-screen controls this selection replaced: the
+// Usage picker, or a provider tab with its account chips.
+function legacySelection() {
+  if (Array.isArray(S.ui.usAccounts)) return S.ui.usAccounts;
+  for (const key of LEGACY_PROV_KEYS) {
+    const prov = S.ui[key];
+    if (prov !== "claude" && prov !== "codex") continue;
+    const ids = accounts().filter((a) => a.provider === prov).map((a) => a.id);
+    const picked = (S.ui[key + "Pick"]?.[prov] || []).filter((id) => ids.includes(id));
+    return picked.length ? picked : ids;
+  }
+  return null;
+}
+
+// Read once the first data arrives: the stored selection, else the old
+// per-screen pick. The old keys are dropped either way.
+let migrated = false;
+export function accountSelection() {
+  if (!migrated && S.data) {
+    migrated = true;
+    if (S.ui.accounts === undefined) {
+      const stored = prefs().accounts;
+      setAccountSelection(Array.isArray(stored) ? stored.filter((id) => typeof id === "string") : legacySelection());
+    }
+    delete S.ui.usAccounts;
+    for (const key of LEGACY_PROV_KEYS) { delete S.ui[key]; delete S.ui[key + "Pick"]; }
+  }
+  return Array.isArray(S.ui.accounts) ? S.ui.accounts : null;
+}
+
+// Keeps the ids that still exist. Every account, or none, means all accounts.
+export function setAccountSelection(ids) {
+  const all = accounts().map((a) => a.id);
+  const keep = Array.isArray(ids) ? all.filter((id) => ids.includes(id)) : [];
+  S.ui.accounts = keep.length && keep.length < all.length ? keep : null;
+  setPref("accounts", S.ui.accounts || undefined);
+}
+
+// Drops picked ids that the latest data no longer lists, so a removed account
+// cannot come back picked. Called whenever fresh data arrives.
+export function reconcileSelection() {
+  const sel = accountSelection();
+  if (!sel) return;
+  const ids = new Set(accounts().map((a) => a.id));
+  if (sel.some((id) => !ids.has(id))) setAccountSelection(sel);
+}
+
+// The accounts every screen shows. prov is the one provider they all belong
+// to, or "all"; some is true when they leave out an account of that provider.
+// No pick means every provider, even when only one has accounts right now,
+// so history and sessions of removed accounts still count.
+export function accountScope() {
+  const all = accounts();
+  const sel = accountSelection();
+  const picked = sel ? all.filter((a) => sel.includes(a.id)) : [];
+  if (!picked.length) return { all, shown: all, ids: all.map((a) => a.id), prov: "all", some: false };
+  const providers = [...new Set(picked.map((a) => a.provider))];
+  const prov = providers.length === 1 ? providers[0] : "all";
+  const some = picked.length < all.filter((a) => prov === "all" || a.provider === prov).length;
+  return { all, shown: picked, ids: picked.map((a) => a.id), prov, some };
 }
 
 export const scopeParam = (ids) => [...ids].sort().join(",");
@@ -83,8 +140,9 @@ export const scopeParam = (ids) => [...ids].sort().join(",");
 export function wantScope() {
   if (!Array.isArray(S.data?.summary?.performance?.ranges)) return "";
   const a = location.hash.replace(/^#\/?/, "").split("/")[0];
-  const key = a === "performance" ? "pfProv" : !a || a === "overview" ? "ovProv" : "";
-  return key ? scopeParam(pickedIds(key)) : "";
+  if (a && a !== "overview" && a !== "performance") return "";
+  const sc = accountScope();
+  return sc.some ? scopeParam(sc.ids) : "";
 }
 
 // The backend's merged scope for exactly these accounts over this range, or null.
@@ -143,6 +201,7 @@ export async function fetchData() {
   if (my < applied || want !== wantRange() || scope !== wantScope() || viewport !== wantUsageViewport()) return;
   applied = my;
   S.data = data;
+  reconcileSelection();
   S.dataRange = want;
   S.dataScope = scope;
   S.dataViewport = viewport;
@@ -301,7 +360,6 @@ const P = {
   check: "m4.5 12.75 6 6 9-13.5",
   calendar: "M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5",
   search: "m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z",
-  funnel: "M12 3c2.755 0 5.455.232 8.083.678.533.09.917.556.917 1.096v1.044a2.25 2.25 0 0 1-.659 1.591l-5.432 5.432a2.25 2.25 0 0 0-.659 1.591v2.927a2.25 2.25 0 0 1-1.244 2.013L9.75 21v-6.568a2.25 2.25 0 0 0-.659-1.591L3.659 7.409A2.25 2.25 0 0 1 3 5.818V4.774c0-.54.384-1.006.917-1.096A48.32 48.32 0 0 1 12 3Z",
   adjust: "M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75",
   copy: "M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75",
   desktop: "M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0V12a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12V5.25",
@@ -612,10 +670,6 @@ export function meterCell(pctLeft, color = "") {
   if (pctLeft == null) return "";
   const p = Math.max(0, Math.min(100, pctLeft));
   return `<span class="metercell"><span class="meter"><i style="width:${p}%${color ? ";background:" + color : ""}"></i></span><span class="${p <= 0 ? "muted" : ""}">${Math.round(p)}%</span></span>`;
-}
-
-export function tabs(items, active, attr = "data-tab") {
-  return `<div class="tabs" role="tablist">${items.map((t) => `<button class="tab ${t.id === active ? "on" : ""}" ${attr}="${esc(t.id)}" role="tab">${esc(t.label)}${t.n != null ? ` <span class="n ${t.warn ? "warn" : ""}">${esc(t.n)}</span>` : ""}</button>`).join("")}</div>`;
 }
 
 export function seg(items, active, attr, cls = "") {

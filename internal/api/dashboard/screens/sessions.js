@@ -1,6 +1,7 @@
 // Sessions: every recent session, filterable, a page at a time.
-import { S, esc, icon, sessions, sessionTitle, names, menu, isToday } from "../core.js";
-import { sessionTable } from "./common.js";
+import { S, esc, icon, sessions, sessionTitle, names, menu, isToday, accountScope } from "../core.js";
+import { sessionTable, sessionInScope } from "./common.js";
+import { accountPicker, bindAccountPicker } from "./account-picker.js";
 
 const PAGE = 12;
 const RANGES = [
@@ -11,10 +12,10 @@ const RANGES = [
 
 export function view() {
   const range = RANGES.find((r) => r.id === (S.ui.seRange || "today")) || RANGES[0];
-  const prov = S.ui.seProv || "all";
+  const sc = accountScope();
   const q = (S.ui.seQuery || "").trim().toLowerCase();
   const nm = names();
-  let list = sessions().filter(range.keep).filter((s) => prov === "all" || s.provider === prov);
+  let list = sessions().filter(range.keep).filter((s) => sessionInScope(s, sc));
   if (q) {
     list = list.filter((s) => [sessionTitle(s), s.id, s.machine, ...(s.auth_ids || []).map((id) => nm[id])].some((v) => String(v || "").toLowerCase().includes(q)));
   }
@@ -33,12 +34,12 @@ export function view() {
   const searching = S.ui.seSearch || q;
 
   const html = `
-    <div class="bar">
+    <div class="bar wrap">
       <div class="tabs">${tabs.map((t) => `<button class="tab ${t.id === tab ? "on" : ""}" data-setab="${t.id}">${t.label} <span class="n ${t.warn ? "warn" : ""}">${t.n}</span></button>`).join("")}</div>
       <div class="end">
         ${searching ? `<input class="input" data-q placeholder="Search sessions" value="${esc(S.ui.seQuery || "")}" style="height:28px;width:200px">` : ""}
         <button class="iconbtn" data-search aria-label="Search">${icon("search")}</button>
-        <button class="iconbtn" data-filter aria-label="Filter by provider">${icon("funnel", 16, prov === "all" ? "var(--icon)" : "var(--brand)")}</button>
+        ${accountPicker()}
       </div>
     </div>
     <div class="body">
@@ -65,11 +66,7 @@ export function view() {
         if (S.ui.seSearch && document.activeElement === document.body) input.focus();
         input.oninput = () => { S.ui.seQuery = input.value; S.ui.sePage = 0; const pos = input.selectionStart; rerender(); const again = document.querySelector("[data-q]"); if (again) { again.focus(); again.setSelectionRange(pos, pos); } };
       }
-      root.querySelector("[data-filter]").onclick = (e) => menu(e.currentTarget, [
-        { a: "All providers", on: prov === "all", run: () => { S.ui.seProv = "all"; rerender(); } },
-        { a: "Claude", on: prov === "claude", run: () => { S.ui.seProv = "claude"; rerender(); } },
-        { a: "Codex", on: prov === "codex", run: () => { S.ui.seProv = "codex"; rerender(); } },
-      ], { width: 200 });
+      bindAccountPicker(root);
       root.querySelector("[data-range]").onclick = (e) => menu(e.currentTarget, RANGES.map((r) => ({ a: r.label, on: r.id === range.id, run: () => { S.ui.seRange = r.id; S.ui.sePage = 0; rerender(); } })), { width: 200, alignLeft: true });
     },
   };

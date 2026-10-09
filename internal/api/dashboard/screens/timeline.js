@@ -311,7 +311,7 @@ function layersHtml(fr, now) {
   };
 }
 
-// accts: the accounts the provider tab and chips leave, in any order.
+// accts: the accounts the account picker leaves, in any order.
 export function timeline(accts) {
   if (!accts.length) return { html: "", mount() {} };
   const now = Date.now();

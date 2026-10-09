@@ -2,8 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { projectedAt, projectionPoints, allowanceRange, trajectory } from '../../internal/api/dashboard/screens/burn.js';
 import { defaultWindow, zoomWindow, panWindow, HOUR, DAY, WEEK, MIN_SPAN, MAX_SPAN } from '../../internal/api/dashboard/screens/viewport.js';
-import { usageScope } from '../../internal/api/dashboard/screens/usage-picker.js';
-import { S } from '../../internal/api/dashboard/core.js';
+import { S, accountScope, setAccountSelection, fetchData } from '../../internal/api/dashboard/core.js';
+// The dashboard keeps the account selection in localStorage; Node has none.
+const store=new Map();
+globalThis.localStorage={getItem:k=>store.has(k)?store.get(k):null,setItem:(k,v)=>store.set(k,String(v)),removeItem:k=>store.delete(k)};
+const storedPick=()=>JSON.parse(store.get('cliproxy-dashboard-prefs')||'{}').accounts;
+const ACCTS=[{id:'a',provider:'claude',email:'a@x'},{id:'b',provider:'claude',email:'b@x'},{id:'c',provider:'codex',email:'c@x'}];
 const now = Date.parse('2026-10-08T14:00:00Z');
 const ser = { long:true, utilization:1, burn_per_hour:.01, burned:.24, burned_since:new Date(now-DAY).toISOString(), reset_at:new Date(now+7*HOUR).toISOString(), last_at:new Date(now).toISOString(), window_seconds:WEEK/1000 };
 const tr = trajectory(ser,now);
@@ -31,11 +35,39 @@ test('unknown rates and stale resets do not produce invented projections',()=>{
  assert.equal(projectedAt({...tr,reset:now-1},now,WEEK,now+DAY),null);
  assert.deepEqual(projectionPoints(tr,now,now-DAY,WEEK,x=>x),[]);
 });
-test('mixed-provider subsets and empty selections retain their exact scope',()=>{
- S.data={accounts:[{id:'a',provider:'claude',email:'a@x'},{id:'b',provider:'claude',email:'b@x'},{id:'c',provider:'codex',email:'c@x'}]};
- S.ui.usAccounts=['a','c'];assert.deepEqual(usageScope().ids,['a','c']);assert.equal(usageScope().some,true);
- S.ui.usAccounts=[];assert.deepEqual(usageScope().ids,[]);
- S.ui.usAccounts=null;assert.equal(usageScope().ids.length,3);
+test('mixed-provider and single-provider picks keep their exact scope',()=>{
+ S.data={accounts:ACCTS};S.ui={};
+ setAccountSelection(['a','c']);assert.deepEqual(accountScope().ids,['a','c']);assert.equal(accountScope().some,true);assert.equal(accountScope().prov,'all');
+ setAccountSelection(['a','b']);assert.deepEqual(accountScope().ids,['a','b']);assert.equal(accountScope().prov,'claude');assert.equal(accountScope().some,false);
+ setAccountSelection(['a']);assert.equal(accountScope().prov,'claude');assert.equal(accountScope().some,true);
+ assert.deepEqual(storedPick(),['a']);
+});
+test('an empty pick falls back to all accounts',()=>{
+ S.data={accounts:ACCTS};S.ui={};
+ setAccountSelection(['c']);
+ setAccountSelection([]);
+ assert.equal(S.ui.accounts,null);assert.equal(storedPick(),undefined);
+ const sc=accountScope();assert.equal(sc.ids.length,3);assert.equal(sc.prov,'all');assert.equal(sc.some,false);
+});
+test('no pick means every provider, even when only one provider has accounts left',()=>{
+ // The last Codex account was removed, but its history and sessions remain.
+ S.data={accounts:ACCTS.filter(a=>a.provider==='claude')};S.ui={accounts:null};
+ const sc=accountScope();
+ assert.equal(sc.prov,'all');assert.equal(sc.some,false);assert.deepEqual(sc.ids,['a','b']);
+});
+test('picked ids that fresh data no longer lists are pruned and stay gone',async()=>{
+ S.data={accounts:ACCTS};S.ui={};
+ setAccountSelection(['a','c']);
+ const replies=[ACCTS.filter(a=>a.id!=='a'),ACCTS.filter(a=>a.id==='b'),ACCTS];
+ const oldFetch=globalThis.fetch;
+ globalThis.location={hash:'#/usage'};
+ globalThis.fetch=async()=>({ok:true,json:async()=>({accounts:replies.shift()})});
+ try {
+  await fetchData();assert.deepEqual(S.ui.accounts,['c']);assert.deepEqual(storedPick(),['c']);
+  await fetchData();assert.equal(S.ui.accounts,null);assert.equal(storedPick(),undefined);
+  // Account a comes back: the pick does not silently return.
+  await fetchData();assert.equal(S.ui.accounts,null);assert.equal(accountScope().ids.length,3);
+ } finally {globalThis.fetch=oldFetch;delete globalThis.location;}
 });
 test('exhaustion uses observed history rather than forecasting permanently idle refills',()=>{
  const exhausted={...ser,burned:0,burn_per_hour:0,start:new Date(now-4*HOUR).toISOString(),step_seconds:3600,used:[600,800,1000,1000,1000]};

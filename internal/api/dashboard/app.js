@@ -109,6 +109,9 @@ export async function load() {
     S.error = (e.message || String(e)) + (S.data ? ". Showing the last reading." : "");
   }
   render();
+  // The stored account selection is known only once accounts have loaded, so
+  // the first reading may still need the picked accounts merged.
+  if (!S.error && S.data && wantScope() !== S.dataScope) load();
 }
 
 window.addEventListener("hashchange", () => {

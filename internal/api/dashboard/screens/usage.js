@@ -3,12 +3,12 @@
 import {
   S, esc, fmt, int, money, moneyAxis, logo, email, status, warnState, tokens, cacheReuse, apiCost, costKnown, pctText, dayKey, tipRows, seg, table, figure,
   timeChart, bindChart, chartFormat, formatToggle, bindFormatToggles, bucketTitle,
-  providerTitle, wantUsageViewport, clock, day,
+  providerTitle, wantUsageViewport, clock, day, accountScope,
 } from "../core.js";
 import { readAt, accountColor, gapNote, costNote, costTitle } from "./common.js";
 import { allowanceChart, allowanceTable } from "./burn.js";
 import { windowFor, windowLabel, viewportLabels, bindViewport } from "./viewport.js";
-import { usageScope, usagePicker, bindUsagePicker } from "./usage-picker.js";
+import { accountPicker, bindAccountPicker } from "./account-picker.js";
 
 const DAY = 864e5;
 const EMPTY = () => ({ requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 });
@@ -270,7 +270,7 @@ function tokensSection(sc, colorOf, viewport, height) {
 // ---------- the screen ----------
 
 export function view() {
-  const sc = usageScope();
+  const sc = accountScope();
   const ids = sc.ids;
   // One colour per account across the allowance chart, the tokens chart and both tables.
   const colorOf = (id) => accountColor(id);
@@ -300,14 +300,14 @@ export function view() {
   </div>`;
 
   const html = `
-    <div class="bar usage-bar"><div class="tabs" role="tablist" aria-label="Usage view">${["allowance", "history"].map((id) => `<button role="tab" aria-selected="${section === id}" class="tab ${section === id ? "on" : ""}" data-usage-section="${id}">${id === "allowance" ? "Allowance" : "History"}</button>`).join("")}</div><div class="end"><span class="muted nowrap readat">${esc(readAt())}</span>${grid ? '<span class="muted">Past year</span>' : windowLabel(viewport)}</div></div>
-    <div class="usage-toolbar">${section === "allowance" ? seg([{ id: "week", label: "Weekly" }, { id: "5h", label: "5-hour" }], long ? "week" : "5h", "data-us-window", "bare") : seg([{ id: "graph", label: "Graph" }, { id: "grid", label: "Grid" }], grid ? "grid" : "graph", "data-history-view", "bare")}<div class="row gap8">${section === "history" && !grid ? formatToggle("usage-tokens") : ""}${usagePicker(sc)}</div></div>
+    <div class="bar usage-bar"><div class="tabs" role="tablist" aria-label="Usage view">${["allowance", "history"].map((id) => `<button role="tab" aria-selected="${section === id}" class="tab ${section === id ? "on" : ""}" data-usage-section="${id}">${id === "allowance" ? "Allowance" : "History"}</button>`).join("")}</div><div class="end"><span class="muted nowrap readat">${esc(readAt())}</span>${grid ? '<span class="muted">Past year</span>' : windowLabel(viewport)}${accountPicker()}</div></div>
+    <div class="usage-toolbar">${section === "allowance" ? seg([{ id: "week", label: "Weekly" }, { id: "5h", label: "5-hour" }], long ? "week" : "5h", "data-us-window", "bare") : seg([{ id: "graph", label: "Graph" }, { id: "grid", label: "Grid" }], grid ? "grid" : "graph", "data-history-view", "bare")}<div class="row gap8">${section === "history" && !grid ? formatToggle("usage-tokens") : ""}</div></div>
     <div class="body usage-body">${section === "allowance" ? allowanceSec : grid ? historySec : tok.html}</div>`;
 
   return {
     html,
     mount(root) {
-      bindUsagePicker(root);
+      bindAccountPicker(root);
       bindFormatToggles(root);
       allowance?.mount(root);
       tok?.mount(root);
