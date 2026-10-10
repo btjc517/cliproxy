@@ -130,57 +130,120 @@ test('a customised old Performance layout becomes an override, once', () => {
   assert.equal(migrateLegacy(empty(), {}, {}).views.length, 0);
 });
 
+// A stand-in for /dashboard/views: GET returns the stored body, PUT replaces
+// it. down makes every request fail.
+function fakeServer(body = { views: [], default: '' }) {
+  const s = { body: JSON.parse(JSON.stringify(body)), down: false, puts: 0 };
+  s.fetch = async (url, init) => {
+    if (s.down) throw new Error('offline');
+    if (init?.method === 'PUT') { s.body = JSON.parse(init.body); s.puts++; return { ok: true }; }
+    return { ok: true, json: async () => JSON.parse(JSON.stringify(s.body)) };
+  };
+  return s;
+}
+const resetViews = () => { V.loading = null; V.loaded = false; V.where = ''; V.note = ''; V.store = empty(); store.clear(); };
+const named = (s) => s.views.map((v) => v.name);
+
 test('views load from the server, else from this browser with a note', async () => {
-  const body = { views: [{ id: 'v-1', name: 'Server view', panels: [{ type: 'cost' }], columns: [], window: 'last24h' }], default: 'v-1' };
-  const reset = () => { V.loading = null; V.loaded = false; V.where = ''; V.note = ''; V.store = empty(); };
-  reset();
-  await loadViews(async () => ({ ok: true, json: async () => body }));
+  resetViews();
+  const srv = fakeServer({ views: [{ id: 'v-1', name: 'Server view', panels: [{ type: 'cost' }], columns: [], window: 'last24h' }], default: 'v-1' });
+  await loadViews(srv.fetch);
   assert.equal(V.where, 'server');
   assert.equal(defaultId(V.store), 'v-1');
   assert.equal(V.note, '');
 
-  reset();
+  resetViews();
   _test.writeLocal(cleanStore({ views: [{ id: 'v-2', name: 'Local view', panels: [], columns: [], window: 'last7d' }] }));
   await loadViews(async () => { throw new Error('offline'); });
   assert.equal(V.where, 'local');
   assert.ok(findView(V.store, 'v-2'));
   assert.match(V.note, /this browser/);
+});
 
-  // Saving while the server refuses keeps them here; once it takes them the local copy goes.
-  const where = await persist(saveAsNew(V.store, findView(V.store, 'usage'), 'More', { rand }).store, async () => ({ ok: false, status: 503 }));
+test('two tabs saving one after the other keep both views', async () => {
+  resetViews();
+  const srv = fakeServer();
+  await loadViews(srv.fetch);
+  // Both tabs loaded the same empty set of views.
+  const tabB = V.store;
+  // Tab A creates view A.
+  await persist(saveAsNew(V.store, findView(V.store, 'usage'), 'View A', { rand }).store, srv.fetch);
+  // Tab B, still showing what it loaded, creates view B.
+  V.store = tabB;
+  const where = await persist(saveAsNew(tabB, findView(tabB, 'allowance'), 'View B', { rand }).store, srv.fetch);
+  assert.equal(where, 'server');
+  assert.deepEqual(named(srv.body), ['View A', 'View B']);
+  // Tab B now shows both.
+  assert.deepEqual(named(V.store), ['View A', 'View B']);
+  // A rename in tab A, from its stale copy, touches only that view and keeps the default.
+  const idA = srv.body.views[0].id;
+  srv.body.default = srv.body.views[1].id;
+  V.store = cleanStore({ views: [srv.body.views[0]], default: '' });
+  await persist(renameView(V.store, idA, 'Renamed A'), srv.fetch);
+  assert.deepEqual(named(srv.body), ['Renamed A', 'View B']);
+  assert.equal(srv.body.default, srv.body.views[1].id);
+  // Deleting one leaves the other.
+  await persist(deleteView(V.store, idA), srv.fetch);
+  assert.deepEqual(named(srv.body), ['View B']);
+});
+
+test('changes kept in this browser survive a reload and go up once the proxy takes them', async () => {
+  resetViews();
+  const srv = fakeServer({ views: [{ id: 'v-9', name: 'Old name', panels: [], columns: [], window: 'last7d' }], default: '' });
+  await loadViews(srv.fetch);
+  // The proxy stops storing views; a rename stays in this browser.
+  srv.down = true;
+  const where = await persist(renameView(V.store, 'v-9', 'New name'), srv.fetch);
   assert.equal(where, 'local');
-  assert.equal(_test.readLocal().views.length, 2);
-  const sent = [];
-  const ok = await persist(V.store, async (url, init) => { sent.push(JSON.parse(init.body)); return { ok: true }; });
-  assert.equal(ok, 'server');
-  assert.equal(sent[0].views.length, 2);
+  assert.match(V.note, /this browser/);
+  // Reload while still down: the rename shows.
+  V.loading = null; V.loaded = false; V.store = empty();
+  await loadViews(srv.fetch);
+  assert.equal(findView(V.store, 'v-9').name, 'New name');
+  assert.match(V.note, /this browser/);
+  // Reload once the proxy is back: the rename wins over the stored name and goes up.
+  srv.down = false;
+  V.loading = null; V.loaded = false; V.store = empty();
+  await loadViews(srv.fetch);
+  assert.equal(findView(V.store, 'v-9').name, 'New name');
+  assert.deepEqual(named(srv.body), ['New name']);
+  assert.equal(V.note, '');
+  assert.equal(store.has(_test.PENDING), false);
   assert.equal(store.has(_test.LOCAL_STORE), false);
 });
 
-test('views kept in this browser move to the server when it starts storing them', async () => {
-  V.loading = null; V.loaded = false; V.store = empty();
+test('a failed upload keeps the waiting changes and the note', async () => {
+  resetViews();
+  const srv = fakeServer({ views: [{ id: 'v-9', name: 'Stored', panels: [], columns: [], window: 'last7d' }], default: '' });
+  _test.writeLocal(cleanStore({}));
+  store.set(_test.PENDING, JSON.stringify([{ op: 'set', id: 'v-9', view: { id: 'v-9', name: 'Waiting', panels: [], columns: [], window: 'last7d' } }]));
+  const fetchFn = async (url, init) => (init?.method === 'PUT' ? { ok: false, status: 503 } : srv.fetch(url, init));
+  await loadViews(fetchFn);
+  assert.equal(findView(V.store, 'v-9').name, 'Waiting');
+  assert.equal(_test.readPending().length, 1);
+  assert.match(V.note, /this browser/);
+});
+
+test('views an earlier version kept in this browser move to the server without removing others', async () => {
+  resetViews();
   _test.writeLocal(cleanStore({ views: [{ id: 'v-3', name: 'Kept', panels: [], columns: [], window: 'last7d' }] }));
-  const puts = [];
-  await loadViews(async (url, init) => {
-    if (init?.method === 'PUT') { puts.push(JSON.parse(init.body)); return { ok: true }; }
-    return { ok: true, json: async () => ({ views: [], default: '' }) };
-  });
-  assert.equal(puts.length, 1);
-  assert.deepEqual(puts[0].views.map((v) => v.id), ['v-3']);
+  const srv = fakeServer({ views: [{ id: 'v-4', name: 'On server', panels: [], columns: [], window: 'last7d' }], default: '' });
+  await loadViews(srv.fetch);
+  assert.equal(srv.puts, 1);
+  assert.deepEqual(named(srv.body), ['On server', 'Kept']);
   assert.ok(findView(V.store, 'v-3'));
+  assert.equal(store.has(_test.LOCAL_STORE), false);
 });
 
 test('migration of the old Performance layout runs when views load', async () => {
-  V.loading = null; V.loaded = false; V.store = empty();
+  resetViews();
   S.ui = { usMetric: 'tokens' };
   setPref('performance', { order: ['tokens', 'ttft'], on: ['tokens', 'ttft'] });
-  const puts = [];
-  await loadViews(async (url, init) => {
-    if (init?.method === 'PUT') { puts.push(JSON.parse(init.body)); return { ok: true }; }
-    return { ok: true, json: async () => ({ views: [], default: '' }) };
-  });
+  const srv = fakeServer();
+  await loadViews(srv.fetch);
   assert.deepEqual(findView(V.store, 'performance').panels.map((p) => p.type), ['tokens', 'ttft', 'available']);
   assert.equal(prefs().performance, undefined);
   assert.equal(S.ui.usMetric, undefined);
-  assert.equal(puts.length, 1);
+  assert.equal(srv.puts, 1);
+  assert.deepEqual(srv.body.views.map((v) => v.id), ['performance']);
 });

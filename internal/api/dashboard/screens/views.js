@@ -210,42 +210,79 @@ export function migrateLegacy(store, ui, p) {
 }
 
 // ---------- storage ----------
+// Every save is a list of changes, one per view touched: set a view, delete
+// one, or set the default. A save reads the latest stored views and applies
+// just its changes on top, so two tabs never undo each other. While the proxy
+// cannot store views, the changes wait in this browser and go up later.
 
-function readLocal() {
-  try { return cleanStore(JSON.parse(localStorage.getItem(LOCAL_STORE) || "{}")); } catch (e) { return cleanStore({}); }
+const PENDING = "cliproxy-dashboard-views-pending";
+const NOTE = "Views are saved in this browser only, as the proxy could not store them.";
+
+// The changes that turn store a into store b.
+export function diffStores(a, b) {
+  const out = [];
+  const before = new Map(a.views.map((v) => [v.id, v]));
+  const after = new Map(b.views.map((v) => [v.id, v]));
+  for (const [id, v] of after) if (JSON.stringify(before.get(id)) !== JSON.stringify(v)) out.push({ op: "set", id, view: copy(v) });
+  for (const id of before.keys()) if (!after.has(id)) out.push({ op: "delete", id });
+  if ((a.default || "") !== (b.default || "")) out.push({ op: "default", id: b.default || "" });
+  return out;
 }
-function writeLocal(store) {
-  try { localStorage.setItem(LOCAL_STORE, JSON.stringify(store)); return true; } catch (e) { return false; }
+
+// Applies changes to a store in order, so the newest change to a view wins.
+// A replaced view keeps its place; a new one goes last.
+export function applyChanges(store, changes) {
+  let views = store.views.slice(), def = store.default || "";
+  for (const c of changes || []) {
+    if (!plainObject(c) || typeof c.id !== "string") continue;
+    if (c.op === "set") {
+      const v = cleanView(c.view);
+      if (!v || v.id !== c.id) continue;
+      const i = views.findIndex((x) => x.id === c.id);
+      if (i >= 0) views[i] = v; else views.push(v);
+    } else if (c.op === "delete") {
+      views = views.filter((x) => x.id !== c.id);
+      if (def === c.id) def = "";
+    } else if (c.op === "default") def = c.id;
+  }
+  return cleanStore({ views, default: def });
+}
+
+function readJSON(key, fallback) {
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; } catch (e) { return fallback; }
+}
+function writeJSON(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch (e) { return false; }
+}
+function forget(key) {
+  try { localStorage.removeItem(key); } catch (e) { /* storage blocked */ }
+}
+
+// The views as last shown in this browser, for when the proxy is unreachable.
+const readLocal = () => cleanStore(readJSON(LOCAL_STORE, {}));
+const writeLocal = (store) => writeJSON(LOCAL_STORE, store);
+// Changes the proxy has not taken yet, oldest first.
+const readPending = () => { const p = readJSON(PENDING, []); return Array.isArray(p) ? p : []; };
+
+// An earlier version kept the whole store here with no change list. Its
+// views become changes, so they reach the proxy without undoing other views.
+function legacyPending() {
+  const pending = readPending();
+  if (pending.length || !readJSON(LOCAL_STORE, null)) return pending;
+  const old = readLocal();
+  const out = old.views.map((v) => ({ op: "set", id: v.id, view: v }));
+  if (old.default) out.push({ op: "default", id: old.default });
+  return out;
 }
 
 // The views as last loaded: the store, where it lives, and whether it loaded.
 export const V = { store: cleanStore({}), where: "", loaded: false, loading: null, note: "" };
 
-// Loads views from the server, else from this browser. Runs once; later
-// calls get the same promise. fetchFn is for tests.
-export function loadViews(fetchFn = globalThis.fetch) {
-  if (V.loading) return V.loading;
-  V.loading = (async () => {
-    let store = null;
-    try {
-      const res = await fetchFn("/dashboard/views", { cache: "no-store" });
-      if (res.ok) { store = cleanStore(await res.json()); V.where = "server"; }
-    } catch (e) { /* unreachable: keep them in this browser */ }
-    if (!store) { store = readLocal(); V.where = "local"; V.note = "Views are saved in this browser only, as the proxy could not store them."; }
-    // Views kept here while the server could not store them move to it once.
-    const local = readLocal();
-    if (V.where === "server" && !store.views.length && local.views.length) {
-      store = local;
-      if (await putViews(store, fetchFn)) { try { localStorage.removeItem(LOCAL_STORE); } catch (e) { /* storage blocked */ } }
-    }
-    const migrated = migrateLegacy(store, S.ui, prefs());
-    if (prefs().performance) setPref("performance", undefined);
-    V.store = migrated;
-    if (migrated !== store) await persist(migrated, fetchFn);
-    V.loaded = true;
-    return V.store;
-  })();
-  return V.loading;
+async function getViews(fetchFn) {
+  try {
+    const res = await fetchFn("/dashboard/views", { cache: "no-store" });
+    return res.ok ? cleanStore(await res.json()) : null;
+  } catch (e) { return null; }
 }
 
 async function putViews(store, fetchFn) {
@@ -255,20 +292,71 @@ async function putViews(store, fetchFn) {
   } catch (e) { return false; }
 }
 
-// Stores the views: on the server when it takes them, else in this browser.
-// Returns where they went.
-export async function persist(store, fetchFn = globalThis.fetch) {
-  V.store = store;
-  if (await putViews(store, fetchFn)) {
-    V.where = "server";
-    V.note = "";
-    try { localStorage.removeItem(LOCAL_STORE); } catch (e) { /* storage blocked */ }
-    return "server";
-  }
-  writeLocal(store);
+// Reads the latest stored views (unless given), applies the changes and
+// stores the result. Returns what was stored, or null when the proxy refused.
+async function sendChanges(changes, fetchFn, latest = null) {
+  const base = latest || await getViews(fetchFn);
+  if (!base) return null;
+  const merged = applyChanges(base, changes);
+  return await putViews(merged, fetchFn) ? merged : null;
+}
+
+function keepLocally(changes, shown) {
+  writeJSON(PENDING, changes);
+  writeLocal(shown);
   V.where = "local";
-  V.note = "Views are saved in this browser only, as the proxy could not store them.";
+  V.note = NOTE;
+}
+
+function storedOnServer(store) {
+  forget(PENDING);
+  forget(LOCAL_STORE);
+  V.store = store;
+  V.where = "server";
+  V.note = "";
+}
+
+// Loads views from the server, else from this browser, with changes still
+// waiting here applied on top and sent up. Runs once; later calls get the
+// same promise. fetchFn is for tests.
+export function loadViews(fetchFn = globalThis.fetch) {
+  if (V.loading) return V.loading;
+  V.loading = (async () => {
+    const server = await getViews(fetchFn);
+    const pending = legacyPending();
+    if (server) {
+      V.store = applyChanges(server, pending);
+      V.where = "server";
+      V.note = "";
+      if (pending.length) {
+        const stored = await sendChanges(pending, fetchFn, server);
+        if (stored) storedOnServer(stored); else keepLocally(pending, V.store);
+      }
+    } else {
+      V.store = applyChanges(readLocal(), pending);
+      V.where = "local";
+      V.note = NOTE;
+    }
+    const migrated = migrateLegacy(V.store, S.ui, prefs());
+    if (prefs().performance) setPref("performance", undefined);
+    if (migrated !== V.store) await persist(migrated, fetchFn);
+    V.loaded = true;
+    return V.store;
+  })();
+  return V.loading;
+}
+
+// Stores the change from the views shown to next: merged into what the proxy
+// holds now when it takes it, else kept in this browser until it can.
+// Returns where the change went. V.store ends as the merged views.
+export async function persist(next, fetchFn = globalThis.fetch) {
+  const changes = [...readPending(), ...diffStores(V.store, next)];
+  V.store = next;
+  if (!changes.length) return V.where || "server";
+  const stored = await sendChanges(changes, fetchFn);
+  if (stored) { storedOnServer(stored); return "server"; }
+  keepLocally(changes, next);
   return "local";
 }
 
-export const _test = { readLocal, writeLocal, LOCAL_STORE };
+export const _test = { readLocal, writeLocal, readPending, LOCAL_STORE, PENDING };
