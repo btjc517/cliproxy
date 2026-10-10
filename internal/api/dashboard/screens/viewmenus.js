@@ -6,7 +6,7 @@ import { PANELS, PANEL_ORDER } from "./panels.js";
 import { forgetTime } from "./timeaxis.js";
 import {
   V, BUILTINS, COLUMN_IDS, WINDOWS, MAX_VIEWS, findView, isBuiltin, persist, saveView, saveAsNew, resetView, renameView, duplicateView,
-  deleteView, setDefault, viewHref,
+  deleteView, setDefault, viewHref, nameError, MAX_NAME,
 } from "./views.js";
 import { current, edit, dropDraft, COLUMNS } from "./telemetry.js";
 
@@ -241,7 +241,7 @@ export function newViewDialog(base, { title = "Save as new view", name = "" } = 
   const draw = () => {
     scrim.innerHTML = `<div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-t">
       <h2 id="dlg-t">${esc(title)}</h2>
-      <div class="fld"><label for="dlg-name">Name</label><input id="dlg-name" maxlength="80" value="${esc(scrim.querySelector("#dlg-name")?.value ?? defName)}" autocomplete="off"></div>
+      <div class="fld"><label for="dlg-name">Name</label><input id="dlg-name" maxlength="${MAX_NAME}" value="${esc(scrim.querySelector("#dlg-name")?.value ?? defName)}" autocomplete="off"></div>
       <button class="chk" data-keep role="checkbox" aria-checked="${keep}">${check(keep ? "true" : "false")}<span>Keep the account selection with this view</span></button>
       <div class="btns"><button data-cancel>Cancel</button><button class="pri" data-create>Create view</button></div>
     </div>`;
@@ -252,7 +252,8 @@ export function newViewDialog(base, { title = "Save as new view", name = "" } = 
   const close = () => { scrim.remove(); S.hold = Math.max(0, S.hold - 1); document.removeEventListener("keydown", onKey, true); rerender(); };
   const create = async () => {
     const nm = scrim.querySelector("#dlg-name").value.trim();
-    if (!nm) { scrim.querySelector("#dlg-name").focus(); return; }
+    const bad = nameError(nm);
+    if (bad) { if (nm) toast(bad, true); scrim.querySelector("#dlg-name").focus(); return; }
     const res = saveAsNew(V.store, base, nm, { keepAccounts: keep, accounts: accountSelection() });
     if (!res.id) { toast(`You can keep up to ${MAX_VIEWS - BUILTINS.length} views. Delete one first.`, true); return; }
     if (findView(V.store, base.id)) dropDraft(base.id);
@@ -293,7 +294,7 @@ export function startRename(id) {
 export function renameBox(id) {
   if (renaming !== id) return null;
   const v = current(id)?.view;
-  return `<input class="rename" data-rename-input aria-label="View name" maxlength="80" value="${esc(v?.name || "")}">`;
+  return `<input class="rename" data-rename-input aria-label="View name" maxlength="${MAX_NAME}" value="${esc(v?.name || "")}">`;
 }
 
 export function mountRename(root) {
@@ -308,6 +309,8 @@ export function mountRename(root) {
     renaming = "";
     S.hold = Math.max(0, S.hold - 1);
     const name = input.value.trim();
+    const bad = name ? nameError(name) : "";
+    if (save && bad) { toast(bad, true); rerender(); return; }
     if (save && name && name !== current(id)?.saved.name) {
       if (S.ui.drafts?.[id]) S.ui.drafts[id].name = name;
       await commit(renameView(V.store, id, name));

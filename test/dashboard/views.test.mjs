@@ -132,16 +132,39 @@ test('a customised old Performance layout becomes an override, once', () => {
 
 // A stand-in for /dashboard/views: GET returns the stored body, PUT replaces
 // it. down makes every request fail.
+// The live proxy before revisions: it refuses unknown fields and names over
+// 60 characters, as usagestats.DecodeViews does. Every request waits a turn,
+// so requests from overlapping saves interleave as they would over a network.
+const tick = () => new Promise((r) => setImmediate(r));
+const clone = (x) => JSON.parse(JSON.stringify(x));
+const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => clone(body) });
+const VIEW_KEYS = ['id', 'name', 'panels', 'columns', 'window', 'accounts', 'builtin'];
+function legacyCheck(b) {
+  if (Object.keys(b).some((k) => !['views', 'default'].includes(k))) return 'unknown field';
+  for (const v of b.views) {
+    if (Object.keys(v).some((k) => !VIEW_KEYS.includes(k))) return 'unknown field';
+    if (!v.name.trim() || [...v.name].length > 60) return 'name must be 1 to 60 characters';
+  }
+  return '';
+}
 function fakeServer(body = { views: [], default: '' }) {
-  const s = { body: JSON.parse(JSON.stringify(body)), down: false, puts: 0 };
+  const s = { body: clone(body), down: false, puts: 0, sent: [] };
   s.fetch = async (url, init) => {
+    await tick();
     if (s.down) throw new Error('offline');
-    if (init?.method === 'PUT') { s.body = JSON.parse(init.body); s.puts++; return { ok: true }; }
-    return { ok: true, json: async () => JSON.parse(JSON.stringify(s.body)) };
+    if (init?.method === 'PUT') {
+      const b = JSON.parse(init.body);
+      s.sent.push({ headers: init.headers || {}, body: b });
+      const bad = legacyCheck(b);
+      if (bad) return reply(400, { error: bad });
+      s.body = b; s.puts++;
+      return reply(200, s.body);
+    }
+    return reply(200, s.body);
   };
   return s;
 }
-const resetViews = () => { V.loading = null; V.loaded = false; V.where = ''; V.note = ''; V.store = empty(); store.clear(); };
+const resetViews = () => { V.loading = null; V.loaded = false; V.where = ''; V.note = ''; V.notice = ''; V.doc = null; V.store = empty(); store.clear(); _test.reset?.(); };
 const named = (s) => s.views.map((v) => v.name);
 
 test('views load from the server, else from this browser with a note', async () => {
@@ -187,6 +210,18 @@ test('two tabs saving one after the other keep both views', async () => {
   assert.deepEqual(named(srv.body), ['View B']);
 });
 
+test('a proxy without revisions still gets overlapping saves from one tab one after the other', async () => {
+  resetViews();
+  const srv = fakeServer();
+  await loadViews(srv.fetch);
+  const a = saveAsNew(V.store, findView(V.store, 'usage'), 'View A', { rand });
+  const first = persist(a.store, srv.fetch);
+  const b = saveAsNew(a.store, findView(a.store, 'allowance'), 'View B', { rand });
+  assert.deepEqual(await Promise.all([first, persist(b.store, srv.fetch)]), ['server', 'server']);
+  assert.deepEqual(named(srv.body), ['View A', 'View B']);
+  for (const s of srv.sent) assert.equal(s.headers['If-Match'], undefined);
+});
+
 test('changes kept in this browser survive a reload and go up once the proxy takes them', async () => {
   resetViews();
   const srv = fakeServer({ views: [{ id: 'v-9', name: 'Old name', panels: [], columns: [], window: 'last7d' }], default: '' });
@@ -226,7 +261,8 @@ test('a failed upload keeps the waiting changes and the note', async () => {
 
 test('views an earlier version kept in this browser move to the server without removing others', async () => {
   resetViews();
-  _test.writeLocal(cleanStore({ views: [{ id: 'v-3', name: 'Kept', panels: [], columns: [], window: 'last7d' }] }));
+  // The earlier version kept a bare store, with no list of operations.
+  store.set(_test.LOCAL_STORE, JSON.stringify(cleanStore({ views: [{ id: 'v-3', name: 'Kept', panels: [], columns: [], window: 'last7d' }] })));
   const srv = fakeServer({ views: [{ id: 'v-4', name: 'On server', panels: [], columns: [], window: 'last7d' }], default: '' });
   await loadViews(srv.fetch);
   assert.equal(srv.puts, 1);
