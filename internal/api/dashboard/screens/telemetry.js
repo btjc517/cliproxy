@@ -3,15 +3,15 @@
 // range selection; the table under them sums the same buckets per account.
 import {
   S, esc, fmt, int, ms, money, clock, day, icon, logo, tokens, cacheReuse, apiCost,
-  providerTitle, scopeParam, accountScope, setAccountSelection, warnState,
+  providerTitle, accountScope, setAccountSelection, warnState,
 } from "../core.js";
 import { accountColor, readAt } from "./common.js";
 import { accountPicker, bindAccountPicker } from "./account-picker.js";
 import { pctRate, allowanceRange, resetsUntil } from "./burn.js";
-import { PANELS, panelHtml, buildPanel, panelContext, snapGrid, allowanceLines, leftAt, availability } from "./panels.js";
-import { usageSum, perfScope, perfCounts, historyBefore, loadRangePerf, RP } from "./series.js";
+import { PANELS, panelHtml, buildPanel, panelContext, snapGrid, allowanceLines, leftAt, availability, loadSelection } from "./panels.js";
+import { usageFigures, perfFigures, historyBefore } from "./series.js";
 import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backToNow, zoomHint, endText } from "./timeaxis.js";
-import { V, findView, defaultId, sameView, viewWindow, hasForecast, loadViews } from "./views.js";
+import { V, COLUMN_IDS, findView, defaultId, sameView, viewWindow, hasForecast, loadViews } from "./views.js";
 import { openDisplay, displayOpen, startRename, renameBox, mountRename, setDefaultView, saveDraft, newViewDialog } from "./viewmenus.js";
 
 const KEY = "tv";
@@ -50,6 +50,13 @@ export function viewTime(view) {
   if (S.ui.tvFor !== view.id) {
     forgetTime(KEY);
     S.ui.tvFor = view.id;
+    S.ui.tvAccountsFor = "";
+  }
+  // The saved accounts apply once both the views and the accounts are known:
+  // before the first data they would all be filtered out, leaving every
+  // account picked, and before the views load a built-in shows unsaved.
+  if (S.ui.tvAccountsFor !== view.id && V.loaded && Array.isArray(S.data?.accounts)) {
+    S.ui.tvAccountsFor = view.id;
     if (Array.isArray(view.accounts)) setAccountSelection(view.accounts);
   }
   return timeState(KEY, { defaultWindow: (now) => viewWindow(view.window, now), future: hasForecast(view), loads: true });
@@ -123,11 +130,12 @@ function acctCell(a, w) {
 
 // The table for the view's columns: one row per picked account, with an All
 // accounts row under usage columns and the local logs before per-account data.
-function tableHtml(view, ctx) {
-  const cols = view.columns.filter((c) => COLUMNS[c]);
+export function tableHtml(view, ctx) {
+  // Columns in their fixed order, so each group's columns sit together.
+  const cols = COLUMN_IDS.filter((c) => view.columns.includes(c) && COLUMNS[c]);
   if (!cols.length) return "";
   const now = ctx.now, r = ctx.range;
-  const from = r ? r.start : ctx.window.start, to = Math.min(r ? r.end : ctx.window.end, now);
+  const from = r ? r.start : ctx.window.start;
   const sc = ctx.sc;
   const hasAllow = cols.some((c) => ALLOWANCE_COLS.includes(c));
   // Requests count from performance next to other performance columns, else from usage.
@@ -142,107 +150,94 @@ function tableHtml(view, ctx) {
       if (!shownCols.some((x) => x.sel)) shownCols.push({ id: "leftAt", sel: true, ...SEL_COLS.leftAt, label: `Left at ${endText(r.end)}` }, { id: "usedIn", sel: true, ...SEL_COLS.usedIn }, { id: "resetsIn", sel: true, ...SEL_COLS.resetsIn });
     } else shownCols.push({ id: c, ...COLUMNS[c] });
   }
-  const allowW = shownCols.filter((c) => c.sel || ALLOWANCE_COLS.includes(c.id)).reduce((t, c) => t + c.w, 0);
-  const perfW = shownCols.filter((c) => perfCols.includes(c.id)).reduce((t, c) => t + c.w, 0);
   const head = `<div class="tr head">${`<div class="c acct" style="min-width:${acctW}px">${r ? selectionLabel(r) : esc("Accounts, " + windowText(ctx.window, now))}</div>`}${shownCols.map((c) => cell(c.w, esc(c.label), c.r, c.cls)).join("")}</div>`;
 
-  const sums = usageSum(ctx.usage, sc.ids, from, to, now);
+  // Every figure reads the same span data as the panels above.
+  const sd = ctx.span;
+  const sums = usageFigures(sd, sc.ids, now);
   const lines = new Map(allowanceLines(sc.ids, true, now).map((l) => [l.id, l]));
-  const perfSrc = r ? (ctx.rangePerf ? RP.perf : null) : S.data?.summary?.performance;
   const deadNow = availability(sc.ids, { start: now - 1, end: now + 30 * DAY }, now).filter((p) => p.at(now) === 0)
     .map((p) => { const back = p.segs.find((s) => s.from > now && s.n > 0)?.from; return [p.provider, `no ${providerTitle(p.provider)} allowance${back ? " until " + resetName(back, now) : ""}`]; });
   const deadText = new Map(deadNow);
+  const dash = `<span class="muted">–</span>`;
+  const groupOf = (c) => (c.sel || ALLOWANCE_COLS.includes(c.id) ? "allow" : perfCols.includes(c.id) ? "perf" : "usage");
 
-  const allowCells = (a) => {
-    const l = lines.get(a.id);
-    if (!l) return { span: allowW, html: `<span class="span2">No allowance reading yet</span>` };
-    const out = [];
-    for (const c of shownCols.filter((x) => x.sel || ALLOWANCE_COLS.includes(x.id))) {
-      if (c.id === "weekLeft") out.push(cell(c.w, meter(l.tr.usedUp ? 0 : l.tr.leftNow, l.color)));
-      else if (c.id === "perDay") out.push(cell(c.w, l.tr.rate == null ? `<span class="muted">–</span>` : esc(pctRate(l.tr.rate * 24))));
-      else if (c.id === "heading") out.push(cell(c.w, headingFor(l, now)));
-      else if (c.id === "nextReset") out.push(cell(c.w, l.tr.reset > now ? esc(fullTime(l.tr.reset)) : `<span class="muted">–</span>`));
-      else if (c.id === "leftAt") { const v = leftAt(l, r.end, now); out.push(cell(c.w, v == null ? `<span class="muted">–</span>` : meter(v, l.color))); }
-      else if (c.id === "usedIn") { const u = allowanceRange(l.ser, l.tr, now, r.start, r.end); out.push(cell(c.w, u?.used == null ? `<span class="muted">–</span>` : Math.round(u.used) + "%")); }
-      else if (c.id === "resetsIn") {
-        const list = resetsUntil(l.tr, now, r.end, l.period).filter((t) => t >= r.start);
-        out.push(cell(c.w, list.length ? esc(list.map((t) => resetName(t, now)).join(", ")) : `<span class="muted">None</span>`));
-      }
+  // A row's cells, one per column in column order. msgs maps a group to a
+  // message that replaces its values ("No requests"): it fills the group's
+  // first run of adjacent columns, and its other columns show a dash.
+  const cellsFor = (msgs, valueOf) => {
+    let out = "";
+    const used = new Set();
+    for (let i = 0; i < shownCols.length;) {
+      const c = shownCols[i], g = groupOf(c), msg = msgs[g];
+      if (msg == null) { out += valueOf(c, g); i++; continue; }
+      if (used.has(g)) { out += cell(c.w, dash, c.r, c.cls); i++; continue; }
+      let w = 0, j = i;
+      while (j < shownCols.length && groupOf(shownCols[j]) === g) w += shownCols[j++].w;
+      out += `<div class="c" style="width:${w}px"><span class="span2">${msg}</span></div>`;
+      used.add(g);
+      i = j;
     }
-    return { html: out.join("") };
+    return out;
+  };
+
+  const allowCell = (l, c) => {
+    if (c.id === "weekLeft") return cell(c.w, meter(l.tr.usedUp ? 0 : l.tr.leftNow, l.color));
+    if (c.id === "perDay") return cell(c.w, l.tr.rate == null ? dash : esc(pctRate(l.tr.rate * 24)));
+    if (c.id === "heading") return cell(c.w, headingFor(l, now));
+    if (c.id === "nextReset") return cell(c.w, l.tr.reset > now ? esc(fullTime(l.tr.reset)) : dash);
+    if (c.id === "leftAt") { const v = leftAt(l, r.end, now); return cell(c.w, v == null ? dash : meter(v, l.color)); }
+    if (c.id === "usedIn") { const u = allowanceRange(l.ser, l.tr, now, r.start, r.end); return cell(c.w, u?.used == null ? dash : Math.round(u.used) + "%"); }
+    const list = resetsUntil(l.tr, now, r.end, l.period).filter((t) => t >= r.start);
+    return cell(c.w, list.length ? esc(list.map((t) => resetName(t, now)).join(", ")) : `<span class="muted">None</span>`);
   };
   const usageCell = (c, x) => {
-    if (!x) return cell(COLUMNS[c].w, `<span class="muted">–</span>`, COLUMNS[c].r);
-    const v = { tokens: fmt(tokens(x)), requests: int(x.requests), input: fmt(x.input_tokens), cacheWrite: fmt(x.cache_write_tokens), cacheRead: fmt(x.cache_read_tokens), output: fmt(x.output_tokens), cost: money(apiCost(x)) }[c];
-    return c === "cacheReuse" ? cell(COLUMNS[c].w, reuseCell(x)) : cell(COLUMNS[c].w, esc(v), COLUMNS[c].r, COLUMNS[c].cls);
+    if (!x) return cell(c.w, dash, c.r, c.cls);
+    if (c.id === "cacheReuse") return cell(c.w, reuseCell(x));
+    const v = { tokens: fmt(tokens(x)), requests: int(x.requests), input: fmt(x.input_tokens), cacheWrite: fmt(x.cache_write_tokens), cacheRead: fmt(x.cache_read_tokens), output: fmt(x.output_tokens), cost: money(apiCost(x)) }[c.id];
+    return cell(c.w, esc(v), c.r, c.cls);
   };
-  // One account's performance, or for scope "total" the picked accounts'.
-  const perfCells = (a, total = false) => {
-    const sel = { some: total ? sc.some : false, prov: total ? sc.prov : a.id, ids: total ? sc.ids : [a.id] };
-    let q = total ? (r ? ctx.rangePerf?.q : ctx.perf?.q) || null : perfSrc?.scopes?.[a.id] || null;
-    let counts = null;
-    if (r && !q) {
-      // The selection's own reading has not arrived: counts from the window's buckets.
-      const c = perfCounts(perfScope(sel), r.start, Math.min(r.end, now));
-      if (c.any) counts = c;
-    }
-    const reqs = q ? Number(q.requests) || 0 : counts ? counts.requests : 0;
-    if (!reqs) {
-      const extra = total ? "" : deadText.get(a.provider);
-      return { span: perfW, html: `<span class="span2">No requests${extra ? ", " + esc(extra) : ""}</span>` };
-    }
-    const failed = q ? Number(q.failed) || 0 : counts.failed;
-    const failovers = q ? q.failovers : counts.hasFailovers ? counts.failovers : undefined;
-    const val = {
-      requests: int(reqs),
+  // Performance values for one account's scope, or the picked accounts'.
+  // null while the span's data loads.
+  const perfVals = (sel) => {
+    const f = perfFigures(sd, sel);
+    if (!f) return null;
+    if (!f.requests) return { none: true };
+    const q = f.q;
+    return {
+      requests: int(f.requests),
       ttft50: q?.ttft_ms?.p50 ? ms(q.ttft_ms.p50) : "–",
       ttft90: q?.ttft_ms?.p90 ? ms(q.ttft_ms.p90) : "–",
       throughput: perSec(q?.throughput?.p50),
-      failures: int(failed),
-      failovers: failovers == null ? "–" : int(failovers),
+      failures: int(f.failed),
+      failovers: f.failovers == null ? "–" : int(f.failovers),
     };
-    return { html: shownCols.filter((c) => perfCols.includes(c.id)).map((c) => cell(c.w, esc(val[c.id]), c.r)).join("") };
   };
+  const perfCell = (c, vals) => cell(c.w, vals ? esc(vals[c.id]) : dash, c.r, c.cls);
 
   const rows = sc.shown.map((a) => {
-    let html = acctCell(a, acctW);
-    let allowDone = false, perfDone = false;
-    const al = hasAllow ? allowCells(a) : null;
-    const pf = perfCols.length ? perfCells(a) : null;
-    for (const c of shownCols) {
-      if (c.sel || ALLOWANCE_COLS.includes(c.id)) {
-        if (allowDone) continue;
-        allowDone = true;
-        html += al.span ? `<div class="c" style="width:${al.span}px">${al.html}</div>` : al.html;
-      } else if (perfCols.includes(c.id)) {
-        if (perfDone) continue;
-        perfDone = true;
-        html += pf.span ? `<div class="c" style="width:${pf.span}px">${pf.html}</div>` : pf.html;
-      } else html += usageCell(c.id, sums.per[a.id]);
-    }
-    return `<div class="tr row" data-row-acct="${esc(a.id)}">${html}</div>`;
+    const l = hasAllow ? lines.get(a.id) : null;
+    const pv = perfCols.length ? perfVals({ some: false, prov: a.id, ids: [a.id] }) : null;
+    const msgs = {};
+    if (hasAllow && !l) msgs.allow = "No allowance reading yet";
+    if (pv?.none) { const extra = deadText.get(a.provider); msgs.perf = `No requests${extra ? ", " + esc(extra) : ""}`; }
+    const html = cellsFor(msgs, (c, g) => (g === "allow" ? allowCell(l, c) : g === "perf" ? perfCell(c, pv) : usageCell(c, sums?.per[a.id])));
+    return `<div class="tr row" data-row-acct="${esc(a.id)}">${acctCell(a, acctW)}${html}</div>`;
   });
   // An All accounts row under usage and performance columns, never under allowance.
   if (!hasAllow && sc.shown.length > 1) {
-    const pf = perfCols.length ? perfCells(null, true) : null;
-    let done = false;
-    const cells = shownCols.map((c) => {
-      if (!perfCols.includes(c.id)) return usageCell(c.id, sums.sum);
-      if (done) return "";
-      done = true;
-      return pf.span ? `<div class="c" style="width:${pf.span}px">${pf.html}</div>` : pf.html;
-    }).join("");
+    const pv = perfCols.length ? perfVals(sc) : null;
+    const cells = cellsFor(pv?.none ? { perf: "No requests" } : {}, (c, g) => (g === "perf" ? perfCell(c, pv) : usageCell(c, sums?.sum)));
     rows.push(`<div class="tr total"><div class="c acct" style="min-width:${acctW}px">All accounts</div>${cells}</div>`);
   }
   // Earlier history only makes sense for the usage columns.
   const onlyUsage = usageCols.length && !hasAllow && !perfCols.length;
-  if (onlyUsage) {
-    // Per-account counters start later than the provider history from local logs.
-    const first = sums.first ?? to;
-    if (first > from + 60e3 && !sc.some) {
+  if (onlyUsage && sums?.any) {
+    // Per-account counts start later than the provider history from local logs.
+    if (sums.first > from + 60e3 && !sc.some) {
       const provs = sc.prov === "all" ? null : [sc.prov];
-      const early = historyBefore(first, from, provs);
-      if (early) rows.push(`<div class="tr earlier"><div class="c acct" style="min-width:${acctW}px">Earlier, from local logs</div>${shownCols.map((c) => usageCell(c.id, early)).join("")}</div>`);
+      const early = historyBefore(sums.first, from, provs);
+      if (early) rows.push(`<div class="tr earlier"><div class="c acct" style="min-width:${acctW}px">Earlier, from local logs</div>${shownCols.map((c) => usageCell(c, early)).join("")}</div>`);
     }
   }
   if (!sc.shown.length) rows.push(`<div class="empty">No accounts picked.</div>`);
@@ -334,9 +329,8 @@ export function view(ctx) {
       u("[data-u-reset]", () => { dropDraft(v.id); forgetTime(KEY); rerender(); });
       u("[data-u-save]", () => saveDraft(v.id));
       u("[data-u-new]", () => newViewDialog(v));
-      // A selection needs its own reading for percentiles.
-      const perfPanels = v.panels.some((p) => ["ttft", "latency", "throughput"].includes(p.type)) || v.columns.some((col) => PERF_COLS.includes(col) && col !== "requests");
-      if (ts.range && perfPanels) loadRangePerf(ts.range, sc.some ? scopeParam(sc.ids) : "");
+      // A selection's figures read its own data, loaded for exactly it.
+      loadSelection(base);
     },
   };
 }

@@ -9,7 +9,7 @@ import {
 import { accountColor } from "./common.js";
 import { allowanceSeries, trajectory, projectedAt, projectionPoints, resetsUntil, readingAt, deadZones, accountLabels } from "./burn.js";
 import { model as availModel, available } from "./timeline.js";
-import { EMPTY, addC, usageData, displayBuckets, usageSum, bucketAt, bucketsIn, perfScope, perfCounts, perfAt, historyBefore, rangePerfFor } from "./series.js";
+import { EMPTY, addC, usageData, displayBuckets, usageSum, bucketAt, bucketsIn, perfScope, perfCounts, perfAt, historyBefore, spanData, perfFigures, usageFigures, loadRangeData } from "./series.js";
 import { HOUR, DAY, fracOf, plotWidth, addDays, midnight, timeTicks, endText } from "./timeaxis.js";
 import { plot, lines, dot, bars, band, card, legend, yTop } from "./tplot.js";
 
@@ -81,24 +81,30 @@ const FIXED_TEXT = { "24h": "last 24 hours", "7d": "last 7 days", "30d": "last 3
 // timeState), the picked accounts, and the loaded data for them.
 export function panelContext(ts, sc, { forecast = false, hint = "" } = {}) {
   const exact = perfExact();
-  const scope = sc.some ? scopeParam(sc.ids) : "";
-  return {
+  const ctx = {
     group: ts.key,
     window: ts.window,
     range: ts.range,
     ticks: timeTicks(ts.window, Math.max(3, Math.min(10, Math.floor(plotWidth() / 110)))),
     now: Date.now(),
     sc,
+    scope: sc.some ? scopeParam(sc.ids) : "",
     usage: usageData(),
     perf: perfScope(sc),
-    rangePerf: rangePerfFor(ts.range, sc, scope),
     perfExact: exact,
     perfLabel: exact ? "" : FIXED_TEXT[S.dataRange] || "",
     loading: !dataCurrent(),
     forecast,
     hint,
   };
+  // What every figure reads: the selection's own data, else the window's.
+  ctx.span = spanData(ctx);
+  return ctx;
 }
+
+// Loads what a page's selection needs, if it has one. Every page with a
+// selection calls this when it mounts.
+export const loadSelection = (ctx) => { if (ctx.range) loadRangeData(ctx.range, ctx.scope); };
 
 // Bucket edges the selection snaps to: usage buckets, else performance buckets.
 export function snapGrid(ctx) {
@@ -169,12 +175,14 @@ function usagePanel(ctx, o, type, m) {
   const empty = !idx.length ? `<div class="tp-empty">${ctx.loading ? "Loading" : "No usage in this window"}</div>` : "";
   const html = plot({ group: ctx.group, panel: type, window: v, ticks: ctx.ticks, height, labels: ctx.labels, hatch: true, y: { max, fmt: m.axis || m.f }, content: content + empty, over: ctx.hint || "" });
   const s = span(ctx);
-  let figure, qual = "";
+  let figure = "–", qual = "";
   if (s.from >= ctx.now) { figure = ""; qual = futureOnly(ctx); }
   else {
-    const sum = usageSum(ctx.usage, ids, s.from, Math.min(s.to, ctx.now), ctx.now);
-    figure = sum.first == null ? "–" : m.f(m.val(sum.sum));
-    if (sum.first != null && !sum.covered && sum.first > s.from) qual = `since ${dm(sum.first)}`;
+    const sum = usageFigures(ctx.span, ids, ctx.now);
+    if (sum?.any) {
+      figure = m.f(m.val(sum.sum));
+      if (!sum.covered && sum.first > s.from) qual = `since ${dm(sum.first)}`;
+    }
   }
   const probe = (t, el, hovered) => {
     if (t > ctx.now) return null;
@@ -201,7 +209,7 @@ function cachePanel(ctx) {
   const s = span(ctx);
   let figure = "–", qual = "of input read from cache";
   if (s.from >= ctx.now) { figure = ""; qual = futureOnly(ctx); }
-  else { const sum = usageSum(ctx.usage, ids, s.from, Math.min(s.to, ctx.now), ctx.now); figure = pctText(cacheReuse(sum.sum)); }
+  else { const sum = usageFigures(ctx.span, ids, ctx.now); if (sum?.any) figure = pctText(cacheReuse(sum.sum)); }
   const probe = (t, el, hovered) => {
     const i = t <= ctx.now ? bucketAt(d, t) : -1;
     if (i < 0) return null;
@@ -222,8 +230,8 @@ const PCT_LINES = {
 // Percentiles for the figure: for the window as loaded (the qualifier names a
 // fixed fallback range), or for the selection once its own reading arrives.
 function perfFigure(ctx, pick) {
-  if (ctx.range) return ctx.rangePerf ? pick(ctx.rangePerf.q) : null;
-  return ctx.perf?.q ? pick(ctx.perf.q) : null;
+  const f = perfFigures(ctx.span, ctx.sc);
+  return f?.q ? pick(f.q) : null;
 }
 const perfQual = (ctx, base) => base + (!ctx.range && !ctx.perfExact && ctx.perf && ctx.perfLabel ? `, ${ctx.perfLabel}` : "");
 
@@ -295,10 +303,11 @@ function failuresPanel(ctx, o) {
   let figure = "–", qual = "";
   if (s.from >= ctx.now) { figure = ""; qual = futureOnly(ctx); }
   else {
-    const c = perfCounts(ps, s.from, Math.min(s.to, ctx.now));
-    if (c.any) {
+    const c = perfFigures(ctx.span, ctx.sc);
+    if (c?.any && !c.requests) qual = "No requests";
+    else if (c?.any) {
       figure = rateText(c.failed, c.requests);
-      qual = `${int(c.failed)} of ${int(c.requests)} requests${c.hasFailovers ? `, ${int(c.failovers)} moved to another account` : ""}`;
+      qual = `${int(c.failed)} of ${int(c.requests)} requests${c.failovers != null ? `, ${int(c.failovers)} moved to another account` : ""}`;
     }
   }
   const probe = (t, el, hovered) => {
@@ -517,7 +526,7 @@ function availablePanel(ctx) {
     // the crosshair still reads it.
     const fits = px >= (s.n === 0 ? 60 : (String(s.n).length + String(r.total).length + 4) * 7 + 10);
     const label = !fits ? "" : s.n === 0 ?`<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M6.701 2.25c.577-1 2.02-1 2.598 0l5.196 9a1.5 1.5 0 0 1-1.299 2.25H2.804a1.5 1.5 0 0 1-1.3-2.25l5.197-9ZM8 4a.75.75 0 0 1 .75.75v3a.75.75 0 1 1-1.5 0v-3A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" fill="currentColor"/></svg><b>None${esc(why)}</b>` : `<b>${s.n} of ${r.total}</b>`;
-    return `<div class="av-seg ${cls}" style="top:${6 + k * 24}px;left:${(a * 100).toFixed(3)}%;width:${((b - a) * 100).toFixed(3)}%">${label}</div>`;
+    return `<div class="av-seg ${cls}" style="top:${6 + k * 24}px;left:${(a * 100).toFixed(3)}%;width:${((b - a) * 100).toFixed(3)}%">${label ? `<span class="av-lbl" data-chip-avoid>${label}</span>` : ""}</div>`;
   }).join("")).join("");
   const logos = `<div class="av-logos">${rows.map((r, k) => `<span style="top:${9 + k * 24}px">${logo(r.provider)}</span>`).join("")}</div>`;
   const html = plot({ group: ctx.group, panel: "available", window: v, ticks: ctx.ticks, height, labels: ctx.labels, y: null, content, over: (ctx.hint || "") }).replace('<div class="tp"', `<div class="tp av"`).replace('<div class="tp-area"', `${logos}<div class="tp-area"`);

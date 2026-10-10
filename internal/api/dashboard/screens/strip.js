@@ -2,11 +2,11 @@
 // window, or over the selected range, and the chosen measure drawn below on
 // the shared time controller. It loads its own window, the last 24 hours
 // until zoomed or panned.
-import { S, esc, fmt, int, ms, money, pctText, rateText, accounts, tokens, cacheReuse, apiCost, costKnown, figure, scopeParam, chartFormat, setChartFormat } from "../core.js";
+import { S, esc, fmt, int, ms, money, pctText, rateText, accounts, tokens, cacheReuse, apiCost, costKnown, figure, chartFormat, setChartFormat } from "../core.js";
 import { accountColor, costNote, costTitle, legendHtml } from "./common.js";
 import { accountLabels } from "./burn.js";
-import { buildPanel, panelContext, snapGrid } from "./panels.js";
-import { usageSum, perfCounts, loadRangePerf } from "./series.js";
+import { buildPanel, panelContext, snapGrid, loadSelection } from "./panels.js";
+import { usageFigures, perfFigures } from "./series.js";
 import { DAY, timeState, bindTime, selectionLabel, backToNow, zoomHint } from "./timeaxis.js";
 
 const METRICS = [
@@ -29,20 +29,18 @@ export function timeStrip({ key, sc }) {
   const metrics = METRICS.filter((m) => m.id !== "cost" || costKnown());
   const metric = metrics.find((m) => m.id === S.ui[key + "Metric"]) || metrics[0];
   const ctx = panelContext(ts, sc, { hint: zoomHint() });
-  const now = ctx.now;
-  const from = ts.range ? ts.range.start : ts.window.start;
-  const to = Math.min(ts.range ? ts.range.end : ts.window.end, now);
-  const u = usageSum(ctx.usage, sc.ids, from, to, now).sum;
-  const pc = perfCounts(ctx.perf, from, to);
-  const q = ts.range ? ctx.rangePerf?.q : ctx.perf?.q;
+  const us = usageFigures(ctx.span, sc.ids, ctx.now);
+  const u = us?.any ? us.sum : null;
+  const pc = perfFigures(ctx.span, sc);
+  const q = pc?.q;
   const values = {
-    requests: int(u.requests),
-    tokens: fmt(tokens(u)),
-    cost: money(apiCost(u)),
-    cache: pctText(cacheReuse(u)),
+    requests: u ? int(u.requests) : "–",
+    tokens: u ? fmt(tokens(u)) : "–",
+    cost: u ? money(apiCost(u)) : "–",
+    cache: u ? pctText(cacheReuse(u)) : "–",
     ttft: q?.ttft_ms?.p50 ? ms(q.ttft_ms.p50) : "–",
     throughput: q?.throughput?.p50 ? String(Math.round(q.throughput.p50)) : "–",
-    failure: pc.any ? rateText(pc.failed, pc.requests) : "–",
+    failure: pc?.any ? rateText(pc.failed, pc.requests) : "–",
   };
   const figs = metrics.map((m) => figure(m.label, esc(values[m.id]), m.id === "throughput" && values.throughput !== "–" ? "tokens/s" : "", { metric: m.id, on: m === metric, title: m.id === "cost" ? costTitle() : "" })).join("");
   const format = chartFormat(key) === "bars" ? "bars" : "lines";
@@ -84,7 +82,7 @@ export function timeStrip({ key, sc }) {
       setRange: ts.setRange,
       probe: (t, el, hovered) => built.probe?.(t, el, hovered) || null,
     });
-    if (ts.range) loadRangePerf(ts.range, sc.some ? scopeParam(sc.ids) : "");
+    loadSelection(ctx);
   };
   return { html, mount };
 }

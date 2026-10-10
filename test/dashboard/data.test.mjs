@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 const mem = new Map();
 globalThis.localStorage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
 const { S, fallbackRange, loadSpan, dataQuery, perfExact, scopeParam } = await import('../../internal/api/dashboard/core.js');
-const { usageData, usageSum, bucketAt, historyBefore, perfScope, perfCounts, loadRangePerf, rangePerfFor, RP } = await import('../../internal/api/dashboard/screens/series.js');
+const { usageData, usageSum, bucketAt, historyBefore, perfScope, perfCounts, loadRangeData, RD } = await import('../../internal/api/dashboard/screens/series.js');
 const { projectionParts, historyLine, cellOutline, opt } = await import('../../internal/api/dashboard/screens/panels.js');
 
 const HOUR = 3600e3, DAY = 24 * HOUR;
@@ -113,25 +113,28 @@ test('performance for picked accounts: the merged scope when it arrived, else co
   assert.equal(c.failed, 2);
 });
 
-test('a selection gets its own performance reading only from a backend with custom windows', async () => {
+test('a selection loads its own usage and performance, once per range and scope', async () => {
   const calls = [];
   const fetchFn = async (url) => { calls.push(url); return { ok: true, json: async () => ({ summary: { performance: { range: 'custom', bucket_seconds: 3600, scopes: { all: { requests: 4, ttft_ms: { p50: 90 }, series: [] } } } } }) }; };
   globalThis.window = { dispatchEvent() {} };
   globalThis.Event = class { constructor(t) { this.type = t; } };
-  const range = { start: now - 3 * HOUR, end: now - HOUR };
-  S.data = { summary: { performance: { range: '24h' } } };
-  await loadRangePerf(range, '', fetchFn);
-  assert.equal(calls.length, 0);
   S.data = { summary: { performance: { range: 'custom' } } };
-  await loadRangePerf(range, '', fetchFn);
-  await loadRangePerf(range, '', fetchFn);
+  const range = { start: now - 3 * HOUR, end: now - HOUR };
+  await loadRangeData(range, '', fetchFn, now);
+  await loadRangeData(range, '', fetchFn, now);
   assert.equal(calls.length, 1, 'once per range');
   const q = new URLSearchParams(calls[0].split('?')[1]);
   assert.equal(q.get('perf_start'), '2026-10-08T11:00:00Z');
   assert.equal(q.get('perf_end'), '2026-10-08T13:00:00Z');
-  assert.equal(rangePerfFor(range, { some: false, prov: 'all', ids: [] }, '').q.ttft_ms.p50, 90);
-  assert.equal(rangePerfFor({ ...range, end: now }, { some: false, prov: 'all', ids: [] }, ''), null, 'another range has no reading yet');
-  RP.key = ''; RP.perf = null;
+  assert.equal(q.get('usage_start'), '2026-10-08T11:00:00Z');
+  assert.equal(q.get('usage_end'), '2026-10-08T13:00:00Z');
+  assert.equal(RD.summary.performance.scopes.all.ttft_ms.p50, 90);
+  // Another scope loads again; a range wholly after now loads nothing.
+  await loadRangeData(range, 'a,b', fetchFn, now);
+  assert.equal(calls.length, 2);
+  await loadRangeData({ start: now + HOUR, end: now + 2 * HOUR }, '', fetchFn, now);
+  assert.equal(calls.length, 2);
+  RD.key = ''; RD.summary = null;
 });
 
 test('allowance projections: no steps at resets, nothing along zero, faded after the second reset', () => {
