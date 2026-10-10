@@ -2,10 +2,12 @@ package usagestats
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -78,6 +80,25 @@ func TestDecodeViewsRejectsEachRule(t *testing.T) {
 		"panel type wrong case":  replace(`"panels":[]`, `"panels":[{"type":"Tokens"}]`),
 		"window wrong case":      replace(`"window":"last24h"`, `"window":"Last24h"`),
 		"id with newline":        replace(`"id":"v"`, `"id":"v\n"`),
+		"updated_at negative":    replace(`"builtin":false`, `"builtin":false,"updated_at":-1`),
+		"updated_at fraction":    replace(`"builtin":false`, `"builtin":false,"updated_at":1.5`),
+		"updated_at a string":    replace(`"builtin":false`, `"builtin":false,"updated_at":"1700000000000"`),
+		"updated_at past 2^53":   replace(`"builtin":false`, `"builtin":false,"updated_at":9007199254740992`),
+		"revision a string":      `{"views":[],"default":"","revision":"3"}`,
+		"deleted not an array":   `{"views":[],"default":"","deleted":{}}`,
+		"deleted entry a string": `{"views":[],"default":"","deleted":["spend"]}`,
+		"deleted id missing":     `{"views":[],"default":"","deleted":[{"updated_at":1}]}`,
+		"deleted id capitals":    `{"views":[],"default":"","deleted":[{"id":"Spend","updated_at":1}]}`,
+		"deleted id 41 chars":    `{"views":[],"default":"","deleted":[{"id":"` + strings.Repeat("a", 41) + `","updated_at":1}]}`,
+		"deleted time missing":   `{"views":[],"default":"","deleted":[{"id":"spend"}]}`,
+		"deleted time zero":      `{"views":[],"default":"","deleted":[{"id":"spend","updated_at":0}]}`,
+		"deleted time negative":  `{"views":[],"default":"","deleted":[{"id":"spend","updated_at":-5}]}`,
+		"deleted time fraction":  `{"views":[],"default":"","deleted":[{"id":"spend","updated_at":1.5}]}`,
+		"deleted time a string":  `{"views":[],"default":"","deleted":[{"id":"spend","updated_at":"1"}]}`,
+		"deleted time past 2^53": `{"views":[],"default":"","deleted":[{"id":"spend","updated_at":9007199254740992}]}`,
+		"deleted unknown field":  `{"views":[],"default":"","deleted":[{"id":"spend","updated_at":1,"by":"me"}]}`,
+		"deleted id twice":       `{"views":[],"default":"","deleted":[{"id":"spend","updated_at":1},{"id":"spend","updated_at":2}]}`,
+		"too many deleted":       `{"views":[],"default":"","deleted":[` + deletedRecords(MaxDeletedViews+1) + `]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, errDecode := DecodeViews(strings.NewReader(body)); errDecode == nil {
@@ -94,6 +115,174 @@ func TestDecodeViewsRejectsEachRule(t *testing.T) {
 	if _, errDecode := DecodeViews(strings.NewReader(`{"views":[` + strings.Join(many[:MaxViews], ",") + `],"default":"v3"}`)); errDecode != nil {
 		t.Fatalf("50 views refused: %v", errDecode)
 	}
+	maxDeleted := `{"views":[],"default":"","deleted":[` + deletedRecords(MaxDeletedViews) + `],"revision":7}`
+	if _, errDecode := DecodeViews(strings.NewReader(maxDeleted)); errDecode != nil {
+		t.Fatalf("200 deleted views refused: %v", errDecode)
+	}
+	if _, errDecode := DecodeViews(strings.NewReader(view(base + `,"updated_at":9007199254740991`))); errDecode != nil {
+		t.Fatalf("updated_at of 2^53-1 refused: %v", errDecode)
+	}
+}
+
+// deletedRecords is n distinct deleted view records, comma separated.
+func deletedRecords(n int) string {
+	records := make([]string, n)
+	for i := range records {
+		records[i] = fmt.Sprintf(`{"id":"gone-%d","updated_at":%d}`, i, 1700000000000+i)
+	}
+	return strings.Join(records, ",")
+}
+
+// A file written before revisions existed reads as revision 0 with no
+// deleted views, and a save from revision 0 replaces it as revision 1.
+func TestLegacyViewsFileReadsAsRevisionZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ViewsFileName)
+	legacy := `{"views":[{"id":"spend","name":"Spend","panels":[{"type":"cost","options":{}}],"columns":[],"window":"last24h","accounts":null,"builtin":false}],"default":"spend"}`
+	if errWrite := os.WriteFile(path, []byte(legacy), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	views, errRead := ReadViews(path)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if views.Revision != 0 || views.Deleted == nil || len(views.Deleted) != 0 || len(views.Views) != 1 {
+		t.Fatalf("legacy file read as %+v", views)
+	}
+	if _, errSave := SaveViews(path, 1, views); errSave == nil {
+		t.Fatal("save from revision 1 over a revision 0 file succeeded")
+	}
+	stored, errSave := SaveViews(path, 0, views)
+	if errSave != nil || stored.Revision != 1 {
+		t.Fatalf("save from revision 0: revision %d, %v", stored.Revision, errSave)
+	}
+}
+
+// A save from a revision that is not the stored one writes nothing and
+// returns the stored document.
+func TestSaveViewsRefusesAStaleRevision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ViewsFileName)
+	first, errSave := SaveViews(path, 0, DashboardViews{Views: []DashboardView{}, Default: "spend"})
+	if errSave != nil || first.Revision != 1 {
+		t.Fatalf("first save: revision %d, %v", first.Revision, errSave)
+	}
+	for _, stale := range []int64{0, 2, -1} {
+		_, errSave := SaveViews(path, stale, DashboardViews{Views: []DashboardView{}})
+		var conflict *ViewsConflictError
+		if !errors.As(errSave, &conflict) {
+			t.Fatalf("save from revision %d: %v, want a conflict", stale, errSave)
+		}
+		if conflict.Current.Revision != 1 || conflict.Current.Default != "spend" {
+			t.Fatalf("conflict from revision %d holds %+v", stale, conflict.Current)
+		}
+	}
+	read, errRead := ReadViews(path)
+	if errRead != nil || read.Revision != 1 || read.Default != "spend" {
+		t.Fatalf("after refused saves the file holds %+v, %v", read, errRead)
+	}
+}
+
+// Two saves from the same revision: exactly one succeeds. The test hook
+// holds the first save that passes the revision check until the other save
+// has either passed the check too (no lock: both succeed and the test fails)
+// or found the lock held (it must then see the new revision and fail).
+func TestSaveViewsConcurrentSavesFromOneRevision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ViewsFileName)
+	if _, errSave := SaveViews(path, 0, DashboardViews{Views: []DashboardView{}}); errSave != nil {
+		t.Fatal(errSave)
+	}
+
+	var (
+		mu       sync.Mutex
+		checked  int
+		released bool
+		release  = make(chan struct{})
+	)
+	releaseOnce := func() {
+		if !released {
+			released = true
+			close(release)
+		}
+	}
+	viewsTestHook = func(event string) {
+		mu.Lock()
+		if event == "contended" {
+			releaseOnce()
+			mu.Unlock()
+			return
+		}
+		checked++
+		if checked > 1 {
+			releaseOnce()
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+		<-release
+	}
+	defer func() { viewsTestHook = nil }()
+
+	start := make(chan struct{})
+	results := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, results[i] = SaveViews(path, 1, DashboardViews{Views: []DashboardView{}, Default: fmt.Sprintf("tab-%d", i)})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	saved, conflicts := 0, 0
+	for _, errSave := range results {
+		var conflict *ViewsConflictError
+		switch {
+		case errSave == nil:
+			saved++
+		case errors.As(errSave, &conflict) && conflict.Current.Revision == 2:
+			conflicts++
+		default:
+			t.Fatalf("unexpected result %v", errSave)
+		}
+	}
+	if saved != 1 || conflicts != 1 {
+		t.Fatalf("%d saves and %d conflicts, want 1 and 1", saved, conflicts)
+	}
+	read, errRead := ReadViews(path)
+	if errRead != nil || read.Revision != 2 {
+		t.Fatalf("file at revision %d, %v, want 2", read.Revision, errRead)
+	}
+}
+
+// updated_at on views and the deleted records are stored and read back.
+func TestViewsUpdatedAtAndDeletedRoundTrip(t *testing.T) {
+	body := `{"views":[{"id":"spend","name":"Spend","panels":[{"type":"cost","options":{}}],"columns":[],"window":"last24h","accounts":null,"builtin":false,"updated_at":1760090000123}],` +
+		`"default":"spend","deleted":[{"id":"old","updated_at":1760080000000}],"revision":42}`
+	views, errDecode := DecodeViews(strings.NewReader(body))
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	path := filepath.Join(t.TempDir(), ViewsFileName)
+	stored, errSave := SaveViews(path, 0, views)
+	if errSave != nil {
+		t.Fatal(errSave)
+	}
+	want := strings.Replace(body, `"revision":42`, `"revision":1`, 1)
+	if got, _ := json.Marshal(stored); string(got) != want {
+		t.Fatalf("stored %s, want %s", got, want)
+	}
+	if data, _ := os.ReadFile(path); string(data) != want {
+		t.Fatalf("file holds %s, want %s", data, want)
+	}
+	read, errRead := ReadViews(path)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if got, _ := json.Marshal(read); string(got) != want {
+		t.Fatalf("read back %s, want %s", got, want)
+	}
 }
 
 func TestViewsFileRoundTripModeAndAtomicity(t *testing.T) {
@@ -104,7 +293,7 @@ func TestViewsFileRoundTripModeAndAtomicity(t *testing.T) {
 	if errRead != nil {
 		t.Fatal(errRead)
 	}
-	if data, _ := json.Marshal(empty); string(data) != `{"views":[],"default":""}` {
+	if data, _ := json.Marshal(empty); string(data) != `{"views":[],"default":"","deleted":[],"revision":0}` {
 		t.Fatalf("empty views = %s", data)
 	}
 
@@ -112,7 +301,7 @@ func TestViewsFileRoundTripModeAndAtomicity(t *testing.T) {
 	if errDecode != nil {
 		t.Fatal(errDecode)
 	}
-	stored, errWrite := WriteViews(path, views)
+	stored, errWrite := SaveViews(path, 0, views)
 	if errWrite != nil {
 		t.Fatal(errWrite)
 	}
@@ -143,7 +332,7 @@ func TestViewsFileRoundTripModeAndAtomicity(t *testing.T) {
 	if errMkdir := os.Mkdir(path+".tmp", 0o700); errMkdir != nil {
 		t.Fatal(errMkdir)
 	}
-	if _, errWrite := WriteViews(path, DashboardViews{Views: []DashboardView{}}); errWrite == nil {
+	if _, errWrite := SaveViews(path, 1, DashboardViews{Views: []DashboardView{}}); errWrite == nil {
 		t.Fatal("write through a blocked temporary file succeeded")
 	}
 	again, errRead := ReadViews(path)
@@ -155,7 +344,7 @@ func TestViewsFileRoundTripModeAndAtomicity(t *testing.T) {
 	}
 
 	// An invalid set is never written.
-	if _, errWrite := WriteViews(filepath.Join(dir, "other.json"), DashboardViews{}); errWrite == nil {
+	if _, errWrite := SaveViews(filepath.Join(dir, "other.json"), 0, DashboardViews{}); errWrite == nil {
 		t.Fatal("nil views written")
 	}
 	if _, errStat := os.Stat(filepath.Join(dir, "other.json")); !os.IsNotExist(errStat) {
@@ -189,7 +378,7 @@ func TestViewsPathSitsNextToStatsFile(t *testing.T) {
 func largestValidViews(t *testing.T) []byte {
 	t.Helper()
 	types := []string{"allowance", "available", "tokens", "cost", "requests", "output", "cache", "ttft", "latency", "throughput", "failures", "activity"}
-	views := DashboardViews{Default: strings.Repeat("v", 38) + "00"}
+	views := DashboardViews{Default: strings.Repeat("v", 38) + "00", Deleted: []DeletedView{}, Revision: 1}
 	for i := 0; i < MaxViews; i++ {
 		view := DashboardView{
 			ID:       fmt.Sprintf("%s%02d", strings.Repeat("v", 38), i),
@@ -234,7 +423,7 @@ func TestLargestValidViewsSaveAndReadBack(t *testing.T) {
 		t.Fatalf("largest valid body refused: %v", errDecode)
 	}
 	path := filepath.Join(t.TempDir(), ViewsFileName)
-	stored, errWrite := WriteViews(path, views)
+	stored, errWrite := SaveViews(path, 0, views)
 	if errWrite != nil {
 		t.Fatal(errWrite)
 	}
@@ -259,7 +448,7 @@ func TestLargestValidViewsSaveAndReadBack(t *testing.T) {
 	if errDecode != nil {
 		t.Fatal(errDecode)
 	}
-	if _, errWrite := WriteViews(path, escaped); errWrite != nil {
+	if _, errWrite := SaveViews(path, 1, escaped); errWrite != nil {
 		t.Fatal(errWrite)
 	}
 	back, errRead := ReadViews(path)

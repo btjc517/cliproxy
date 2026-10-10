@@ -1,8 +1,10 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -89,8 +91,31 @@ func (s *Server) dashboardViewsAllowed(c *gin.Context) bool {
 	return true
 }
 
+// viewsETag is the entity tag of a views revision: the number in quotes.
+func viewsETag(revision int64) string {
+	return `"` + strconv.FormatInt(revision, 10) + `"`
+}
+
+// parseViewsIfMatch reads an If-Match value as a views revision: a number in
+// quotes, such as "3", or the bare number. Anything else is not a revision.
+func parseViewsIfMatch(value string) (int64, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+	}
+	if value == "" || strings.TrimLeft(value, "0123456789") != "" {
+		return 0, false
+	}
+	revision, errParse := strconv.ParseInt(value, 10, 64)
+	if errParse != nil {
+		return 0, false
+	}
+	return revision, true
+}
+
 // getDashboardViews returns the saved dashboard views:
-// {"views": [...], "default": "<id or empty>"}.
+// {"views": [...], "default": "<id or empty>", "deleted": [...],
+// "revision": N}, with the revision also as the ETag header.
 func (s *Server) getDashboardViews(c *gin.Context) {
 	if !s.dashboardViewsAllowed(c) {
 		return
@@ -106,12 +131,16 @@ func (s *Server) getDashboardViews(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "saved views file cannot be read"})
 		return
 	}
+	c.Header("ETag", viewsETag(views.Revision))
 	c.JSON(http.StatusOK, views)
 }
 
 // putDashboardViews replaces the saved dashboard views with the request body,
-// after usagestats.DecodeViews checks it. Besides the read-only dashboard's
-// access rule it refuses a cross-origin browser request.
+// after usagestats.DecodeViews checks it, when the If-Match header names the
+// stored revision. Without If-Match it answers 428. When the revision moved
+// on, or If-Match is not a revision, it answers 409 with the current
+// revision and document. Besides the read-only dashboard's access rule it
+// refuses a cross-origin browser request.
 func (s *Server) putDashboardViews(c *gin.Context) {
 	if !s.dashboardViewsAllowed(c) {
 		return
@@ -125,16 +154,37 @@ func (s *Server) putDashboardViews(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "saved views need a usage stats file"})
 		return
 	}
+	ifMatch := c.GetHeader("If-Match")
+	if ifMatch == "" {
+		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "If-Match header required"})
+		return
+	}
 	views, errDecode := usagestats.DecodeViews(c.Request.Body)
 	if errDecode != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errDecode.Error()})
 		return
 	}
-	stored, errWrite := usagestats.WriteViews(path, views)
-	if errWrite != nil {
-		log.Errorf("dashboard: save views: %v", errWrite)
+	// A value that is not a revision matches no revision.
+	ifRevision, ok := parseViewsIfMatch(ifMatch)
+	if !ok {
+		ifRevision = -1
+	}
+	stored, errSave := usagestats.SaveViews(path, ifRevision, views)
+	var conflict *usagestats.ViewsConflictError
+	if errors.As(errSave, &conflict) {
+		c.Header("ETag", viewsETag(conflict.Current.Revision))
+		c.JSON(http.StatusConflict, gin.H{
+			"error":    "views changed since you loaded them",
+			"revision": conflict.Current.Revision,
+			"current":  conflict.Current,
+		})
+		return
+	}
+	if errSave != nil {
+		log.Errorf("dashboard: save views: %v", errSave)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "saved views could not be written"})
 		return
 	}
+	c.Header("ETag", viewsETag(stored.Revision))
 	c.JSON(http.StatusOK, stored)
 }
