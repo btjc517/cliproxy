@@ -181,7 +181,7 @@ function proxyData(url) {
   const now = Date.now();
   const t = (k) => (P.get(k) ? Date.parse(P.get(k)) : NaN);
   const usage = {}, perf = { range: 'custom', ranges: ['24h', '7d'], scopes: {} };
-  const counters = () => ({ requests: 3, failed: 0, input_tokens: 1000, output_tokens: 200, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 });
+  const counters = () => ({ requests: 3, failed: 0, input_tokens: proxy.tokens, output_tokens: 200, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 });
   const us = t('usage_start'), ue = t('usage_end');
   if (Number.isFinite(us)) {
     const from = Number.isFinite(t('usage_pad_start')) ? Math.max(t('usage_pad_start'), us - (ue - us)) : us;
@@ -206,7 +206,8 @@ function proxyData(url) {
   return { accounts: [{ id: 'a', provider: 'claude', email: 'a@x' }], server: { host: 'test' }, summary: { history: { days: [] }, usage_range: usage, performance: perf } };
 }
 
-const proxy = { calls: [], hold: false, waiting: [] };
+// tokens: the input tokens in every usage bucket, so a test can change the data.
+const proxy = { calls: [], hold: false, waiting: [], tokens: 1000 };
 const reply = (body) => ({ ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(body)) });
 globalThis.fetch = (url, init = {}) => {
   if (String(url).startsWith('/dashboard/views')) return Promise.resolve(reply({ views: [], default: '', deleted: [], revision: 1 }));
@@ -310,6 +311,48 @@ test('the swap keeps the visible window and selection', async () => {
   const overlay = el.children.find((c) => c.classList.contains('trange'));
   assert.equal(overlay?.hidden, false, 'the selection is still drawn');
   ts().setRange(null);
+});
+
+const tsTv = () => timeState('tv', { defaultWindow: (now) => ({ start: now - 7 * DAY, end: now }), loads: true });
+const WIDE = () => ({ start: Date.now() - 12 * DAY, end: Date.now() });
+
+test('a remembered reply queued for a frame never lands under a newer window', async () => {
+  // A: the default week, in hourly performance buckets. B: twelve days, in
+  // three-hour ones.
+  tsTv().setWindow(tsTv().defaultWindow());
+  await run(400);
+  tsTv().setWindow(WIDE());
+  await run(400);
+  assert.equal(S.data.summary.performance.bucket_seconds, 3 * 3600, 'B is on screen');
+  // Back to A: its reply is remembered, and goes on screen in the next frame.
+  tsTv().setWindow(tsTv().defaultWindow());
+  mock.timers.tick(150);
+  await settleMicro();
+  // Before that frame runs, back to B, which the reply on screen draws.
+  tsTv().setWindow(WIDE());
+  // The queued frame has run; B's own settle has not.
+  await run(64);
+  assert.ok(tv().win, 'B is the window');
+  assert.equal(S.data.summary.performance.bucket_seconds, 3 * 3600, "A's reply did not replace B's");
+  await run(400);
+  assert.equal(S.data.summary.performance.bucket_seconds, 3 * 3600, 'B stays on screen');
+});
+
+test('a hover under a held pointer shows the new data once it arrives', async () => {
+  await run(400);
+  const p = plots()[0];
+  p.fire('pointermove', { clientX: 900, pointerType: 'mouse' });
+  const chip = () => p.children.find((c) => c.className === 'tx-chip')?.textContent;
+  const before = chip();
+  assert.ok(before, 'the hover shows a figure');
+  // The regular refresh brings more usage while the pointer stays put.
+  proxy.tokens = 50000;
+  window.dispatchEvent(new Event('dash:refresh'));
+  await run(64);
+  assert.equal(S.data.summary.usage_range.accounts.a[0].input_tokens, 50000, 'the new reply is on screen');
+  assert.notEqual(chip(), before, 'the hover figure follows the new data');
+  p.fire('pointerleave');
+  proxy.tokens = 1000;
 });
 
 test.after(() => mock.timers.reset());

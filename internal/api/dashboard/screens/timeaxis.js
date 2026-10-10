@@ -370,6 +370,9 @@ export function bindTime(root, group) {
   }
   let win = group.window, range = group.range ? { ...group.range } : null;
   let held = false, hoverPlot = null, drag = null;
+  // Where the mouse last hovered a plot, so a redraw can show the hover
+  // again from the new data without waiting for the pointer to move.
+  let pointerAt = null;
   const pointers = new Map();
   const hold = (on) => {
     if (on && !held) { S.hold++; held = true; }
@@ -517,6 +520,7 @@ export function bindTime(root, group) {
     p.addEventListener("pointermove", (e) => {
       if (drag || pointers.size) return;
       if (e.pointerType === "touch") return;
+      pointerAt = { plot: p, x: e.clientX };
       showHover(timeOf(p, e.clientX), p);
     });
     p.addEventListener("pointerleave", () => { if (!drag) clearHover(); });
@@ -654,6 +658,8 @@ export function bindTime(root, group) {
   // A redraw that keeps the plots hands the controller the screen's new
   // group: its probes, grid and setters read the new data. The window it
   // holds stays while a frame is still to be drawn, as that one is newer.
+  // A hover still showing is drawn again at the pointer from the new data
+  // and selection, so its chips, card and dots never show the old figures.
   plots[0]._time = {
     plots,
     clearHover,
@@ -662,6 +668,7 @@ export function bindTime(root, group) {
       if (!frame) win = next.window;
       if (!drag) range = next.range ? { ...next.range } : null;
       drawRange(range);
+      if (hoverPlot && pointerAt && !drag && pointerAt.plot.isConnected) showHover(timeOf(pointerAt.plot, pointerAt.x), pointerAt.plot);
     },
   };
   return clearHover;

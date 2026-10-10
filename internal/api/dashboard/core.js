@@ -369,7 +369,7 @@ function request(query) {
   return me.promise;
 }
 
-function apply(w, data, at = Date.now()) {
+function install(w, data, at) {
   S.data = data;
   reconcileSelection();
   S.dataRange = w.range;
@@ -384,9 +384,24 @@ function apply(w, data, at = Date.now()) {
 
 let started = 0, applied = 0;
 
-// Whether a reply for w, arriving now, should go on screen: it is for what
-// the screen wants, or it draws that.
+// Whether a reply for w should go on screen now: it is for what the screen
+// wants, or it draws that.
 const stillWanted = (w, data) => { const now = wanted(); return now.query === w.query || covers(now, Date.now(), loadedFor(w, data)); };
+
+// The one way a reply goes on screen, from the network or from the cache
+// alike. my is the number its load took when it started; at is when the
+// reply was read. Checked at the moment of applying, as the window may have
+// moved since the load started or since its frame was asked for: a reply
+// older than one already shown, a remembered one gone stale, or one that
+// does not draw what the screen now wants is dropped. True when applied.
+function applyReply(my, w, data, at) {
+  if (data == null || my < applied) return false;
+  if (Date.now() - at > CACHE_FRESH) return false;
+  if (!stillWanted(w, data)) return false;
+  applied = my;
+  install(w, data, at);
+  return true;
+}
 
 // Loads /dashboard/data for the current route, with the margin around its
 // windows. A reply that arrives after a newer one, or after the route moved
@@ -395,9 +410,7 @@ export async function fetchData() {
   const w = wanted();
   const my = ++started;
   const data = await request(w.query);
-  if (data == null || my < applied || !stillWanted(w, data)) return;
-  applied = my;
-  apply(w, data);
+  applyReply(my, w, data, Date.now());
 }
 
 // The next frame while the page shows, else a timer, so a hidden tab still
@@ -421,18 +434,15 @@ export function windowMoved(redraw = patchEvent) {
 export async function settle(redraw = patchEvent) {
   if (!S.data || dataCurrent()) return;
   const w = wanted();
-  const hit = cached(w.query);
-  if (hit) { nextFrame(() => { apply(w, hit.data, hit.at); redraw(); }); return; }
   const my = ++started;
-  let data;
-  try { data = await request(w.query); } catch (e) { return; }
-  if (data == null || my < applied) return;
-  nextFrame(() => {
-    if (my < applied || !stillWanted(w, data)) return;
-    applied = my;
-    apply(w, data);
-    redraw();
-  });
+  const hit = cached(w.query);
+  let data = hit?.data, at = hit?.at;
+  if (!hit) {
+    try { data = await request(w.query); } catch (e) { return; }
+    at = Date.now();
+    if (data == null || my < applied) return;
+  }
+  nextFrame(() => { if (applyReply(my, w, data, at)) redraw(); });
 }
 
 export function setKey(k) {
