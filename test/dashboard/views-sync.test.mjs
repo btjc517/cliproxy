@@ -85,12 +85,13 @@ const names = (doc) => doc.views.map((x) => x.name);
 function fresh() {
   mem.clear();
   for (const t of [tabA, tabB]) {
-    Object.assign(t.V, { loading: null, loaded: false, where: '', note: '', notice: '', doc: null, store: cleanStore({}) });
+    Object.assign(t.V, { loading: null, loaded: false, note: '', notice: '', unsaved: false, doc: null, store: cleanStore({}) });
     t._test.reset();
   }
 }
 let n = 0;
 const rand = () => ((n++ * 7919) % 1000) / 1000;
+const offline = async () => { throw new Error('offline'); };
 
 test('saves from one tab that overlap both land, one after the other', async () => {
   fresh();
@@ -103,10 +104,10 @@ test('saves from one tab that overlap both land, one after the other', async () 
   assert.deepEqual(await Promise.all([first, second]), ['server', 'server']);
   assert.deepEqual(names(srv.doc), ['View A', 'View B']);
   assert.equal(srv.conflicts, 0, 'the second save waited for the first');
-  assert.equal(tabA._test.readPending().length, 0);
+  assert.deepEqual(tabA._test.pending(), []);
 });
 
-test('two tabs saving at the same moment both land: the later one merges again after a 409', async () => {
+test('two tabs saving at the same moment both land: the later one applies its change again after a 409', async () => {
   fresh();
   const srv = contractServer([v('v-old', 'Old', 1000)]);
   await tabA.loadViews(srv.fetch);
@@ -118,128 +119,139 @@ test('two tabs saving at the same moment both land: the later one merges again a
   assert.deepEqual(names(srv.doc).sort(), ['From A', 'From B', 'Old']);
   assert.ok(srv.conflicts >= 1, 'the stores raced and one got a 409');
   assert.equal(srv.puts, 2);
-  // Each tab now holds the revision the proxy last gave it, exactly as sent.
   assert.ok([tabA.V.doc.revision, tabB.V.doc.revision].includes(srv.doc.revision));
   assert.equal(tabA.V.notice + tabB.V.notice, '', 'nothing was lost, so no note');
 });
 
-test('an offline rename does not overwrite a newer rename made elsewhere', async () => {
+test('a stale tab changing one field keeps the rename another tab saved', async () => {
+  fresh();
+  const srv = contractServer([v('v-x', 'Original', 1000)]);
+  await tabA.loadViews(srv.fetch);
+  await tabB.loadViews(srv.fetch);
+  // Tab A renames and saves.
+  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'Renamed in A'), srv.fetch), 'server');
+  // Tab B, still showing the original name, changes the window.
+  const edited = saveView(tabB.V.store, { ...findView(tabB.V.store, 'v-x'), window: 'last24h' });
+  assert.equal(await tabB.persist(edited, srv.fetch), 'server');
+  assert.deepEqual([srv.doc.views[0].name, srv.doc.views[0].window], ['Renamed in A', 'last24h']);
+  assert.equal(findView(tabB.V.store, 'v-x').name, 'Renamed in A', 'tab B now shows the rename');
+  assert.equal(tabA.V.notice + tabB.V.notice, '');
+});
+
+test('two browsers renaming one view in the same millisecond: the later save is written, not taken as done', async () => {
   fresh();
   const srv = contractServer([v('v-x', 'Start', 1000)]);
   await tabA.loadViews(srv.fetch);
-  srv.down = true;
-  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'Mine'), srv.fetch, 1500), 'local');
-  srv.down = false;
-  srv.elsewhere((d) => { d.views[0].name = 'Elsewhere'; d.views[0].updated_at = 2000; });
-  // The tab reloads once back online and sends what waited.
-  tabA.V.loading = null;
-  await tabA.loadViews(srv.fetch);
-  assert.deepEqual(names(srv.doc), ['Elsewhere']);
-  assert.equal(findView(tabA.V.store, 'v-x').name, 'Elsewhere');
-  assert.equal(tabA.V.notice, 'Start changed elsewhere, your edit was not saved', 'named as it was on screen before the edit');
-  assert.equal(tabA._test.readPending().length, 0, 'the lost edit is not retried');
+  await tabB.loadViews(srv.fetch);
+  // The same clock reading for both edits.
+  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'From A'), srv.fetch, 5000), 'server');
+  assert.equal(await tabB.persist(renameView(tabB.V.store, 'v-x', 'From B'), srv.fetch, 5000), 'server');
+  assert.deepEqual(names(srv.doc), ['From B']);
+  assert.equal(srv.puts, 2);
+  assert.equal(findView(tabB.V.store, 'v-x').name, 'From B');
 });
 
-test('a stale tab cannot bring back a view deleted elsewhere', async () => {
+test('a save is sent even when browser storage refuses writes, and nothing is stored there', async () => {
+  fresh();
+  const srv = contractServer([v('v-x', 'Start', 1000)]);
+  const set = globalThis.localStorage.setItem;
+  globalThis.localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  try {
+    await tabA.loadViews(srv.fetch);
+    assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'Saved anyway'), srv.fetch), 'server');
+    assert.equal(srv.puts, 1);
+    assert.deepEqual(names(srv.doc), ['Saved anyway']);
+  } finally {
+    globalThis.localStorage.setItem = set;
+  }
+  assert.equal(mem.size, 0);
+});
+
+test('a save that cannot reach the proxy is kept in memory only, says so, and goes up on retry', async () => {
+  fresh();
+  const srv = contractServer([v('v-x', 'Start', 1000)]);
+  await tabA.loadViews(srv.fetch);
+  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'Waiting'), offline), 'failed');
+  assert.equal(tabA.V.unsaved, true);
+  assert.equal(findView(tabA.V.store, 'v-x').name, 'Waiting', 'the tab still shows the edit');
+  assert.equal(tabA._test.pending().length, 1);
+  assert.equal(mem.size, 0, 'nothing in browser storage');
+  // A reload would start empty: nothing is replayed from storage.
+  fresh();
+  await tabA.loadViews(srv.fetch);
+  assert.equal(findView(tabA.V.store, 'v-x').name, 'Start');
+  // In the same tab, Retry sends it.
+  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'Waiting'), offline), 'failed');
+  assert.equal(await tabA.retrySaves(srv.fetch), 'server');
+  assert.deepEqual(names(srv.doc), ['Waiting']);
+  assert.equal(tabA.V.unsaved, false);
+  assert.deepEqual(tabA._test.pending(), []);
+});
+
+test('an edit to a view deleted elsewhere is dropped with the conflict note', async () => {
   fresh();
   const srv = contractServer([v('v-x', 'Doomed', 1000), v('v-y', 'Other', 1000)]);
   await tabA.loadViews(srv.fetch);
   srv.elsewhere((d) => { d.views = d.views.filter((x) => x.id !== 'v-x'); d.deleted.push({ id: 'v-x', updated_at: 3000 }); });
   const edited = saveView(tabA.V.store, { ...findView(tabA.V.store, 'v-x'), window: 'last24h' });
-  assert.equal(await tabA.persist(edited, srv.fetch, 2500), 'server');
+  assert.equal(await tabA.persist(edited, srv.fetch), 'server');
   assert.deepEqual(names(srv.doc), ['Other']);
   assert.equal(findView(tabA.V.store, 'v-x'), null);
-  assert.match(tabA.V.notice, /^Doomed changed elsewhere/);
-  // An edit to a view nobody else touched still lands.
-  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-y', 'Renamed'), srv.fetch, 2600), 'server');
-  assert.deepEqual(names(srv.doc), ['Renamed']);
+  assert.equal(tabA.V.notice, 'Doomed changed elsewhere, your edit was not saved');
+  // Picking a deleted view as the default loses the same way.
+  tabA.V.store = { ...tabA.V.store, views: [...tabA.V.store.views, cleanStore({ views: [v('v-x', 'Doomed')] }).views[0]] };
+  assert.equal(await tabA.persist(setDefault(tabA.V.store, 'v-x'), srv.fetch), 'server');
+  assert.equal(srv.doc.default, '');
+  assert.equal(tabA.V.notice, 'The default view changed elsewhere, your edit was not saved');
 });
 
-test('deleting the old default keeps a newer default chosen elsewhere, and a stale default change loses', async () => {
+test('deleting the old default keeps a newer default chosen elsewhere', async () => {
   fresh();
-  const srv = contractServer([v('v-x', 'X', 1000), v('v-y', 'Y', 1000), v('v-z', 'Z', 1000), v('v-w', 'W', 1000)], { default: 'v-x' });
+  const srv = contractServer([v('v-x', 'X', 1000), v('v-y', 'Y', 1000)], { default: 'v-x' });
   await tabA.loadViews(srv.fetch);
   srv.elsewhere((d) => { d.default = 'v-y'; });
-  assert.equal(await tabA.persist(deleteView(tabA.V.store, 'v-x'), srv.fetch, 2000), 'server');
-  assert.deepEqual(names(srv.doc), ['Y', 'Z', 'W']);
+  assert.equal(await tabA.persist(deleteView(tabA.V.store, 'v-x'), srv.fetch), 'server');
+  assert.deepEqual(names(srv.doc), ['Y']);
   assert.equal(srv.doc.default, 'v-y');
-  assert.equal(tabA.V.notice, '');
-  // This tab now shows Y as the default. Another browser picks Z, then this
-  // tab, not having seen that, picks W: the newer choice stays.
-  srv.elsewhere((d) => { d.default = 'v-z'; });
-  assert.equal(await tabA.persist(setDefault(tabA.V.store, 'v-w'), srv.fetch, 2100), 'server');
-  assert.equal(srv.doc.default, 'v-z');
-  assert.equal(tabA.V.store.default, 'v-z');
-  assert.equal(tabA.V.notice, 'The default view changed elsewhere, your edit was not saved');
-  // Picking again, from the copy that now shows Z, works.
-  assert.equal(await tabA.persist(setDefault(tabA.V.store, 'v-w'), srv.fetch, 2200), 'server');
-  assert.equal(srv.doc.default, 'v-w');
+  assert.deepEqual(srv.doc.deleted.map((d) => d.id), ['v-x']);
 });
 
-test('a save that finishes clears only its own changes, not another one still waiting', async () => {
+test('a 409 that keeps coming is tried three times, then the change waits for a retry', async () => {
   fresh();
-  const srv = contractServer([]);
-  await tabA.loadViews(srv.fetch);
-  await tabB.loadViews(srv.fetch);
-  // Tab A's save is on its way: its PUT is held.
-  const release = srv.hold();
-  const a = saveAsNew(tabA.V.store, findView(tabA.V.store, 'usage'), 'From A', { rand });
-  const sending = tabA.persist(a.store, srv.fetch);
-  await tick(); await tick();
-  // Tab B cannot reach the proxy: its change waits in this browser.
-  const offline = async () => { throw new Error('offline'); };
-  const b = saveAsNew(tabB.V.store, findView(tabB.V.store, 'usage'), 'From B', { rand });
-  assert.equal(await tabB.persist(b.store, offline), 'local');
-  release();
-  assert.equal(await sending, 'server');
-  const waiting = tabB._test.readPending();
-  assert.equal(waiting.length, 1, "tab B's change still waits");
-  assert.equal(waiting[0].view.name, 'From B');
-  // Tab B's next attempt sends it.
-  tabB.V.loading = null;
-  await tabB.loadViews(srv.fetch);
-  assert.deepEqual(names(srv.doc), ['From A', 'From B']);
-  assert.equal(tabB._test.readPending().length, 0);
-});
-
-test('a 409 that keeps coming is retried three times, then the changes wait', async () => {
-  fresh();
-  const srv = contractServer([]);
+  const srv = contractServer();
   await tabA.loadViews(srv.fetch);
   const busy = async (url, init = {}) => {
     if (init.method === 'PUT') srv.elsewhere(() => {});
     return srv.fetch(url, init);
   };
   const a = saveAsNew(tabA.V.store, findView(tabA.V.store, 'usage'), 'Busy', { rand });
-  assert.equal(await tabA.persist(a.store, busy), 'local');
-  assert.equal(srv.conflicts, 4, 'one try and three retries');
-  assert.equal(tabA._test.readPending().length, 1);
-  assert.equal(await tabA.persist(tabA.V.store, srv.fetch), 'local', 'nothing new to send');
+  assert.equal(await tabA.persist(a.store, busy), 'failed');
+  assert.equal(srv.conflicts, 3);
+  assert.equal(tabA._test.pending().length, 1);
+  assert.equal(await tabA.retrySaves(srv.fetch), 'server');
+  assert.deepEqual(names(srv.doc), ['Busy']);
 });
 
-test('a name the proxy would refuse is never queued, and a refused save does not block later ones', async () => {
+test('a name the proxy would refuse is never sent, and a refused save does not block later ones', async () => {
   fresh();
   assert.equal(tabA.nameError('x'.repeat(61)), 'View names can be up to 60 characters.');
   assert.equal(tabA.nameError('é'.repeat(60)), '');
   assert.equal(tabA.nameError('  '), 'Give the view a name.');
   const srv = contractServer([v('v-x', 'Short', 1000)]);
   await tabA.loadViews(srv.fetch);
-  // Even if a long name gets past the field, what is sent fits.
-  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'y'.repeat(61)), srv.fetch, 2000), 'server');
+  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'y'.repeat(61)), srv.fetch), 'server');
   assert.equal(srv.doc.views[0].name, 'y'.repeat(60));
-  assert.equal(tabA._test.readPending().length, 0);
-  // A save the proxy refuses is dropped with a note, so the next one goes up.
   const refuse = async (url, init = {}) => (init.method === 'PUT' ? reply(400, { error: 'views[0]: something new' }) : srv.fetch(url, init));
-  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'Refused'), refuse, 2100), 'rejected');
+  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'Refused'), refuse), 'rejected');
   assert.equal(tabA.V.notice, 'Views were not saved: views[0]: something new');
-  assert.equal(tabA._test.readPending().length, 0);
-  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'Later'), srv.fetch, 2200), 'server');
+  assert.deepEqual(tabA._test.pending(), []);
+  assert.equal(await tabA.persist(renameView(tabA.V.store, 'v-x', 'Later'), srv.fetch), 'server');
   assert.equal(srv.doc.views[0].name, 'Later');
 });
 
-test('revisions go back exactly as received, quoted, and a default change compares them only for equality', async () => {
+test('revisions go back exactly as received, quoted', async () => {
   fresh();
-  const srv = contractServer([v('v-x', 'X', 1000), v('v-y', 'Y', 1000), v('v-z', 'Z', 1000)]);
+  const srv = contractServer([v('v-x', 'X', 1000), v('v-y', 'Y', 1000)]);
   const seen = [];
   const watch = (url, init = {}) => { if (init.method === 'PUT') seen.push(init.headers['If-Match']); return srv.fetch(url, init); };
   await tabA.loadViews(watch);
@@ -247,12 +259,11 @@ test('revisions go back exactly as received, quoted, and a default change compar
   assert.equal(await tabA.persist(setDefault(tabA.V.store, 'v-y'), watch), 'server');
   assert.deepEqual(seen, [`"${read}"`]);
   assert.equal(tabA.V.doc.revision, srv.doc.revision);
-  // A revision lower than the one the tab read still means the store moved on.
-  srv.elsewhere((d) => { d.default = 'v-x'; });
-  srv.doc.revision = read - 5000;
-  assert.equal(await tabA.persist(setDefault(tabA.V.store, 'v-z'), watch), 'server');
+  // The next save reads the revision afresh rather than counting on.
+  srv.elsewhere(() => {});
+  assert.equal(await tabA.persist(setDefault(tabA.V.store, 'v-x'), watch), 'server');
+  assert.equal(srv.conflicts, 0);
   assert.equal(srv.doc.default, 'v-x');
-  assert.match(tabA.V.notice, /^The default view changed elsewhere/);
 });
 
 test('a damaged store is replaced from the fresh revision its 409 gives', async () => {
@@ -260,7 +271,7 @@ test('a damaged store is replaced from the fresh revision its 409 gives', async 
   const srv = contractServer([v('v-x', 'Lost', 1000)]);
   srv.damaged = true;
   await tabA.loadViews(srv.fetch);
-  assert.equal(tabA.V.where, 'server', 'the 409 to If-Match "0" gave a document to build on');
+  assert.equal(tabA.V.note, '', 'the 409 to If-Match "0" gave a document to build on');
   assert.deepEqual(tabA.V.store.views, []);
   const a = saveAsNew(tabA.V.store, findView(tabA.V.store, 'usage'), 'After repair', { rand });
   assert.equal(await tabA.persist(a.store, srv.fetch), 'server');
@@ -277,7 +288,7 @@ test('a damaged store is replaced from the fresh revision its 409 gives', async 
   };
   fresh();
   await tabA.loadViews(legacy);
-  assert.equal(tabA.V.where, 'local');
+  assert.match(tabA.V.note, /could not be loaded/);
   assert.deepEqual(writes, []);
 });
 

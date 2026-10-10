@@ -12,7 +12,7 @@ import { PANELS, panelHtml, buildPanel, panelContext, snapGrid, allowanceLines, 
 import { usageFigures, perfFigures, historyBefore } from "./series.js";
 import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backToNow, zoomHint, endText } from "./timeaxis.js";
 import { V, COLUMN_IDS, findView, defaultId, sameView, viewWindow, hasForecast, loadViews } from "./views.js";
-import { openDisplay, displayOpen, startRename, renameBox, mountRename, setDefaultView, saveDraft, newViewDialog } from "./viewmenus.js";
+import { openDisplay, displayOpen, startRename, renameBox, mountRename, setDefaultView, saveDraft, newViewDialog, viewMenu } from "./viewmenus.js";
 
 const KEY = "tv";
 const copy = (v) => JSON.parse(JSON.stringify(v));
@@ -248,6 +248,10 @@ export function tableHtml(view, ctx) {
 
 const STAR = (on) => `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="${"M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"}"/></svg>`;
 
+// The view's options (rename, duplicate, delete) in the header, for narrow
+// screens where the sidebar's options button is hidden.
+const MORE = `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${[3.5, 8, 12.5].map((x) => `<circle cx="${x}" cy="8" r="1.25" fill="var(--icon)"/>`).join("")}</svg>`;
+
 export function view(ctx) {
   const id = ctx.params[0];
   if (!V.loaded) loadViews().then(rerender);
@@ -268,7 +272,7 @@ export function view(ctx) {
   const name = renameBox(v.id) ?? `<span class="vname" data-rename tabindex="0" role="button" title="Rename this view">${esc(v.name)}</span>`;
   const html = `
     <div class="tbar">
-      <div class="l">${name}<button class="star ${isDefault ? "on" : ""}" data-star aria-pressed="${isDefault}" aria-label="${isDefault ? "Default view" : "Set as default view"}" title="${isDefault ? "Opens first under Telemetry" : "Set as default view"}">${STAR(isDefault)}</button></div>
+      <div class="l">${name}<button class="star ${isDefault ? "on" : ""}" data-star aria-pressed="${isDefault}" aria-label="${isDefault ? "Default view" : "Set as default view"}" title="${isDefault ? "Opens first under Telemetry" : "Set as default view"}">${STAR(isDefault)}</button><button class="vopts" data-vopts data-anchor="vopts-${esc(v.id)}" aria-label="${esc(v.name)} options" aria-haspopup="menu">${MORE}</button></div>
       <div class="r">
         <span class="wlabel">${esc(windowText(ts.window, base.now))}</span>
         ${ts.moved ? backToNow("data-home") : ""}
@@ -319,6 +323,8 @@ export function view(ctx) {
       if (home) home.onclick = () => { ts.setRange(null); ts.setWindow(ts.defaultWindow()); };
       root.querySelector("[data-display]").onclick = (e) => openDisplay(e.currentTarget, v.id);
       root.querySelector("[data-star]").onclick = () => setDefaultView(v.id);
+      const opts = root.querySelector("[data-vopts]");
+      if (opts) opts.onclick = () => viewMenu(opts, v.id);
       const nm = root.querySelector("[data-rename]");
       if (nm) {
         nm.ondblclick = () => startRename(v.id);

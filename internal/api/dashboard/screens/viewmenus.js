@@ -6,19 +6,39 @@ import { PANELS, PANEL_ORDER } from "./panels.js";
 import { forgetTime } from "./timeaxis.js";
 import {
   V, BUILTINS, COLUMN_IDS, WINDOWS, MAX_VIEWS, findView, isBuiltin, persist, saveView, saveAsNew, resetView, renameView, duplicateView,
-  deleteView, setDefault, viewHref, nameError, MAX_NAME,
+  deleteView, setDefault, viewHref, nameError, MAX_NAME, retrySaves,
 } from "./views.js";
 import { current, edit, dropDraft, COLUMNS } from "./telemetry.js";
 
 const rerender = () => window.dispatchEvent(new Event("dash:render"));
 const GRIP = `<svg width="12" height="16" viewBox="0 0 12 16" aria-hidden="true">${[[4, 4], [8, 4], [4, 8], [8, 8], [4, 12], [8, 12]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="1.25" fill="var(--icon)"/>`).join("")}</svg>`;
 
-// Stores the views and says where, once, when this browser had to keep them.
+// Saves the views. While a save has failed, a note stays with a retry; a
+// lost or refused change shows its own note from the save.
 async function commit(store) {
-  const where = await persist(store);
-  if (where === "local") toast("Saved in this browser only. The proxy could not store views.");
+  return settled(await persist(store));
+}
+
+function settled(where) {
+  unsavedNote(where === "failed");
   rerender();
   return where;
+}
+
+// "Not saved" with a Retry button, kept until the changes go up.
+export function unsavedNote(show) {
+  let el = document.querySelector(".toast.unsaved");
+  if (!show) { el?.remove(); return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "toast err unsaved";
+    el.setAttribute("role", "alert");
+    el.innerHTML = `<span>Not saved</span><button type="button" data-retry>Retry</button>`;
+    document.body.appendChild(el);
+  }
+  const b = el.querySelector("[data-retry]");
+  b.disabled = false;
+  b.onclick = async () => { b.disabled = true; settled(await retrySaves()); };
 }
 
 // ---------- saving ----------
@@ -69,7 +89,7 @@ function openPop(anchor, cls, draw, { onClose, alignLeft = false } = {}) {
     el.style.left = x + "px";
     el.style.top = y + "px";
   };
-  const away = (e) => { if (!el.contains(e.target) && !e.target.closest?.("[data-display], [data-vmore]")) closePop(); };
+  const away = (e) => { if (!el.contains(e.target) && !e.target.closest?.("[data-display], [data-vmore], [data-vopts]")) closePop(); };
   const key = (e) => { if (e.key === "Escape") { e.preventDefault(); closePop(); anchor.isConnected && anchor.focus(); } };
   pop = { el, away, key, close: closePop, onClose, draw: () => { draw(el); place(); } };
   document.addEventListener("mousedown", away, true);
@@ -332,7 +352,7 @@ export function viewMenu(anchor, id) {
   const v = findView(V.store, id);
   if (!v) return;
   const row = anchor.closest(".vrow");
-  anchor.dataset.anchor = "vmore-" + id;
+  anchor.dataset.anchor ||= "vmore-" + id;
   openPop(anchor, "vmenu", (box) => {
     box.setAttribute("role", "menu");
     box.innerHTML = `<button class="drow" role="menuitem" data-a="rename">${icon("pencil", 16)}<span class="nm">Rename</span></button>

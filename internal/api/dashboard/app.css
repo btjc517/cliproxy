@@ -633,6 +633,10 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .banner { margin: 12px 24px 0; padding: 8px 12px; border-radius: 8px; background: #F99C0014; color: var(--warn-text); font-size: 13px; }
 .toast { position: fixed; bottom: 24px; right: 24px; z-index: 50; padding: 10px 14px; border-radius: 10px; background: var(--popover); box-shadow: var(--popover-shadow); font-size: 13px; max-width: 360px; }
 .toast.err { color: var(--error-text); }
+.toast.unsaved { display: flex; align-items: center; gap: 12px; }
+.toast.unsaved button { height: 24px; padding: 0 8px; border-radius: 6px; font: inherit; font-weight: 500; color: var(--fg); background: var(--surface-2); }
+.toast.unsaved button:hover { background: var(--nav-on); }
+.toast.unsaved button:disabled { opacity: .5; }
 
 /* Phone and narrow screens */
 .only-narrow, .nav a.only-narrow { display: none; }
@@ -855,6 +859,8 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .tbar .star:hover { background: var(--surface-2); }
 .tbar .star path { fill: none; stroke: var(--icon); stroke-width: 1.5; stroke-linejoin: round; }
 .tbar .star.on path { fill: var(--fg); stroke: var(--fg); }
+.tbar .vopts { width: 24px; height: 24px; border-radius: 6px; display: none; align-items: center; justify-content: center; flex-shrink: 0; }
+.tbar .vopts:hover { background: var(--surface-2); }
 .tbar .r { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .tbar .wlabel { font-size: 13px; color: var(--muted-fg); white-space: nowrap; }
 .tbar .rename { height: 28px; padding: 0 6px; border: 0; border-radius: 6px; background: transparent; box-shadow: inset 0 0 0 1px var(--brand); font-size: 14px; font-weight: 500; outline: none; min-width: 120px; width: 240px; max-width: 100%; }
@@ -980,5 +986,7 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
   .readrow { padding: 16px; }
   .nav .vrow { flex-shrink: 0; }
   .nav .vrow .vmore { display: none !important; }
+  /* The sidebar's options are hidden here, so the open view's are in its header. */
+  .tbar .vopts { display: inline-flex; }
   .nav .vrow:hover > a { padding-right: 8px; }
 }

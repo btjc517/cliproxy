@@ -164,23 +164,24 @@ function fakeServer(body = { views: [], default: '' }) {
   };
   return s;
 }
-const resetViews = () => { V.loading = null; V.loaded = false; V.where = ''; V.note = ''; V.notice = ''; V.doc = null; V.store = empty(); store.clear(); _test.reset?.(); };
+const resetViews = () => { V.loading = null; V.loaded = false; V.note = ''; V.notice = ''; V.unsaved = false; V.doc = null; V.store = empty(); store.clear(); _test.reset(); };
 const named = (s) => s.views.map((v) => v.name);
 
-test('views load from the server, else from this browser with a note', async () => {
+test('views load from the server, else the built-in views show with a note', async () => {
   resetViews();
   const srv = fakeServer({ views: [{ id: 'v-1', name: 'Server view', panels: [{ type: 'cost' }], columns: [], window: 'last24h' }], default: 'v-1' });
   await loadViews(srv.fetch);
-  assert.equal(V.where, 'server');
   assert.equal(defaultId(V.store), 'v-1');
   assert.equal(V.note, '');
 
   resetViews();
-  _test.writeLocal(cleanStore({ views: [{ id: 'v-2', name: 'Local view', panels: [], columns: [], window: 'last7d' }] }));
+  // Views an earlier version of the page kept in this browser are not used.
+  store.set('cliproxy-dashboard-views', JSON.stringify({ views: [{ id: 'v-2', name: 'Local view', panels: [], columns: [], window: 'last7d' }], default: '' }));
   await loadViews(async () => { throw new Error('offline'); });
-  assert.equal(V.where, 'local');
-  assert.ok(findView(V.store, 'v-2'));
-  assert.match(V.note, /this browser/);
+  assert.equal(findView(V.store, 'v-2'), null);
+  assert.deepEqual(allViews(V.store).map((v) => v.id), ['allowance', 'usage', 'performance']);
+  assert.match(V.note, /could not be loaded/);
+  assert.equal(store.size, 0, 'nothing is kept in browser storage');
 });
 
 test('two tabs saving one after the other keep both views', async () => {
@@ -220,55 +221,6 @@ test('a proxy without revisions still gets overlapping saves from one tab one af
   assert.deepEqual(await Promise.all([first, persist(b.store, srv.fetch)]), ['server', 'server']);
   assert.deepEqual(named(srv.body), ['View A', 'View B']);
   for (const s of srv.sent) assert.equal(s.headers['If-Match'], undefined);
-});
-
-test('changes kept in this browser survive a reload and go up once the proxy takes them', async () => {
-  resetViews();
-  const srv = fakeServer({ views: [{ id: 'v-9', name: 'Old name', panels: [], columns: [], window: 'last7d' }], default: '' });
-  await loadViews(srv.fetch);
-  // The proxy stops storing views; a rename stays in this browser.
-  srv.down = true;
-  const where = await persist(renameView(V.store, 'v-9', 'New name'), srv.fetch);
-  assert.equal(where, 'local');
-  assert.match(V.note, /this browser/);
-  // Reload while still down: the rename shows.
-  V.loading = null; V.loaded = false; V.store = empty();
-  await loadViews(srv.fetch);
-  assert.equal(findView(V.store, 'v-9').name, 'New name');
-  assert.match(V.note, /this browser/);
-  // Reload once the proxy is back: the rename wins over the stored name and goes up.
-  srv.down = false;
-  V.loading = null; V.loaded = false; V.store = empty();
-  await loadViews(srv.fetch);
-  assert.equal(findView(V.store, 'v-9').name, 'New name');
-  assert.deepEqual(named(srv.body), ['New name']);
-  assert.equal(V.note, '');
-  assert.equal(store.has(_test.PENDING), false);
-  assert.equal(store.has(_test.LOCAL_STORE), false);
-});
-
-test('a failed upload keeps the waiting changes and the note', async () => {
-  resetViews();
-  const srv = fakeServer({ views: [{ id: 'v-9', name: 'Stored', panels: [], columns: [], window: 'last7d' }], default: '' });
-  _test.writeLocal(cleanStore({}));
-  store.set(_test.PENDING, JSON.stringify([{ op: 'set', id: 'v-9', view: { id: 'v-9', name: 'Waiting', panels: [], columns: [], window: 'last7d' } }]));
-  const fetchFn = async (url, init) => (init?.method === 'PUT' ? { ok: false, status: 503 } : srv.fetch(url, init));
-  await loadViews(fetchFn);
-  assert.equal(findView(V.store, 'v-9').name, 'Waiting');
-  assert.equal(_test.readPending().length, 1);
-  assert.match(V.note, /this browser/);
-});
-
-test('views an earlier version kept in this browser move to the server without removing others', async () => {
-  resetViews();
-  // The earlier version kept a bare store, with no list of operations.
-  store.set(_test.LOCAL_STORE, JSON.stringify(cleanStore({ views: [{ id: 'v-3', name: 'Kept', panels: [], columns: [], window: 'last7d' }] })));
-  const srv = fakeServer({ views: [{ id: 'v-4', name: 'On server', panels: [], columns: [], window: 'last7d' }], default: '' });
-  await loadViews(srv.fetch);
-  assert.equal(srv.puts, 1);
-  assert.deepEqual(named(srv.body), ['On server', 'Kept']);
-  assert.ok(findView(V.store, 'v-3'));
-  assert.equal(store.has(_test.LOCAL_STORE), false);
 });
 
 test('migration of the old Performance layout runs when views load', async () => {

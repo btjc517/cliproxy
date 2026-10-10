@@ -225,34 +225,44 @@ export function migrateLegacy(store, ui, p) {
 }
 
 // ---------- storage ----------
-// A save is a list of operations, one per view touched: set a view, delete
-// one, or set the default. Each records the version it was based on: the
-// view's updated_at, or for the default the document's revision. One queue
-// per tab sends them, oldest first. It reads the stored document, drops any
-// operation whose view changed elsewhere since its base (the stored version
-// wins and a note says so), applies the rest and writes the result back with
-// If-Match on the revision it read. A 409 means another save got in first:
-// the operations are merged again onto the document it returns, up to three
-// times. Operations wait in this browser until the proxy acknowledges them,
-// and only acknowledged ones are cleared.
+// Every change the viewer makes is an operation: create a view, update some
+// of its fields, delete it, or set the default. Operations live in this tab's
+// memory only. One save runs at a time: it reads the stored views and their
+// revision, applies the operations to that fresh copy and writes it back with
+// If-Match on the revision. A 409 means another save got in first, so the
+// same operations are applied again to the copy it returns, up to three tries
+// in all. The proxy's 200 is the acknowledgement. An operation whose view was
+// deleted elsewhere is dropped with a note; otherwise the last writer wins,
+// field by field. A save that cannot reach the proxy keeps its operations in
+// memory and says "Not saved", with a retry. Nothing is kept in browser
+// storage, so nothing stale can be replayed later.
 //
-// A proxy from before revisions sends none. It gets the earlier behaviour:
-// the operations applied on top of what it holds, with no version checks.
+// A proxy from before revisions sends none: the same save runs without
+// If-Match and without the newer fields.
 
-const PENDING = "cliproxy-dashboard-views-pending";
-const NOTE = "Views are saved in this browser only, as the proxy could not store them.";
-const MAX_DELETED = 200;
-const RETRIES = 3;
+const NOTE = "Saved views could not be loaded, so only the built-in views show.";
+const TRIES = 3;
+const FIELDS = ["name", "panels", "columns", "window", "accounts"];
+const OLD_KEYS = [LOCAL_STORE, "cliproxy-dashboard-views-pending"];
 
-// The changes that turn store a into store b. Deleting the default view
-// clears it as a side effect of the delete, so that is no change of its own:
-// a newer default chosen elsewhere then survives the delete.
-export function diffStores(a, b) {
+const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+// The operations that turn store a into store b. names: each view's name as
+// shown before the change, for the note if the change is lost. Deleting the
+// default view clears it as part of the delete, not as a change of its own,
+// so a newer default chosen elsewhere survives.
+export function opsFor(a, b) {
   const out = [];
   const before = new Map(a.views.map((v) => [v.id, v]));
   const after = new Map(b.views.map((v) => [v.id, v]));
-  for (const [id, v] of after) if (JSON.stringify(before.get(id)) !== JSON.stringify(v)) out.push({ op: "set", id, view: copy(v) });
-  for (const id of before.keys()) if (!after.has(id)) out.push({ op: "delete", id });
+  for (const [id, v] of after) {
+    const old = findView(a, id);
+    if (!old) { out.push({ op: "create", id, view: copy(v), name: v.name }); continue; }
+    const fields = {};
+    for (const f of FIELDS) if (!same(old[f], v[f])) fields[f] = copy(v[f]);
+    if (Object.keys(fields).length) out.push({ op: "update", id, fields, name: old.name });
+  }
+  for (const [id, v] of before) if (!after.has(id)) out.push({ op: "delete", id, name: v.name });
   const cleared = !b.default && a.default && before.has(a.default) && !after.has(a.default);
   if ((a.default || "") !== (b.default || "") && !cleared) out.push({ op: "default", id: b.default || "" });
   return out;
@@ -260,100 +270,64 @@ export function diffStores(a, b) {
 
 // The stored document as read from the proxy: the views (cleaned), each
 // view's updated_at, the deletions, and the revision, null from a proxy
-// without revisions.
+// without revisions. A revision is opaque: it is only sent back.
 export function readDoc(body) {
   const b = plainObject(body) || {};
   const store = cleanStore(b);
   const at = {};
   for (const raw of Array.isArray(b.views) ? b.views : []) {
-    if (plainObject(raw) && typeof raw.id === "string" && Number.isSafeInteger(raw.updated_at)) at[raw.id] = raw.updated_at;
+    if (plainObject(raw) && typeof raw.id === "string" && Number.isSafeInteger(raw.updated_at) && raw.updated_at > 0) at[raw.id] = raw.updated_at;
   }
   const deleted = [];
   for (const d of Array.isArray(b.deleted) ? b.deleted : []) {
-    if (plainObject(d) && typeof d.id === "string" && Number.isSafeInteger(d.updated_at) && !deleted.some((x) => x.id === d.id)) deleted.push({ id: d.id, updated_at: d.updated_at });
+    if (plainObject(d) && typeof d.id === "string" && Number.isSafeInteger(d.updated_at) && d.updated_at > 0 && !deleted.some((x) => x.id === d.id)) deleted.push({ id: d.id, updated_at: d.updated_at });
   }
-  return { store, at, deleted, revision: validRevision(b.revision) ? b.revision : null };
+  const rev = b.revision;
+  return { store, at, deleted, revision: Number.isSafeInteger(rev) || (typeof rev === "string" && rev) ? rev : null };
 }
 
-// A revision as the proxy sends it: an opaque number or string.
-function validRevision(r) {
-  return Number.isSafeInteger(r) || (typeof r === "string" && r !== "");
-}
-
-// The version of a view in a document: its updated_at while it exists, else
-// when it was deleted, else 0.
-function versionOf(doc, id) {
-  if (doc.store.views.some((v) => v.id === id)) return doc.at[id] || 0;
-  return doc.deleted.find((d) => d.id === id)?.updated_at || 0;
-}
-
-// Applies operations to a store with no checks, newest last. This is what
-// the tab shows while they wait, and what a proxy without revisions gets.
-export function applyChanges(store, changes) {
-  let views = store.views.slice(), def = store.default || "";
-  for (const c of changes || []) {
-    if (!plainObject(c) || typeof c.id !== "string") continue;
-    if (c.op === "set") {
-      const v = cleanView(c.view);
-      if (!v || v.id !== c.id) continue;
-      const i = views.findIndex((x) => x.id === c.id);
-      if (i >= 0) views[i] = v; else views.push(v);
-    } else if (c.op === "delete") {
-      views = views.filter((x) => x.id !== c.id);
-      if (def === c.id) def = "";
-    } else if (c.op === "default") def = c.id;
-  }
-  return cleanStore({ views, default: def });
-}
-
-// Merges operations into a document with revisions. An operation whose view
-// changed since its base, or was deleted since, is lost: the stored version
-// wins. So is a later operation on a view that lost, as it built on the lost
-// one. A default change is lost when the document moved on since its base and
-// another default was chosen meanwhile. An operation the document already
-// holds (another tab sent it) counts as done. Returns the merged document and
-// which operations were done and lost.
-export function mergeOps(doc, ops) {
+// Applies operations to a document. Returns the new document and the
+// operations that were lost because their view was deleted elsewhere.
+export function applyOps(doc, ops, now = Date.now()) {
   let views = doc.store.views.slice(), def = doc.store.default || "";
   const at = { ...doc.at };
   let deleted = doc.deleted.slice();
-  const done = [], lost = [], lostIds = new Set();
-  const version = (id) => versionOf({ store: { views }, at, deleted }, id);
+  const lost = [];
   for (const op of ops) {
-    if (op.op === "default") {
-      const moved = op.baseRev != null && doc.revision != null && doc.revision !== op.baseRev;
-      if (moved && def !== (op.baseDefault || "") && def !== op.id) { lost.push(op); continue; }
-      def = op.id;
-      done.push(op);
-      continue;
-    }
-    if (lostIds.has(op.id)) { lost.push(op); continue; }
-    const cur = version(op.id);
-    const live = views.some((v) => v.id === op.id);
-    if (op.at && cur === op.at) { done.push(op); continue; }
-    if (op.base != null) {
-      const vanished = op.op === "set" && op.base > 0 && !live && !deleted.some((d) => d.id === op.id);
-      if (cur > op.base || vanished) { lost.push(op); lostIds.add(op.id); continue; }
-    }
-    if (op.op === "set") {
+    const i = views.findIndex((v) => v.id === op.id);
+    if (op.op === "create") {
       const v = cleanView(op.view);
-      if (!v || v.id !== op.id) { lost.push(op); continue; }
-      const i = views.findIndex((x) => x.id === op.id);
+      if (!v) continue;
       views = i >= 0 ? views.map((x, j) => (j === i ? v : x)) : [...views, v];
-      if (op.at) at[op.id] = op.at;
+      at[op.id] = now;
       deleted = deleted.filter((d) => d.id !== op.id);
-    } else if (op.op === "delete") {
-      if (live) {
+    } else if (op.op === "update") {
+      // A built-in without an override is the built-in itself.
+      const base = i >= 0 ? views[i] : isBuiltin(op.id) ? BUILTINS.find((b) => b.id === op.id) : null;
+      if (!base) { lost.push(op); continue; }
+      const v = cleanView({ ...copy(base), ...copy(op.fields), id: op.id });
+      const plain = v.builtin && BUILTINS.find((b) => b.id === v.id);
+      if (plain && sameView(v, plain) && v.name === plain.name) {
+        // Edited back to how it was built: no override needed.
         views = views.filter((x) => x.id !== op.id);
         delete at[op.id];
-        deleted = [...deleted.filter((d) => d.id !== op.id), { id: op.id, updated_at: op.at || Date.now() }];
-        if (def === op.id) def = "";
+      } else {
+        views = i >= 0 ? views.map((x, j) => (j === i ? v : x)) : [...views, v];
+        at[op.id] = now;
       }
+    } else if (op.op === "delete") {
+      if (i < 0) continue;
+      views = views.filter((x) => x.id !== op.id);
+      delete at[op.id];
+      if (!isBuiltin(op.id)) deleted = [...deleted.filter((d) => d.id !== op.id), { id: op.id, updated_at: now }];
+      if (def === op.id) def = "";
+    } else if (op.op === "default") {
+      if (op.id && !isBuiltin(op.id) && i < 0) { lost.push(op); continue; }
+      def = op.id;
     }
-    done.push(op);
   }
-  deleted = deleted.sort((a, b) => a.updated_at - b.updated_at).slice(-MAX_DELETED);
-  return { doc: { store: cleanStore({ views, default: def }), at, deleted, revision: doc.revision }, done, lost };
+  deleted = deleted.sort((a, b) => a.updated_at - b.updated_at).slice(-200);
+  return { doc: { store: cleanStore({ views, default: def }), at, deleted, revision: doc.revision }, lost };
 }
 
 // The body a proxy stores: with versions and deletions when it keeps
@@ -364,109 +338,24 @@ function bodyOf(doc) {
   return { views, default: doc.store.default, deleted: doc.deleted };
 }
 
-function readJSON(key, fallback) {
-  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; } catch (e) { return fallback; }
-}
-function writeJSON(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch (e) { return false; }
-}
-function forget(key) {
-  try { localStorage.removeItem(key); } catch (e) { /* storage blocked */ }
-}
-
-// The views as last shown in this browser, for when the proxy is unreachable,
-// with the document they were based on. kept marks this format: an earlier
-// version kept a bare store here (see legacyPending).
-const LOCAL_FORMAT = 2;
-function readLocal() {
-  const raw = readJSON(LOCAL_STORE, {});
-  return cleanStore(raw?.kept === LOCAL_FORMAT ? raw.store : raw);
-}
-function readLocalDoc() {
-  const raw = readJSON(LOCAL_STORE, null);
-  return raw?.kept === LOCAL_FORMAT && raw.doc ? readDoc(raw.doc) : null;
-}
-const writeLocal = (store, doc = null) => writeJSON(LOCAL_STORE, { kept: LOCAL_FORMAT, store, doc: doc ? { ...bodyOf(doc), revision: doc.revision } : null });
-
-// Operations the proxy has not acknowledged, oldest first, shared by every
-// tab of this browser. Kept in memory as well, for when storage is blocked.
-let memPending = [];
-let seq = 0;
-const uid = () => Date.now().toString(36) + "-" + (++seq).toString(36) + "-" + Math.floor(Math.random() * 36 ** 4).toString(36);
-function readPending() {
-  let list;
-  try {
-    const raw = localStorage.getItem(PENDING);
-    list = raw ? JSON.parse(raw) : [];
-  } catch (e) { list = memPending; }
-  if (!Array.isArray(list)) list = [];
-  // Operations from an earlier version have no id and no base: they get an
-  // id, and are applied without version checks.
-  if (list.some((op) => plainObject(op) && !op.uid)) {
-    list = list.filter(plainObject).map((op) => (op.uid ? op : { ...op, uid: uid(), base: null }));
-    writePending(list);
-  }
-  return list.filter(plainObject);
-}
-function writePending(list) {
-  memPending = list;
-  if (list.length) writeJSON(PENDING, list); else forget(PENDING);
-}
-
-// An earlier version kept the whole store here with no operations. Its views
-// become operations, so they reach the proxy without undoing other views.
-function legacyPending() {
-  const pending = readPending();
-  const raw = readJSON(LOCAL_STORE, null);
-  if (pending.length || !raw || raw.kept === LOCAL_FORMAT) return pending;
-  const old = cleanStore(raw);
-  const out = old.views.map((v) => ({ uid: uid(), op: "set", id: v.id, view: v, base: null }));
-  if (old.default) out.push({ uid: uid(), op: "default", id: old.default, baseRev: null });
-  writePending(out);
-  return out;
-}
-
-// Gives changes their ids and bases. A view's base is its version in the
-// last document read, or the stamp of a waiting operation on it, as that one
-// lands first. The default's base is the revision read and the default it
-// held, after the waiting operations.
-function stampOps(changes, pending, doc, now) {
-  const last = {};
-  let def = doc ? doc.store.default || "" : "";
-  for (const op of pending) {
-    if (op.op === "default") def = op.id;
-    else { last[op.id] = op.at; if (op.op === "delete" && def === op.id) def = ""; }
-  }
-  return changes.map((c) => {
-    const op = { ...c, uid: uid() };
-    if (c.op === "default") {
-      Object.assign(op, { baseRev: doc ? doc.revision : null, baseDefault: def });
-      def = c.id;
-      return op;
-    }
-    const base = !doc || doc.revision == null ? null : last[c.id] ?? versionOf(doc, c.id);
-    op.base = base;
-    op.at = Math.max(now, (base || 0) + 1, (last[c.id] || 0) + 1);
-    last[c.id] = op.at;
-    return op;
-  });
-}
-
 // The views as last loaded: the store shown, the document read from the
-// proxy, where the views live, whether they loaded, and the notes to show.
-export const V = { store: cleanStore({}), doc: null, where: "", loaded: false, loading: null, note: "", notice: "" };
+// proxy, whether they loaded, a note when they could not, the last notice
+// about a lost or refused change, and whether changes wait unsaved.
+export const V = { store: cleanStore({}), doc: null, loaded: false, loading: null, note: "", notice: "", unsaved: false };
 
-// Says what was not saved, once, in a short note.
+// This tab's operations not yet acknowledged, oldest first.
+let pending = [];
+
 function say(msg) {
   V.notice = msg;
   if (globalThis.document) toast(msg, true);
 }
 
-// Reads the stored document. A proxy with revisions answers 500 when its
-// file is damaged; a PUT with If-Match "0" (never a revision, so always
-// stale) then returns the document to build on, the empty set at a fresh
-// revision. The probe's body has "deleted", which a proxy without revisions
-// refuses as an unknown field, so the probe can never write anything there.
+// Reads the stored document, or null when the proxy cannot be reached. A
+// proxy with revisions answers 500 when its file is damaged; a PUT with
+// If-Match "0" (never a revision) then returns the document to build on,
+// the empty set at a fresh revision. The probe's body has "deleted", which a
+// proxy without revisions refuses, so the probe never writes anything there.
 async function getDoc(fetchFn) {
   try {
     const res = await fetchFn("/dashboard/views", { cache: "no-store" });
@@ -477,9 +366,8 @@ async function getDoc(fetchFn) {
   } catch (e) { return null; }
 }
 
-// Writes a document. Returns {ok, status, doc}: doc is what the proxy stored,
-// or for a 409 the document it holds now. Revisions are opaque: sent back as
-// read, never compared for order or counted.
+// Writes a document. Returns {ok, status, doc, error}: doc is what the proxy
+// stored, or for a 409 the document it holds now.
 async function putDoc(doc, fetchFn) {
   const headers = { "Content-Type": "application/json" };
   if (doc.revision != null) headers["If-Match"] = `"${doc.revision}"`;
@@ -487,103 +375,79 @@ async function putDoc(doc, fetchFn) {
     const res = await fetchFn("/dashboard/views", { method: "PUT", headers, body: JSON.stringify(bodyOf(doc)) });
     let body = null;
     try { body = await res.json(); } catch (e) { /* no body */ }
-    if (res.ok) {
-      const stored = body ? readDoc(body) : null;
-      if (stored && (doc.revision == null || stored.revision != null)) return { ok: true, doc: stored };
-      // Stored, but the reply did not say as what: the next save reads it again.
-      return { ok: true, doc: { ...doc, revision: null } };
-    }
+    if (res.ok) return { ok: true, doc: body ? readDoc(body) : { ...doc, revision: null } };
     if (res.status === 409 && plainObject(body?.current)) {
       const current = readDoc(body.current);
-      if (current.revision == null && validRevision(body.revision)) current.revision = body.revision;
-      return current.revision == null ? { ok: false, status: 0 } : { ok: false, status: 409, doc: current };
+      if (current.revision == null && body.revision != null) current.revision = body.revision;
+      if (current.revision != null) return { ok: false, status: 409, doc: current };
     }
     return { ok: false, status: res.status, error: typeof body?.error === "string" ? body.error : "" };
   } catch (e) { return { ok: false, status: 0 }; }
 }
 
-function keepLocally() {
-  writeLocal(V.store, V.doc);
-  V.where = "local";
-  V.note = NOTE;
-  return "local";
-}
-
-// Drops operations from the waiting list by id, leaving any added meanwhile.
-function clearOps(ops) {
-  const gone = new Set(ops.map((op) => op.uid));
-  const rest = readPending().filter((op) => !gone.has(op.uid));
-  writePending(rest);
-  return rest;
-}
-
-// The view's name as it was on screen before the edit, else as edited.
-const nameOf = (op) => op.was || op.view?.name || (V.doc && findView(V.doc.store, op.id)?.name) || "A view";
 const lostText = (lost) => {
-  const names = [...new Set(lost.map((op) => (op.op === "default" ? "The default view" : nameOf(op))))];
+  const names = [...new Set(lost.map((op) => (op.op === "default" ? "The default view" : op.name || "A view")))];
   return `${names.join(", ")} changed elsewhere, your edit was not saved`;
 };
 
-// Sends what waits, once. Returns where the views now live: "server",
-// "local" while the proxy cannot take them, or "rejected" when it refused
-// them as invalid (they are dropped, as it would refuse them every time).
+function drop(ops) {
+  const gone = new Set(ops);
+  pending = pending.filter((op) => !gone.has(op));
+}
+
+// Sends this tab's operations once. Returns "server", "failed" when the
+// proxy could not be reached or kept changing (they stay in memory for a
+// retry), or "rejected" when it refused them as invalid (they are dropped,
+// as it would refuse them every time).
 async function flush(fetchFn) {
-  const ops = readPending();
-  if (!ops.length) return V.where || "server";
+  const ops = pending.slice();
+  if (!ops.length) return V.unsaved ? "failed" : "server";
   let doc = await getDoc(fetchFn);
-  if (!doc) return keepLocally();
-  for (let attempt = 0; attempt <= RETRIES; attempt++) {
-    const checked = doc.revision != null;
-    const m = checked ? mergeOps(doc, ops) : { doc: { ...doc, store: applyChanges(doc.store, ops) }, done: ops, lost: [] };
+  for (let tries = 0; doc && tries < TRIES; tries++) {
+    const m = applyOps(doc, ops);
     const res = await putDoc(m.doc, fetchFn);
     if (res.ok) {
-      const note = m.lost.length ? lostText(m.lost) : "";
-      const rest = clearOps([...m.done, ...m.lost]);
+      drop(ops);
       V.doc = res.doc;
-      V.store = applyChanges(res.doc.store, rest);
-      V.where = "server";
+      V.store = applyOps(res.doc, pending).doc.store;
+      V.unsaved = pending.length > 0;
       V.note = "";
-      if (!rest.length) forget(LOCAL_STORE);
-      if (note) say(note);
+      if (m.lost.length) say(lostText(m.lost));
       return "server";
     }
-    if (res.status === 409 && res.doc) { doc = res.doc; continue; }
+    if (res.status === 409) { doc = res.doc; continue; }
     if (res.status === 400) {
-      clearOps(ops);
-      V.store = applyChanges(doc.store, readPending());
+      drop(ops);
+      V.store = applyOps(doc, pending).doc.store;
+      V.unsaved = pending.length > 0;
       say(`Views were not saved: ${res.error || "the proxy refused them"}`);
       return "rejected";
     }
-    return keepLocally();
+    break;
   }
-  // Still changing elsewhere after every retry: they wait for the next save.
-  return keepLocally();
+  V.unsaved = true;
+  return "failed";
 }
 
 // One queue per tab: a save starts only after the one before it ends.
 let queue = Promise.resolve();
 const enqueue = (fetchFn) => (queue = queue.then(() => flush(fetchFn)));
 
-// Loads views from the server, else from this browser, with operations still
-// waiting here shown on top and sent up. Runs once; later calls get the same
-// promise. fetchFn is for tests.
+// Sends the changes still waiting after a failed save.
+export const retrySaves = (fetchFn = globalThis.fetch) => enqueue(fetchFn);
+
+// Loads the views from the proxy, once; later calls get the same promise.
+// When the proxy cannot be reached the built-in views show with a note.
+// fetchFn is for tests.
 export function loadViews(fetchFn = globalThis.fetch) {
   if (V.loading) return V.loading;
   V.loading = (async () => {
+    // Earlier versions of this page kept views in browser storage.
+    for (const k of OLD_KEYS) { try { localStorage.removeItem(k); } catch (e) { /* storage blocked */ } }
     const doc = await getDoc(fetchFn);
-    const pending = legacyPending();
-    if (doc) {
-      V.doc = doc;
-      V.store = applyChanges(doc.store, pending);
-      V.where = "server";
-      V.note = "";
-      if (pending.length) await enqueue(fetchFn);
-    } else {
-      V.doc = readLocalDoc();
-      V.store = applyChanges(readLocal(), pending);
-      V.where = "local";
-      V.note = NOTE;
-    }
+    V.doc = doc;
+    V.store = doc ? applyOps(doc, pending).doc.store : applyOps({ store: cleanStore({}), at: {}, deleted: [], revision: null }, pending).doc.store;
+    V.note = doc ? "" : NOTE;
     const migrated = migrateLegacy(V.store, S.ui, prefs());
     if (prefs().performance) setPref("performance", undefined);
     if (migrated !== V.store) await persist(migrated, fetchFn);
@@ -593,21 +457,18 @@ export function loadViews(fetchFn = globalThis.fetch) {
   return V.loading;
 }
 
-// Saves the change from the views shown to next: queued as operations and
-// sent in turn. V.store shows next at once. Returns where the views went:
-// "server", "local" or "rejected".
-export async function persist(next, fetchFn = globalThis.fetch, now = Date.now()) {
-  // Each change keeps the name the view had on screen, for the note if it is lost.
-  const changes = diffStores(V.store, next).map((c) => (c.op === "default" ? c : { ...c, was: findView(V.store, c.id)?.name || "" }));
+// Saves the change from the views shown to next. V.store shows next at once.
+// Returns "server", "failed" or "rejected" (see flush).
+export async function persist(next, fetchFn = globalThis.fetch) {
+  const ops = opsFor(V.store, next);
   V.store = next;
   V.notice = "";
-  if (!changes.length) return V.where || "server";
-  const pending = readPending();
-  writePending([...pending, ...stampOps(changes, pending, V.doc, now)]);
+  if (!ops.length) return V.unsaved ? "failed" : "server";
+  pending.push(...ops);
   return enqueue(fetchFn);
 }
 
 export const _test = {
-  readLocal, writeLocal, readPending, LOCAL_STORE, PENDING,
-  reset() { memPending = []; queue = Promise.resolve(); },
+  reset() { pending = []; queue = Promise.resolve(); },
+  pending: () => pending.slice(),
 };
