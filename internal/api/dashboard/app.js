@@ -1,5 +1,6 @@
 // Shell, router and data polling for the dashboard.
-import { S, esc, icon, applyTheme, closeMenu, fetchData, setScreenWants, dataCurrent } from "./core.js";
+import { S, esc, icon, applyTheme, closeMenu, fetchData, setScreenWants, dataCurrent, windowMoved } from "./core.js";
+import { collectRegions, paintFull, paintPatch, painted, listen } from "./paint.js";
 import * as overview from "./screens/overview.js";
 import * as accounts from "./screens/accounts.js";
 import * as account from "./screens/account.js";
@@ -94,7 +95,42 @@ function drawNav() {
   nav.querySelector("[data-newview]").onclick = (e) => { e.preventDefault(); newViewFromSidebar(); };
 }
 
-export function render() {
+// The page's own additions to a screen, part of what a patch must keep.
+const extras = () => (S.error ? `<div class="banner">${esc(S.error)}</div>` : "");
+
+// Builds the current screen, with its regions collected.
+function build(r, ctx) {
+  try {
+    return collectRegions(() => r.screen.view(ctx));
+  } catch (e) {
+    console.error(e);
+    return { html: `<div class="bar titled"><span class="title">Something broke</span></div><div class="body"><div class="banner">${esc(e.message)}</div></div>`, skeleton: null, regions: null };
+  }
+}
+
+function mountScreen(out, main, ctx) {
+  if (out.mount) {
+    try { out.mount(main, ctx); } catch (e) { console.error(e); }
+  }
+}
+
+// Redraws from the data loaded: a new window, selection or reply. Only the
+// regions whose html changed are replaced, so the plots, their controller,
+// scroll, focus and open menus stay; anything else changing draws in full.
+export function patch() {
+  if (!S.data || location.hash !== lastKey) return render();
+  const r = route();
+  const main = document.getElementById("main");
+  document.getElementById("hostname").textContent = hostName();
+  const ctx = { params: r.params, add: r.add, rerender: render };
+  const out = build(r, ctx);
+  if (!paintPatch(main, lastKey, out, extras())) return render({ out, ctx });
+  mountScreen(out, main, ctx);
+}
+
+// Draws the whole screen: on a route change, a resize, or a redraw that
+// changes more than its regions. prebuilt: a screen patch() built already.
+export function render(prebuilt) {
   if (S.hold > 0) { pending = true; return; }
   pending = false;
   if (redirected()) return;
@@ -111,25 +147,20 @@ export function render() {
   document.getElementById("hostname").textContent = hostName();
   if (!S.data) {
     main.innerHTML = `<div class="bar titled"><span class="title">Loading</span></div><div class="body">${S.error ? `<div class="banner">${esc(S.error)}</div>` : ""}</div>`;
+    painted.key = null;
     return;
   }
-  const ctx = { params: r.params, add: r.add, rerender: render };
-  let out;
-  try {
-    out = r.screen.view(ctx);
-  } catch (e) {
-    console.error(e);
-    out = { html: `<div class="bar titled"><span class="title">Something broke</span></div><div class="body"><div class="banner">${esc(e.message)}</div></div>` };
-  }
-  main.innerHTML = out.html;
-  if (S.error) main.querySelector(".body")?.insertAdjacentHTML("afterbegin", `<div class="banner">${esc(S.error)}</div>`);
+  const fresh = !prebuilt?.out || key !== lastKey;
+  const ctx = fresh ? { params: r.params, add: r.add, rerender: render } : prebuilt.ctx;
+  const out = fresh ? build(r, ctx) : prebuilt.out;
+  const extra = extras();
+  paintFull(main, key, out, extra);
+  if (extra) main.querySelector(".body")?.insertAdjacentHTML("afterbegin", extra);
   const nb = main.querySelector(".body");
   if (nb && keep) nb.scrollTop = keep;
   if (winKeep && window.scrollY !== winKeep) window.scrollTo(0, winKeep);
   lastKey = key;
-  if (out.mount) {
-    try { out.mount(main, ctx); } catch (e) { console.error(e); }
-  }
+  mountScreen(out, main, ctx);
   // Keyboard focus on a plot or selection survives the redraw.
   if (focusKey) {
     const el = main.querySelector(`[data-focus-key="${focusKey}"]`);
@@ -145,7 +176,7 @@ export async function load() {
   } catch (e) {
     S.error = (e.message || String(e)) + (S.data ? ". Showing the last reading." : "");
   }
-  render();
+  patch();
   // The stored account selection is known only once accounts have loaded,
   // and a screen's window only once it has drawn, so the first reading may
   // need another.
@@ -161,14 +192,11 @@ window.addEventListener("hashchange", () => {
   if (S.data && !dataCurrent()) load();
 });
 window.addEventListener("dash:refresh", load);
-window.addEventListener("dash:render", render);
+// A moved window redraws from the data loaded at once, and asks for more
+// only once it settles and only when the loaded margin does not draw it.
+listen(window, { patch: () => patch(), render: () => render(), windowMoved: () => windowMoved() });
 let resizeTimer;
-window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 100); });
-let usageLoadTimer;
-window.addEventListener("dash:usage-window", () => {
-  clearTimeout(usageLoadTimer);
-  usageLoadTimer = setTimeout(() => { if (!dataCurrent()) load(); }, 180);
-});
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => render(), 100); });
 // A held render waits while a button is pressed: replacing the screen between
 // mousedown and click would swallow the click. The click runs in the same task
 // as pointerup, so the flag clears just after it.
@@ -177,7 +205,8 @@ document.addEventListener("pointerdown", () => { pressed = true; }, true);
 document.addEventListener("pointerup", () => setTimeout(() => { pressed = false; }, 0), true);
 document.addEventListener("pointercancel", () => { pressed = false; }, true);
 setInterval(() => { if (pending && S.hold === 0 && !pressed) render(); }, 500);
-setInterval(load, 15000);
+// The regular refresh waits while a plot is being zoomed or panned.
+setInterval(() => { if (Date.now() - S.gestureAt > 1000) load(); }, 15000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 
 applyTheme();

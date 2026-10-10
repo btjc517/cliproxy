@@ -322,7 +322,9 @@ export function renameBox(id) {
 
 export function mountRename(root) {
   const input = root.querySelector("[data-rename-input]");
-  if (!input) return;
+  // A redraw that keeps the box mounts the page again: bind it once.
+  if (!input || input._renameBound) return;
+  input._renameBound = true;
   S.hold++;
   let done = false;
   const finish = async (save) => {

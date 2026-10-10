@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -108,6 +109,34 @@ func parsePerfWindow(rawStart, rawEnd string) (time.Time, time.Time, error) {
 	return start, end, nil
 }
 
+// parsePadding reads an optional padding pair such as ?usage_pad_start= and
+// ?usage_pad_end= around the window start..end. Both empty means none. Each
+// given end must be an RFC3339 date on the outside of the window; the store
+// trims a padding longer than one window on either side.
+func parsePadding(name, rawStart, rawEnd string, start, end time.Time) (time.Time, time.Time, error) {
+	if rawStart == "" && rawEnd == "" {
+		return time.Time{}, time.Time{}, nil
+	}
+	if start.IsZero() {
+		return time.Time{}, time.Time{}, fmt.Errorf("%s_pad_start and %s_pad_end need %s_start and %s_end", name, name, name, name)
+	}
+	var padStart, padEnd time.Time
+	var errStart, errEnd error
+	if rawStart != "" {
+		padStart, errStart = time.Parse(time.RFC3339, rawStart)
+	}
+	if rawEnd != "" {
+		padEnd, errEnd = time.Parse(time.RFC3339, rawEnd)
+	}
+	if errStart != nil || errEnd != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("%s_pad_start and %s_pad_end must be RFC3339 dates such as 2026-10-08T14:00:00Z", name, name)
+	}
+	if (!padStart.IsZero() && padStart.After(start)) || (!padEnd.IsZero() && padEnd.Before(end)) {
+		return time.Time{}, time.Time{}, fmt.Errorf("%s_pad_start must be at or before %s_start and %s_pad_end at or after %s_end", name, name, name, name)
+	}
+	return padStart, padEnd, nil
+}
+
 // GetDashboardData returns what the /dashboard page renders: this server,
 // routing settings, each credential's state, quota snapshot and plan, and the
 // usage summary with performance and per-credential usage over the range
@@ -115,8 +144,12 @@ func parsePerfWindow(rawStart, rawEnd string) (time.Time, time.Time, error) {
 // range falls back to 24h, which summary.range reports. ?scope= takes comma
 // separated credential ids and adds a "selection" performance scope that
 // merges them. ?perf_start= and ?perf_end= (RFC3339, see parsePerfWindow)
-// replace summary.performance with that window, Range "custom". The caller is
-// responsible for restricting who may reach it.
+// replace summary.performance with that window, Range "custom", and
+// ?usage_start= with ?usage_end= replace summary.usage_range. Each window may
+// carry a padding (?perf_pad_start=, ?perf_pad_end=, ?usage_pad_start=,
+// ?usage_pad_end=, see parsePadding): its series then reach over the padding
+// in the buckets the window alone gets, while totals stay the window's. The
+// caller is responsible for restricting who may reach it.
 func (h *Handler) GetDashboardData(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -137,6 +170,16 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 	perfStart, perfEnd, errPerf := parsePerfWindow(c.Query("perf_start"), c.Query("perf_end"))
 	if errPerf != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errPerf.Error()})
+		return
+	}
+	usagePadStart, usagePadEnd, errUsagePad := parsePadding("usage", c.Query("usage_pad_start"), c.Query("usage_pad_end"), usageStart, usageEnd)
+	if errUsagePad != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errUsagePad.Error()})
+		return
+	}
+	perfPadStart, perfPadEnd, errPerfPad := parsePadding("perf", c.Query("perf_pad_start"), c.Query("perf_pad_end"), perfStart, perfEnd)
+	if errPerfPad != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errPerfPad.Error()})
 		return
 	}
 
@@ -180,10 +223,13 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 	}
 	summary := usagestats.Default().SummaryForSelection(100, window, selection, authIDs)
 	if !perfStart.IsZero() {
-		summary.Performance = usagestats.Default().PerformanceBetween(perfStart, perfEnd, selection, authIDs)
+		summary.Performance = usagestats.Default().PerformanceBetweenPadded(perfStart, perfEnd, perfPadStart, perfPadEnd, selection, authIDs)
 	}
 	if !usageStart.IsZero() {
 		custom := usagestats.Default().UsageBetween(usageStart, usageEnd)
+		if !usagePadStart.IsZero() || !usagePadEnd.IsZero() {
+			custom = usagestats.Default().UsageBetweenPadded(usageStart, usageEnd, usagePadStart, usagePadEnd)
+		}
 		custom.Ranges = summary.UsageRange.Ranges
 		summary.UsageRange = custom
 	}

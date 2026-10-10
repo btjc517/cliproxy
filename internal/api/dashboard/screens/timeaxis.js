@@ -114,13 +114,27 @@ export function moveRange(r, dt, grid) {
 // ---------- time zone aware ticks and labels ----------
 
 // Milliseconds the proxy's time zone is ahead of UTC at t.
+// One formatter per zone, and the offsets it gave, as a pan or zoom asks for
+// the same instants every frame.
+const offsets = new Map();
 export function tzOffset(t) {
-  const tz = S.data?.summary?.timezone;
+  const tz = S.data?.summary?.timezone || "";
+  let z = offsets.get(tz);
+  if (!z) {
+    let f = null;
+    try { f = new Intl.DateTimeFormat("en-GB", { timeZone: tz || undefined, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }); } catch (e) { /* unknown zone */ }
+    offsets.set(tz, (z = { f, at: new Map() }));
+  }
+  let off = z.at.get(t);
+  if (off !== undefined) return off;
   try {
-    const p = new Intl.DateTimeFormat("en-GB", { timeZone: tz || undefined, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(new Date(t));
+    const p = z.f.formatToParts(new Date(t));
     const g = (k) => Number(p.find((x) => x.type === k)?.value);
-    return Date.UTC(g("year"), g("month") - 1, g("day"), g("hour") % 24, g("minute"), g("second")) - Math.floor(t / 1000) * 1000;
-  } catch (e) { return -new Date(t).getTimezoneOffset() * 60e3; }
+    off = Date.UTC(g("year"), g("month") - 1, g("day"), g("hour") % 24, g("minute"), g("second")) - Math.floor(t / 1000) * 1000;
+  } catch (e) { off = -new Date(t).getTimezoneOffset() * 60e3; }
+  if (z.at.size > 20000) z.at.clear();
+  z.at.set(t, off);
+  return off;
 }
 
 const TICK_STEPS = [HOUR, 2 * HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 3 * DAY, 7 * DAY, 14 * DAY, 30 * DAY, 61 * DAY, 91 * DAY];
@@ -245,11 +259,17 @@ export function rangeText(r) {
 export const GUTTER_L = 42, GUTTER_R = 12;
 
 // The plot width a panel will get, for laying out labels before it is mounted.
+// Read once per task: a screen asks for it for every plot it builds, and each
+// read after a redraw would lay the page out again.
+let widthNow = null;
 export function plotWidth() {
   if (typeof document === "undefined") return 1096;
+  if (widthNow != null) return widthNow;
   const main = document.getElementById("main")?.clientWidth || 1200;
   const pad = window.innerWidth <= 860 ? 32 : 48;
-  return Math.max(120, main - 2 - pad - GUTTER_L - GUTTER_R);
+  widthNow = Math.max(120, main - 2 - pad - GUTTER_L - GUTTER_R);
+  queueMicrotask(() => { widthNow = null; });
+  return widthNow;
 }
 
 // ---------- a page's time state ----------
@@ -265,14 +285,24 @@ export function upToNow(w, now = Date.now()) {
   return { start: w.start, end: Math.max(Math.min(w.end, now), Math.min(w.start + 60e3, w.end)) };
 }
 
+// Just past paint.GESTURE_QUIET, so the catch-up redraw builds everything.
+const SETTLE_REDRAW = 160;
+let catchUp = null;
+
 export function timeState(key, { defaultWindow, future = false, loads = false, now = Date.now() }) {
   const all = (S.ui.time ||= {});
   const st = (all[key] ||= { win: null, range: null });
   const def = () => limitWindow(defaultWindow(now), { now, future });
   const stored = (w) => (w.toNow && !future ? upToNow(w, now) : limitWindow(w, { now, future }));
+  // A new window redraws the screen's regions, not the whole screen, so the
+  // plots move from the data already loaded; data for it is asked for once
+  // the window settles (dash:usage-window). Parts left as they were while
+  // the window moved (paint.kept) catch up in one more redraw once it is still.
   const changed = () => {
-    window.dispatchEvent(new Event("dash:render"));
+    window.dispatchEvent(new Event("dash:patch"));
     if (loads) window.dispatchEvent(new Event("dash:usage-window"));
+    clearTimeout(catchUp);
+    catchUp = setTimeout(() => window.dispatchEvent(new Event("dash:patch")), SETTLE_REDRAW);
   };
   return {
     key,
@@ -290,7 +320,7 @@ export function timeState(key, { defaultWindow, future = false, loads = false, n
     },
     setRange(r) {
       st.range = r ? { start: r.start, end: r.end } : null;
-      window.dispatchEvent(new Event("dash:render"));
+      window.dispatchEvent(new Event("dash:patch"));
     },
     reset() { st.win = null; st.range = null; changed(); },
   };
@@ -328,11 +358,21 @@ if (typeof document !== "undefined") {
 }
 
 // Plots are any elements with data-tplot; their width is the time axis.
+// Binding plots that are already bound (a redraw that kept them) updates the
+// controller with the screen's new group instead of binding them again.
 export function bindTime(root, group) {
   const plots = [...root.querySelectorAll(`[data-tplot="${group.key}"]`)];
   if (!plots.length) return () => {};
+  const bound = plots[0]._time;
+  if (bound && bound.plots.length === plots.length && bound.plots.every((p, i) => p === plots[i])) {
+    bound.update(group);
+    return bound.clearHover;
+  }
   let win = group.window, range = group.range ? { ...group.range } : null;
-  let held = false, hoverPlot = null, drag = null, frame = 0, pendingWin = null;
+  let held = false, hoverPlot = null, drag = null;
+  // Where the mouse last hovered a plot, so a redraw can show the hover
+  // again from the new data without waiting for the pointer to move.
+  let pointerAt = null;
   const pointers = new Map();
   const hold = (on) => {
     if (on && !held) { S.hold++; held = true; }
@@ -431,18 +471,27 @@ export function bindTime(root, group) {
   };
 
   // ----- window changes -----
+  // Every wheel step, key or finger move changes win at once; the screen
+  // redraws its plots from the data it has at most once per frame. An
+  // animation frame while the page shows, a timer when it is hidden, so a
+  // background tab still settles. The screen asks for new data itself once
+  // the window has stopped moving.
+  let frame = null;
+  const flush = () => {
+    frame = null;
+    if (plots[0].isConnected) group.setWindow(win);
+  };
+  const schedule = () => {
+    if (frame) return;
+    const shown = typeof document !== "undefined" && document.visibilityState === "visible" && typeof requestAnimationFrame === "function";
+    frame = shown ? { raf: requestAnimationFrame(flush) } : { timer: setTimeout(flush, 16) };
+  };
   const commitWindow = (next) => {
     win = limitWindow(next, { future: group.future });
-    pendingWin = win;
+    S.gestureAt = Date.now();
     clearHover();
-    // One redraw for a burst of wheel events. A timer, not an animation
-    // frame, so a page in a background tab still settles.
-    clearTimeout(frame);
-    frame = setTimeout(() => {
-      frame = 0;
-      if (!plots[0].isConnected || pointers.size) return;
-      group.setWindow(pendingWin);
-    }, 16);
+    drawRange(range);
+    schedule();
   };
   const zoomAt = (factor, anchor) => { hintDone(); commitWindow(zoomWindow(win, factor, anchor)); };
 
@@ -471,6 +520,7 @@ export function bindTime(root, group) {
     p.addEventListener("pointermove", (e) => {
       if (drag || pointers.size) return;
       if (e.pointerType === "touch") return;
+      pointerAt = { plot: p, x: e.clientX };
       showHover(timeOf(p, e.clientX), p);
     });
     p.addEventListener("pointerleave", () => { if (!drag) clearHover(); });
@@ -490,6 +540,7 @@ export function bindTime(root, group) {
         clearTimeout(drag?.timer);
         const xs = [...pointers.values()].map((q) => q.x);
         drag = { mode: "pinch", plot: p, window: win, dist: Math.abs(xs[0] - xs[1]), mid: fracAt(p, (xs[0] + xs[1]) / 2) };
+        hold(false);
         return;
       }
       const t = timeOf(p, e.clientX);
@@ -517,9 +568,8 @@ export function bindTime(root, group) {
       if (drag.mode === "pinch") {
         const xs = [...pointers.values()].map((q) => q.x);
         if (xs.length < 2 || !drag.dist) return;
-        win = limitWindow(zoomWindow(drag.window, drag.dist / Math.max(1, Math.abs(xs[0] - xs[1])), drag.mid), { future: group.future });
-        drawRange(range);
-        shiftPlots(drag.window, win);
+        hintDone();
+        commitWindow(zoomWindow(drag.window, drag.dist / Math.max(1, Math.abs(xs[0] - xs[1])), drag.mid));
         return;
       }
       const dx = e.clientX - drag.x;
@@ -528,10 +578,11 @@ export function bindTime(root, group) {
       if (drag.mode === "touch") {
         clearTimeout(drag.timer);
         drag.mode = "pan";
+        // Redraws keep the plots, so a pan need not hold them off.
+        hold(false);
       }
       if (drag.mode === "pan") {
-        win = limitWindow(panWindow(drag.window, -dx / Math.max(1, dp.clientWidth)), { future: group.future });
-        shiftPlots(drag.window, win);
+        commitWindow(panWindow(drag.window, -dx / Math.max(1, dp.clientWidth)));
         return;
       }
       const t = timeOf(dp, e.clientX);
@@ -565,8 +616,8 @@ export function bindTime(root, group) {
       hold(false);
       const cancelled = e.type === "pointercancel";
       if (d.mode === "pan" || d.mode === "pinch") {
-        unshiftPlots();
-        if (!cancelled || d.mode === "pinch") commitWindow(win); else win = d.window;
+        // A cancelled pan goes back to where it started.
+        if (cancelled && d.mode === "pan") commitWindow(d.window);
         return;
       }
       if (cancelled) { range = group.range; drawRange(range); return; }
@@ -604,21 +655,22 @@ export function bindTime(root, group) {
     if (next) { e.preventDefault(); e.stopPropagation(); range = next; drawRange(range); group.setRange(range); }
   });
 
-  // While a touch pan or pinch is under way, the drawn content slides and
-  // scales instead of redrawing, so the gesture stays smooth and keeps its pointer.
-  function shiftPlots(from, to) {
-    const scale = (from.end - from.start) / (to.end - to.start);
-    for (const p of plots) {
-      const w = p.clientWidth;
-      const dx = ((from.start - to.start) / (to.end - to.start)) * w;
-      for (const c of p.querySelectorAll(":scope > .tp-content")) { c.style.transformOrigin = "0 0"; c.style.transform = `translateX(${dx}px) scaleX(${scale})`; }
-    }
-    group.onPreview?.(to);
-  }
-  function unshiftPlots() {
-    for (const p of plots) for (const c of p.querySelectorAll(":scope > .tp-content")) c.style.transform = "";
-  }
-
+  // A redraw that keeps the plots hands the controller the screen's new
+  // group: its probes, grid and setters read the new data. The window it
+  // holds stays while a frame is still to be drawn, as that one is newer.
+  // A hover still showing is drawn again at the pointer from the new data
+  // and selection, so its chips, card and dots never show the old figures.
+  plots[0]._time = {
+    plots,
+    clearHover,
+    update(next) {
+      group = next;
+      if (!frame) win = next.window;
+      if (!drag) range = next.range ? { ...next.range } : null;
+      drawRange(range);
+      if (hoverPlot && pointerAt && !drag && pointerAt.plot.isConnected) showHover(timeOf(pointerAt.plot, pointerAt.x), pointerAt.plot);
+    },
+  };
   return clearHover;
 }
 

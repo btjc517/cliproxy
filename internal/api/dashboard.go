@@ -1,16 +1,21 @@
 package api
 
 import (
+	"compress/gzip"
 	"embed"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/tailnetname"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/usagestats"
+	log "github.com/sirupsen/logrus"
 )
 
 // maxDashboardSessionsBody caps the POST /dashboard/sessions body.
@@ -90,7 +95,57 @@ func (s *Server) serveDashboardData(c *gin.Context) {
 		return
 	}
 	c.Header("Cache-Control", "no-store")
+	c.Header("Vary", "Accept-Encoding")
+	if !acceptsGzip(c.Request.Header.Get("Accept-Encoding")) {
+		s.mgmt.GetDashboardData(c)
+		return
+	}
+	// The reply is mostly repeated JSON keys and runs to hundreds of kB for
+	// a week; compressed it is about a tenth of that.
+	zw := gzipWriterPool.Get().(*gzip.Writer)
+	zw.Reset(c.Writer)
+	c.Header("Content-Encoding", "gzip")
+	c.Writer = &gzipResponseWriter{ResponseWriter: c.Writer, zw: zw}
 	s.mgmt.GetDashboardData(c)
+	if errClose := zw.Close(); errClose != nil {
+		log.Errorf("dashboard data: close gzip stream: %v", errClose)
+	}
+	gzipWriterPool.Put(zw)
+}
+
+var gzipWriterPool = sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }}
+
+// acceptsGzip reports whether an Accept-Encoding header allows gzip.
+func acceptsGzip(header string) bool {
+	for _, part := range strings.Split(header, ",") {
+		name, params, _ := strings.Cut(strings.TrimSpace(part), ";")
+		if !strings.EqualFold(strings.TrimSpace(name), "gzip") {
+			continue
+		}
+		q := strings.ReplaceAll(strings.TrimSpace(params), " ", "")
+		return q != "q=0" && q != "q=0.0" && q != "q=0.00" && q != "q=0.000"
+	}
+	return false
+}
+
+// gzipResponseWriter compresses the body written through it.
+type gzipResponseWriter struct {
+	gin.ResponseWriter
+	zw *gzip.Writer
+}
+
+func (w *gzipResponseWriter) WriteHeader(code int) {
+	w.Header().Del("Content-Length")
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *gzipResponseWriter) Write(b []byte) (int, error) {
+	w.Header().Del("Content-Length")
+	return w.zw.Write(b)
+}
+
+func (w *gzipResponseWriter) WriteString(s string) (int, error) {
+	return w.Write([]byte(s))
 }
 
 // dashboardSessionsRequest is what a machine pushes about its client

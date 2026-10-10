@@ -113,6 +113,19 @@ func perfWindowBounds(now, from, to time.Time, hours int) []time.Time {
 // never a share of one. Selection works as in SummaryForSelection. A window
 // that fails ValidPerfWindow gives empty scopes.
 func (s *Store) PerformanceBetween(from, to time.Time, ids, known []string) Performance {
+	return s.PerformanceBetweenPadded(from, to, time.Time{}, time.Time{}, ids, known)
+}
+
+// PerformanceBetweenPadded is PerformanceBetween with the series reaching
+// over padFrom..padTo around the window, so a dashboard can pan and zoom a
+// little without asking again. The bucket length is the one the window gets
+// alone, and the totals, percentiles and histograms still cover exactly the
+// window's buckets, whose edges FigureStart and FigureEnd give. The padding
+// reaches at most one window length past each end and, for buckets shorter
+// than a day, no further back than the hours still kept. Zero pads give
+// PerformanceBetween's reply.
+func (s *Store) PerformanceBetweenPadded(from, to, padFrom, padTo time.Time, ids, known []string) Performance {
+	padded := !padFrom.IsZero() || !padTo.IsZero()
 	now := s.nowFunc()
 	loc := now.Location()
 	s.mu.Lock()
@@ -129,9 +142,41 @@ func (s *Store) PerformanceBetween(from, to time.Time, ids, known []string) Perf
 		return performance
 	}
 	from, to = from.In(loc), to.In(loc)
-	hours := perfStep(from, to, now.Add(-perfRetention))
+	hourlySince := now.Add(-perfRetention)
+	hours := perfStep(from, to, hourlySince)
 	bounds := perfWindowBounds(now, from, to, hours)
 	performance.BucketSeconds = int64(time.Duration(hours) * time.Hour / time.Second)
-	performance.Scopes = s.perfScopesLocked(loc, bounds, hours >= 24, s.knownSelectionLocked(ids, known))
+	selection := s.knownSelectionLocked(ids, known)
+	performance.Scopes = s.perfScopesLocked(loc, bounds, hours >= 24, selection)
+	if !padded {
+		return performance
+	}
+	figureStart, figureEnd := bounds[0], bounds[len(bounds)-1]
+	performance.FigureStart, performance.FigureEnd = &figureStart, &figureEnd
+	padFrom, padTo = clampPadding(from, to, padFrom, padTo)
+	if hours < 24 {
+		// Parts of a day exist only for the stored hours: the padding starts
+		// at the first whole bucket inside them.
+		first := perfBucketStart(hourlySince, loc, hours)
+		if first.Before(hourlySince) {
+			first = perfNextBucketStart(first, loc, hours)
+		}
+		if padFrom.Before(first) {
+			padFrom = minTime(first, from)
+		}
+	}
+	padBounds := perfWindowBounds(now, padFrom.In(loc), padTo.In(loc), hours)
+	series := s.perfScopesLocked(loc, padBounds, hours >= 24, selection)
+	for key, scope := range performance.Scopes {
+		scope.Series = series[key].Series
+		performance.Scopes[key] = scope
+	}
 	return performance
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }

@@ -9,8 +9,12 @@ export const S = {
   dataViewport: "",  // usage window the loaded payload covers, "start,end"
   dataPerf: "",      // performance window asked for, "start,end", or "" for the fixed range
   dataScope: "",     // accounts merged into performance.scopes.selection, comma-joined
+  dataUsagePad: "",  // the padded usage span asked for with dataViewport, "start,end"
+  dataPerfPad: "",   // the padded performance span asked for with dataPerf, "start,end"
+  dataQuery: "",     // the query the loaded payload answered
   ui: {},            // per-screen choices that survive a refresh
   hold: 0,           // >0 while a menu, drawer or hover would be lost by a re-render
+  gestureAt: 0,      // when a time plot last moved under a pan or zoom
 };
 
 const KEY_STORE = "cliproxy-dashboard-key";
@@ -79,6 +83,25 @@ export function wantRange(now = Date.now()) {
 }
 export const wantUsageViewport = () => spanParam(loadSpan(screenWants()?.usage));
 export const wantPerfWindow = () => spanParam(perfSpan(screenWants()?.perf));
+
+// The margin loaded around a window: half a window on each side, so a pan
+// or a small zoom stays inside data already loaded. Usage stops at now, as
+// it has nothing later; performance may run past now, where the proxy stops
+// its series. The proxy keeps the window's own bucket size and trims the
+// margin to one window each side and to the hours it keeps.
+export function padSpan(span, { toNow = false, now = Date.now() } = {}) {
+  if (!span) return null;
+  const half = (span.end - span.start) / 2;
+  const start = Math.floor((span.start - half) / FIVE_MIN) * FIVE_MIN;
+  let end = Math.ceil((span.end + half) / FIVE_MIN) * FIVE_MIN;
+  if (toNow) end = Math.max(span.end, Math.ceil(Math.min(end, now) / FIVE_MIN) * FIVE_MIN);
+  return { start, end };
+}
+export const wantUsagePad = (now = Date.now()) => spanParam(padSpan(loadSpan(screenWants()?.usage, now), { toNow: true, now }));
+export const wantPerfPad = () => spanParam(padSpan(perfSpan(screenWants()?.perf)));
+// Whether the screen shows percentiles for its window, which hold only for
+// exactly the window they were read for.
+const wantsPercentiles = () => !!screenWants()?.percentiles;
 
 // Whether the loaded performance is for the window on screen: the reply is
 // for a custom window (a backend without them answers with the fixed
@@ -204,42 +227,223 @@ export function setChartFormat(id, f) {
   setPref("charts", charts);
 }
 
-let started = 0, applied = 0;
+// ---------- loading data ----------
 
 // The query for /dashboard/data: the fixed range, the picked accounts when
-// they need merging, and the usage and performance windows the screen draws.
-export function dataQuery(want = wantRange(), scope = wantScope(), viewport = wantUsageViewport(), perfWin = wantPerfWindow()) {
+// they need merging, the usage and performance windows the screen draws, and
+// the margin loaded around each.
+export function dataQuery(want = wantRange(), scope = wantScope(), viewport = wantUsageViewport(), perfWin = wantPerfWindow(), usagePad = "", perfPad = "") {
   const q = new URLSearchParams({ range: want });
   if (scope) q.set("scope", scope);
   if (viewport) { const [a, b] = viewport.split(","); q.set("usage_start", a); q.set("usage_end", b); }
+  if (viewport && usagePad) { const [a, b] = usagePad.split(","); q.set("usage_pad_start", a); q.set("usage_pad_end", b); }
   if (perfWin) { const [a, b] = perfWin.split(","); q.set("perf_start", a); q.set("perf_end", b); }
+  if (perfWin && perfPad) { const [a, b] = perfPad.split(","); q.set("perf_pad_start", a); q.set("perf_pad_end", b); }
   return q.toString();
 }
 
-// Loads /dashboard/data for the current route. A reply that arrives after a
-// newer one, or after the route moved to another window or selection, is dropped.
-export async function fetchData() {
-  const want = wantRange();
-  const scope = wantScope();
-  const my = ++started;
-  const viewport = wantUsageViewport();
-  const perfWin = wantPerfWindow();
-  const res = await fetch("/dashboard/data?" + dataQuery(want, scope, viewport, perfWin), { cache: "no-store" });
-  if (!res.ok) throw new Error("Could not read the proxy (" + res.status + ")");
-  const data = await res.json();
-  if (my < applied || want !== wantRange() || scope !== wantScope() || viewport !== wantUsageViewport() || perfWin !== wantPerfWindow()) return;
-  applied = my;
-  S.data = data;
-  reconcileSelection();
-  S.dataRange = want;
-  S.dataScope = scope;
-  S.dataViewport = viewport;
-  S.dataPerf = perfWin;
-  S.readAt = Date.now();
+// What the current screen wants loaded, with its query.
+export function wanted(now = Date.now()) {
+  const w = { range: wantRange(now), scope: wantScope(), viewport: wantUsageViewport(), perfWin: wantPerfWindow(), usagePad: wantUsagePad(now), perfPad: wantPerfPad(), percentiles: wantsPercentiles() };
+  w.query = dataQuery(w.range, w.scope, w.viewport, w.perfWin, w.usagePad, w.perfPad);
+  return w;
 }
 
-// Whether the loaded data is what the current screen wants.
-export const dataCurrent = () => wantRange() === S.dataRange && wantScope() === S.dataScope && wantUsageViewport() === S.dataViewport && wantPerfWindow() === S.dataPerf;
+const DAY_MS = 864e5;
+const spanOf = (p) => { if (!p) return null; const [a, b] = p.split(",").map(Date.parse); return { start: a, end: b }; };
+
+// The proxy's bucket rules, so a window can tell whether loaded buckets are
+// the ones it would get itself. Usage is daily for a window over 7 days or
+// one reaching before the hourly buckets kept (14 days); performance takes
+// the finest step giving at most 200 buckets, whole days before 35 days back.
+const usageDaily = (v, now) => v.end - v.start > 7 * DAY_MS || v.start < now - 14 * DAY_MS;
+export function perfHours(v, now) {
+  for (const h of [1, 3, 6, 12, 24, 48, 168]) {
+    if (h < 24 && v.start < now - 35 * DAY_MS) continue;
+    if (Math.ceil((v.end - v.start) / (h * 3600e3)) <= 200) return h;
+  }
+  return 168;
+}
+
+// The stretch loaded buckets cover: usage from its first start to its last
+// end, performance over its series (which stops at now) or, with no buckets,
+// the span asked for.
+function usageExtent(ur) {
+  const st = ur?.starts;
+  if (!Array.isArray(st) || !st.length) return null;
+  const ends = Array.isArray(ur.ends) && ur.ends.length === st.length ? ur.ends : null;
+  const end = ends ? Date.parse(ends[ends.length - 1]) : Date.parse(st[st.length - 1]) + (Number(ur.bucket_seconds) || 3600) * 1000;
+  return { start: Date.parse(st[0]), end };
+}
+function perfExtent(perf, asked) {
+  for (const sc of Object.values(perf?.scopes || {})) {
+    const s = (sc?.series || []).filter((b) => b && b.start);
+    if (s.length) return { start: Date.parse(s[0].start), end: Date.parse(s[s.length - 1].start) + (Number(perf.bucket_seconds) || 3600) * 1000 };
+  }
+  return spanOf(asked);
+}
+// Whether ext holds the window v up to now, give or take a minute.
+const holds = (ext, v, now) => !!ext && v.start >= ext.start - 60e3 && Math.min(v.end, now) <= ext.end + 60e3;
+
+// The reply on screen and what it was asked for.
+const loadedNow = () => ({ data: S.data, range: S.dataRange, scope: S.dataScope, viewport: S.dataViewport, perfWin: S.dataPerf, perfPad: S.dataPerfPad, query: S.dataQuery });
+const loadedFor = (w, data) => ({ data, range: w.range, scope: w.scope, viewport: w.viewport, perfWin: w.perfWin, perfPad: w.perfPad, query: w.query });
+
+// Whether a loaded reply (the one on screen by default) already draws what
+// the screen wants: the same accounts, both windows inside the buckets loaded
+// and in the buckets each would get alone, and, where the screen shows
+// percentiles, the very window they were read for. A pan or a small zoom
+// inside the margin is then drawn from it, with no request.
+export function covers(w, now = Date.now(), L = loadedNow()) {
+  const sum = L.data?.summary;
+  if (!sum || w.scope !== L.scope) return false;
+  const perf = sum.performance;
+  const custom = perf?.range === "custom";
+  if (!custom && w.range !== L.range) return false;
+  if (!!w.viewport !== !!L.viewport || !!w.perfWin !== !!L.perfWin) return false;
+  if (w.viewport) {
+    const v = spanOf(w.viewport), ur = sum.usage_range;
+    if (!holds(usageExtent(ur), v, now)) return false;
+    if (usageDaily(v, now) !== (Number(ur.bucket_seconds) >= 86400)) return false;
+  }
+  if (w.perfWin) {
+    const v = spanOf(w.perfWin);
+    if (!custom || !holds(perfExtent(perf, L.perfPad || L.perfWin), v, now)) return false;
+    if (perfHours(v, now) * 3600 !== Number(perf.bucket_seconds)) return false;
+    if (w.percentiles && !(w.perfWin === L.perfWin || perfCurrent(w.perfWin, L.perfWin, now))) return false;
+  }
+  return true;
+}
+
+// Whether the loaded data is what the current screen wants, or draws it.
+export function dataCurrent(now = Date.now()) {
+  if (!S.data) return false;
+  const w = wanted(now);
+  return w.query === S.dataQuery || covers(w, now);
+}
+
+// The last few replies by query, so going back to an earlier zoom draws at
+// once. A reply is reused for a minute; the regular refresh keeps the one on
+// screen fresh.
+const CACHE_SIZE = 8, CACHE_FRESH = 60e3;
+const replies = new Map();
+function remember(query, data, at) {
+  replies.delete(query);
+  replies.set(query, { data, at });
+  while (replies.size > CACHE_SIZE) replies.delete(replies.keys().next().value);
+}
+function cached(query, now = Date.now()) {
+  const r = replies.get(query);
+  return r && now - r.at <= CACHE_FRESH ? r : null;
+}
+export const forgetReplies = () => replies.clear();
+
+// Requests sent, for tests and the frame check.
+export const loads = { requests: 0 };
+
+// One request at a time: a request for another query aborts the one in
+// flight, as its reply would be dropped anyway; the same query shares it.
+// An aborted request resolves to null.
+let inflight = null;
+function request(query) {
+  if (inflight && inflight.query === query) return inflight.promise;
+  inflight?.ctrl?.abort();
+  const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+  const me = { query, ctrl };
+  loads.requests++;
+  me.promise = (async () => {
+    try {
+      const res = await fetch("/dashboard/data?" + query, { cache: "no-store", signal: ctrl?.signal });
+      if (!res.ok) throw new Error("Could not read the proxy (" + res.status + ")");
+      const data = await res.json();
+      remember(query, data, Date.now());
+      return data;
+    } catch (e) {
+      if (e?.name === "AbortError" || ctrl?.signal?.aborted) return null;
+      throw e;
+    } finally {
+      if (inflight === me) inflight = null;
+    }
+  })();
+  inflight = me;
+  return me.promise;
+}
+
+function install(w, data, at) {
+  S.data = data;
+  reconcileSelection();
+  S.dataRange = w.range;
+  S.dataScope = w.scope;
+  S.dataViewport = w.viewport;
+  S.dataPerf = w.perfWin;
+  S.dataUsagePad = w.usagePad;
+  S.dataPerfPad = w.perfPad;
+  S.dataQuery = w.query;
+  S.readAt = at;
+}
+
+let started = 0, applied = 0;
+
+// Whether a reply for w should go on screen now: it is for what the screen
+// wants, or it draws that.
+const stillWanted = (w, data) => { const now = wanted(); return now.query === w.query || covers(now, Date.now(), loadedFor(w, data)); };
+
+// The one way a reply goes on screen, from the network or from the cache
+// alike. my is the number its load took when it started; at is when the
+// reply was read. Checked at the moment of applying, as the window may have
+// moved since the load started or since its frame was asked for: a reply
+// older than one already shown, a remembered one gone stale, or one that
+// does not draw what the screen now wants is dropped. True when applied.
+function applyReply(my, w, data, at) {
+  if (data == null || my < applied) return false;
+  if (Date.now() - at > CACHE_FRESH) return false;
+  if (!stillWanted(w, data)) return false;
+  applied = my;
+  install(w, data, at);
+  return true;
+}
+
+// Loads /dashboard/data for the current route, with the margin around its
+// windows. A reply that arrives after a newer one, or after the route moved
+// to a window or selection it does not draw, is dropped.
+export async function fetchData() {
+  const w = wanted();
+  const my = ++started;
+  const data = await request(w.query);
+  applyReply(my, w, data, Date.now());
+}
+
+// The next frame while the page shows, else a timer, so a hidden tab still
+// settles.
+export function nextFrame(fn) {
+  const shown = typeof document !== "undefined" && document.visibilityState === "visible" && typeof requestAnimationFrame === "function";
+  return shown ? requestAnimationFrame(fn) : setTimeout(fn, 16);
+}
+
+// A window that loads data moved. Once it has been still for SETTLE_MS, the
+// screen gets what it now wants: nothing when the reply on screen draws it,
+// a remembered reply for the same query, else one request. The old data
+// stays on screen until the new arrives, and the swap is drawn in one frame.
+const SETTLE_MS = 150;
+let settleTimer = null;
+const patchEvent = () => globalThis.window?.dispatchEvent(new Event("dash:patch"));
+export function windowMoved(redraw = patchEvent) {
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => { settleTimer = null; settle(typeof redraw === "function" ? redraw : patchEvent); }, SETTLE_MS);
+}
+export async function settle(redraw = patchEvent) {
+  if (!S.data || dataCurrent()) return;
+  const w = wanted();
+  const my = ++started;
+  const hit = cached(w.query);
+  let data = hit?.data, at = hit?.at;
+  if (!hit) {
+    try { data = await request(w.query); } catch (e) { return; }
+    at = Date.now();
+    if (data == null || my < applied) return;
+  }
+  nextFrame(() => { if (applyReply(my, w, data, at)) redraw(); });
+}
 
 export function setKey(k) {
   S.key = k || "";
@@ -272,8 +476,10 @@ export function fmt(n) {
   return String(Math.round(n));
 }
 
+// toLocaleString builds a formatter on every call; this one is made once.
+const GB = new Intl.NumberFormat("en-GB");
 export function int(n) {
-  return (Number(n) || 0).toLocaleString("en-GB");
+  return GB.format(Number(n) || 0);
 }
 
 // US dollars: "$0.42", "$12.30", "$1,234", "$12.3k", "$1.23M". Each unit is
@@ -285,7 +491,7 @@ export function money(n) {
   const cents = Math.round(a * 100) / 100, dollars = Math.round(a), k = Math.round(a / 100) / 10;
   if (k >= 1e3) return `${sign}$${(Math.round(a / 1e4) / 100).toFixed(2)}M`;
   if (k >= 10) return `${sign}$${k.toFixed(1)}k`;
-  if (cents >= 1e3) return sign + "$" + dollars.toLocaleString("en-GB");
+  if (cents >= 1e3) return sign + "$" + GB.format(dollars);
   return `${sign}$${cents.toFixed(2)}`;
 }
 // Dollars on a chart's y axis, short enough for its column. Below a cent it
@@ -316,24 +522,38 @@ const toMs = (t) => (typeof t === "number" ? t : Date.parse(t));
 
 function tz() { return S.data?.summary?.timezone || undefined; }
 // One formatter per zone and format, made once: building one costs far more
-// than using it, and a long forecast formats thousands of times.
+// than using it, and a long forecast formats thousands of times. Each keeps
+// the texts it made, as a pan or zoom formats the same instants every frame.
+const CLOCK = { hour: "2-digit", minute: "2-digit", hour12: false };
+const DAY_NAME = { weekday: "short", day: "numeric", month: "short" };
+const WEEKDAY = { weekday: "short" };
+const YMD = { year: "numeric", month: "2-digit", day: "2-digit" };
 const formats = new Map();
 function partsOf(t, opts) {
   const zone = tz();
-  const key = `${zone}|${JSON.stringify(opts)}`;
-  let f = formats.get(key);
-  if (!f) {
+  let byZone = formats.get(zone);
+  if (!byZone) formats.set(zone, (byZone = new Map()));
+  let e = byZone.get(opts);
+  if (!e) {
+    let f;
     try { f = new Intl.DateTimeFormat("en-GB", { timeZone: zone, ...opts }); }
-    catch (e) { f = new Intl.DateTimeFormat("en-GB", opts); }
-    formats.set(key, f);
+    catch (err) { f = new Intl.DateTimeFormat("en-GB", opts); }
+    byZone.set(opts, (e = { f, texts: new Map() }));
   }
-  return f.format(new Date(toMs(t)));
+  const ms = toMs(t);
+  let s = e.texts.get(ms);
+  if (s === undefined) {
+    if (e.texts.size > 20000) e.texts.clear();
+    s = e.f.format(new Date(ms));
+    e.texts.set(ms, s);
+  }
+  return s;
 }
-export const clock = (t) => partsOf(t, { hour: "2-digit", minute: "2-digit", hour12: false });
-export const day = (t) => partsOf(t, { weekday: "short", day: "numeric", month: "short" }).replace(",", "");
-export const weekdayTime = (t) => partsOf(t, { weekday: "short" }) + " " + clock(t);
+export const clock = (t) => partsOf(t, CLOCK);
+export const day = (t) => partsOf(t, DAY_NAME).replace(",", "");
+export const weekdayTime = (t) => partsOf(t, WEEKDAY) + " " + clock(t);
 export function dayKey(t) {
-  const p = partsOf(t, { year: "numeric", month: "2-digit", day: "2-digit" }); // dd/mm/yyyy
+  const p = partsOf(t, YMD); // dd/mm/yyyy
   const [d, m, y] = p.split("/");
   return `${y}-${m}-${d}`;
 }

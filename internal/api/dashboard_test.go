@@ -1,12 +1,16 @@
 package api
 
 import (
+	"compress/gzip"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
@@ -56,6 +60,54 @@ func TestPostDashboardSessions(t *testing.T) {
 	huge := `{"machine":"m","sessions":[{"id":"x","title":"` + strings.Repeat("a", maxDashboardSessionsBody) + `"}]}`
 	if rec := post("127.0.0.1:5000", huge); rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("over 1 MB: status %d, want 413", rec.Code)
+	}
+}
+
+// The data reply is gzipped for a browser that asks, and plain otherwise,
+// with the same JSON either way.
+func TestServeDashboardDataGzip(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := &Server{cfg: &config.Config{}, mgmt: &managementHandlers.Handler{}}
+	server.managementRoutesEnabled.Store(true)
+	get := func(encoding string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/dashboard/data?range=24h", nil)
+		ctx.Request.RemoteAddr = "127.0.0.1:5000"
+		if encoding != "" {
+			ctx.Request.Header.Set("Accept-Encoding", encoding)
+		}
+		server.serveDashboardData(ctx)
+		return rec
+	}
+	plain := get("")
+	if plain.Code != http.StatusOK || plain.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("plain: status %d encoding %q", plain.Code, plain.Header().Get("Content-Encoding"))
+	}
+	zipped := get("br, gzip;q=0.8")
+	if zipped.Code != http.StatusOK || zipped.Header().Get("Content-Encoding") != "gzip" || zipped.Header().Get("Vary") != "Accept-Encoding" {
+		t.Fatalf("gzip: status %d encoding %q vary %q", zipped.Code, zipped.Header().Get("Content-Encoding"), zipped.Header().Get("Vary"))
+	}
+	zr, errReader := gzip.NewReader(zipped.Body)
+	if errReader != nil {
+		t.Fatal(errReader)
+	}
+	body, errRead := io.ReadAll(zr)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	var a, b map[string]any
+	if json.Unmarshal(body, &a) != nil || json.Unmarshal(plain.Body.Bytes(), &b) != nil || a["summary"] == nil || b["summary"] == nil {
+		t.Fatal("replies are not the dashboard JSON")
+	}
+	if refused := get("gzip;q=0"); refused.Header().Get("Content-Encoding") != "" {
+		t.Fatal("gzip sent although the browser refused it")
+	}
+	for header, want := range map[string]bool{"gzip": true, "deflate, gzip": true, "GZIP; q=1": true, "gzip; q=0": false, "identity": false, "": false} {
+		if got := acceptsGzip(header); got != want {
+			t.Errorf("acceptsGzip(%q) = %v, want %v", header, got, want)
+		}
 	}
 }
 

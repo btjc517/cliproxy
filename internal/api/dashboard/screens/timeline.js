@@ -10,6 +10,7 @@ import { allowanceSeries, trajectory } from "./burn.js";
 import { accountColor } from "./common.js";
 import { HOUR, DAY, addDays, midnight, fracOf, timeAt, timeTicks, timeState, bindTime, selectionLabel, backToNow } from "./timeaxis.js";
 import { card } from "./tplot.js";
+import { region } from "../paint.js";
 
 const WEEK = 7 * DAY;
 const DAYS = 30;          // yesterday, today and 28 days ahead
@@ -249,7 +250,7 @@ function rowHtml(m, color, fr, now, idx) {
     const text = "Renews " + planDay(r).split(" ").slice(1).join(" ");
     over += `<span class="tl-mark ${x > 0.86 ? "flip" : ""}" style="left:${pc(x)}"><span>${icon("card", 12, "var(--fg)")}${esc(text)}</span></span>`;
   }
-  return `<div class="tl-row">${nameCell(m.a, color)}<div class="area" data-tl-row data-row="${idx}" data-tplot="${KEY}"><div class="tp-content"><svg class="tlsvg" viewBox="0 0 1000 48" preserveAspectRatio="none" aria-hidden="true">${svg}</svg>${over}</div></div></div>`;
+  return `<div class="tl-row">${nameCell(m.a, color)}<div class="area" data-tl-row data-row="${idx}" data-tplot="${KEY}">${region(`tl|row|${m.a.id}`, `<svg class="tlsvg" viewBox="0 0 1000 48" preserveAspectRatio="none" aria-hidden="true">${svg}</svg>${over}`, "div", `class="tp-content"`)}</div></div>`;
 }
 
 function stripHtml(models, fr, now) {
@@ -298,7 +299,7 @@ function calendarHtml(fr, v, now) {
   } else {
     days = timeTicks(v, 10).map((tk) => `<span class="tk" style="left:${pc(fr.x(tk.t))}">${esc(tk.text)}</span>`).join("");
   }
-  return `<div class="tl-cal"><div class="lab"></div><div class="area">${months}<div class="days">${days}</div></div></div>`;
+  return `<div class="tl-cal"><div class="lab"></div>${region("tl|cal", `${months}<div class="days">${days}</div>`, "div", `class="area"`)}</div>`;
 }
 
 function layersHtml(fr, v, now) {
@@ -316,8 +317,8 @@ function layersHtml(fr, v, now) {
   const nowIn = now >= v.start && now <= v.end;
   const x = pc(fr.x(now));
   return {
-    back: `<div class="tl-layer">${weeks}</div>`,
-    front: nowIn ? `<div class="tl-layer"><i class="tl-now" style="left:${x}"></i><span class="tl-pill" style="left:${x}">Now</span></div>` : "",
+    back: region("tl|back", weeks, "div", `class="tl-layer"`),
+    front: region("tl|front", nowIn ? `<i class="tl-now" style="left:${x}"></i><span class="tl-pill" style="left:${x}">Now</span>` : "", "div", `class="tl-layer"`),
   };
 }
 
@@ -340,7 +341,7 @@ export function timeline(accts) {
     const list = [...q.order, ...q.rest].filter((a) => ids.has(a.id));
     const models = list.map((a) => model(a, now, fr));
     strips[provider] = models;
-    body += `<div class="tl-grp"><div class="lab">${logo(provider)}<b>${providerTitle(provider)}</b><span class="muted">accounts available</span></div><div class="area tl-strip" data-strip-provider="${provider}" data-tplot="${KEY}"><div class="tp-content">${stripHtml(models, fr, now)}</div></div></div>`;
+    body += `<div class="tl-grp"><div class="lab">${logo(provider)}<b>${providerTitle(provider)}</b><span class="muted">accounts available</span></div><div class="area tl-strip" data-strip-provider="${provider}" data-tplot="${KEY}">${region(`tl|strip|${provider}`, stripHtml(models, fr, now), "div", `class="tp-content"`)}</div></div>`;
     models.forEach((m) => {
       body += rowHtml(m, accountColor(m.a.id), fr, now, rows.length);
       rows.push(m);
@@ -350,7 +351,7 @@ export function timeline(accts) {
   const what = ts.moved ? "Weekly allowance left per account at the current burn, with resets and monthly renewals." : "Next 30 days. Weekly allowance left per account at the current burn, with resets and monthly renewals.";
   const end = ts.range ? selectionLabel(ts.range, "data-tl-clear") : ts.moved ? backToNow("data-tl-home") : "";
   const html = `<div class="tlsec">
-    <div class="tlhead"><div class="t"><b>Timeline</b><span class="muted">${what}</span></div>${end ? `<div class="tlend">${end}</div>` : ""}</div>
+    ${region("tl|head", `<div class="t"><b>Timeline</b><span class="muted">${what}</span></div>${end ? `<div class="tlend">${end}</div>` : ""}`, "div", `class="tlhead"`)}
     <div class="tlwrap"><div class="tl" data-tl>${layers.back}${calendarHtml(fr, v, now)}${body}${layers.front}</div></div>
   </div>`;
 
@@ -359,6 +360,10 @@ export function timeline(accts) {
     if (!tl) return;
     // Strip counts that do not fit their stretch are left out. A stretch with
     // none available keeps its warning icon when the word does not fit.
+    // A redraw may keep labels laid out last time: they start from scratch.
+    tl.querySelectorAll(".tl-strip span.compact, .tl-strip span.hide").forEach((s) => s.classList.remove("compact", "hide"));
+    tl.querySelectorAll("[data-tl-row] .hide").forEach((el) => el.classList.remove("hide"));
+    tl.querySelectorAll("[data-tl-row] [style*=translateX]").forEach((el) => { el.style.transform = ""; });
     tl.querySelectorAll(".tl-strip span").forEach((s) => {
       const over = () => s.scrollWidth > s.clientWidth + 1;
       if (over() && s.parentElement.classList.contains("none")) s.classList.add("compact");

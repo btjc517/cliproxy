@@ -13,6 +13,7 @@ import { usageFigures, perfFigures, historyBefore } from "./series.js";
 import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backToNow, zoomHint, endText, dayText } from "./timeaxis.js";
 import { V, COLUMN_IDS, findView, defaultId, sameView, viewWindow, hasForecast, loadViews, changedFields } from "./views.js";
 import { openDisplay, displayOpen, startRename, renameBox, mountRename, setDefaultView, saveDraft, newViewDialog, viewMenu } from "./viewmenus.js";
+import { region, kept } from "../paint.js";
 
 const KEY = "tv";
 const copy = (v) => JSON.parse(JSON.stringify(v));
@@ -80,8 +81,13 @@ export function wants(params) {
   const c = current(params[0]);
   if (!c) return null;
   const w = viewTime(c.view).window;
-  return { usage: w, perf: w };
+  return { usage: w, perf: w, percentiles: showsPercentiles(c.view) };
 }
+
+// Whether a view shows percentiles for its window, which hold only for the
+// exact window they were read for, so a pan asks for them once it settles.
+const PCT_PANELS = ["ttft", "latency", "throughput"], PCT_COLS = ["ttft50", "ttft90", "throughput"];
+const showsPercentiles = (v) => v.panels.some((p) => PCT_PANELS.includes(p.type)) || (v.columns || []).some((c) => PCT_COLS.includes(c));
 
 // ---------- the table ----------
 
@@ -290,8 +296,7 @@ export function view(ctx) {
     <div class="tbar">
       <div class="l">${name}<button class="star ${isDefault ? "on" : ""}" data-star aria-pressed="${isDefault}" aria-label="${isDefault ? "Default view" : "Set as default view"}" title="${isDefault ? "Opens first under Telemetry" : "Set as default view"}">${STAR(isDefault)}</button><button class="vopts" data-vopts data-anchor="vopts-${esc(v.id)}" aria-label="${esc(v.name)} options" aria-haspopup="menu">${MORE}</button></div>
       <div class="r">
-        <span class="wlabel">${esc(windowText(ts.window, base.now))}</span>
-        ${ts.moved ? backToNow("data-home") : ""}
+        ${region("tv|when", `<span class="wlabel">${esc(windowText(ts.window, base.now))}</span>${ts.moved ? backToNow("data-home") : ""}`, "div", `style="display:contents"`)}
         <button class="dispbtn ${displayOpen() ? "open" : ""}" data-display data-anchor="display" aria-haspopup="dialog" aria-expanded="${displayOpen()}">${icon("adjust", 14)}<span>Display</span></button>
         ${accountPicker()}
       </div>
@@ -299,8 +304,8 @@ export function view(ctx) {
     ${c.dirty ? `<div class="ubar" role="status"><span>You changed this view</span><div class="acts"><button data-u-reset>Reset</button><button data-u-new>Save as new view</button><button class="save" data-u-save>Save</button></div></div>` : ""}
     <div class="body tele" data-tele>
       ${panels || `<div class="empty">This view has no panels. Add some from Display.</div>`}
-      ${tableHtml(v, base)}
-      <div class="readrow">${esc(readAt())}</div>
+      ${region("tv|table", kept("tv|table", () => tableHtml(v, base)))}
+      ${region("tv|read", esc(readAt()), "div", `class="readrow"`)}
     </div>`;
 
   return {
@@ -328,12 +333,14 @@ export function view(ctx) {
         b.onclick = () => edit(v.id, (d) => { const p = d.panels[Number(b.dataset.opt)]; if (p) p.options = { ...p.options, [b.dataset.key]: b.dataset.val }; });
       });
       tele.querySelectorAll("[data-clear-range]").forEach((b) => { b.onclick = () => ts.setRange(null); });
-      tele.addEventListener("keydown", (e) => { if (e.key === "Escape" && ts.range && !e.defaultPrevented) ts.setRange(null); });
+      // A redraw that keeps the page binds it again: handlers are set as
+      // properties, so they replace the last ones and read this drawing's state.
+      tele.onkeydown = (e) => { if (e.key === "Escape" && ts.range && !e.defaultPrevented) ts.setRange(null); };
       // A table row lights its account's lines on every panel.
       const marks = () => tele.querySelectorAll("[data-acct]");
       tele.querySelectorAll("[data-row-acct]").forEach((row) => {
-        row.addEventListener("mouseenter", () => { const id2 = row.dataset.rowAcct; marks().forEach((m) => { m.style.opacity = m.dataset.acct === id2 ? "" : ".25"; }); });
-        row.addEventListener("mouseleave", () => marks().forEach((m) => { m.style.opacity = ""; }));
+        row.onmouseenter = () => { const id2 = row.dataset.rowAcct; marks().forEach((m) => { m.style.opacity = m.dataset.acct === id2 ? "" : ".25"; }); };
+        row.onmouseleave = () => marks().forEach((m) => { m.style.opacity = ""; });
       });
       const home = root.querySelector("[data-home]");
       if (home) home.onclick = () => { ts.setRange(null); ts.setWindow(ts.defaultWindow()); };
