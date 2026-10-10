@@ -13,7 +13,7 @@ import { usageFigures, perfFigures, historyBefore } from "./series.js";
 import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backToNow, zoomHint, endText, dayText } from "./timeaxis.js";
 import { V, COLUMN_IDS, findView, defaultId, sameView, viewWindow, hasForecast, loadViews, changedFields } from "./views.js";
 import { openDisplay, displayOpen, startRename, renameBox, mountRename, setDefaultView, saveDraft, newViewDialog, viewMenu } from "./viewmenus.js";
-import { region } from "../paint.js";
+import { region, kept } from "../paint.js";
 
 const KEY = "tv";
 const copy = (v) => JSON.parse(JSON.stringify(v));
@@ -304,7 +304,7 @@ export function view(ctx) {
     ${c.dirty ? `<div class="ubar" role="status"><span>You changed this view</span><div class="acts"><button data-u-reset>Reset</button><button data-u-new>Save as new view</button><button class="save" data-u-save>Save</button></div></div>` : ""}
     <div class="body tele" data-tele>
       ${panels || `<div class="empty">This view has no panels. Add some from Display.</div>`}
-      ${region("tv|table", tableHtml(v, base))}
+      ${region("tv|table", kept("tv|table", () => tableHtml(v, base)))}
       ${region("tv|read", esc(readAt()), "div", `class="readrow"`)}
     </div>`;
 

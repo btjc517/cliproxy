@@ -114,13 +114,27 @@ export function moveRange(r, dt, grid) {
 // ---------- time zone aware ticks and labels ----------
 
 // Milliseconds the proxy's time zone is ahead of UTC at t.
+// One formatter per zone, and the offsets it gave, as a pan or zoom asks for
+// the same instants every frame.
+const offsets = new Map();
 export function tzOffset(t) {
-  const tz = S.data?.summary?.timezone;
+  const tz = S.data?.summary?.timezone || "";
+  let z = offsets.get(tz);
+  if (!z) {
+    let f = null;
+    try { f = new Intl.DateTimeFormat("en-GB", { timeZone: tz || undefined, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }); } catch (e) { /* unknown zone */ }
+    offsets.set(tz, (z = { f, at: new Map() }));
+  }
+  let off = z.at.get(t);
+  if (off !== undefined) return off;
   try {
-    const p = new Intl.DateTimeFormat("en-GB", { timeZone: tz || undefined, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(new Date(t));
+    const p = z.f.formatToParts(new Date(t));
     const g = (k) => Number(p.find((x) => x.type === k)?.value);
-    return Date.UTC(g("year"), g("month") - 1, g("day"), g("hour") % 24, g("minute"), g("second")) - Math.floor(t / 1000) * 1000;
-  } catch (e) { return -new Date(t).getTimezoneOffset() * 60e3; }
+    off = Date.UTC(g("year"), g("month") - 1, g("day"), g("hour") % 24, g("minute"), g("second")) - Math.floor(t / 1000) * 1000;
+  } catch (e) { off = -new Date(t).getTimezoneOffset() * 60e3; }
+  if (z.at.size > 20000) z.at.clear();
+  z.at.set(t, off);
+  return off;
 }
 
 const TICK_STEPS = [HOUR, 2 * HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 3 * DAY, 7 * DAY, 14 * DAY, 30 * DAY, 61 * DAY, 91 * DAY];
@@ -245,11 +259,17 @@ export function rangeText(r) {
 export const GUTTER_L = 42, GUTTER_R = 12;
 
 // The plot width a panel will get, for laying out labels before it is mounted.
+// Read once per task: a screen asks for it for every plot it builds, and each
+// read after a redraw would lay the page out again.
+let widthNow = null;
 export function plotWidth() {
   if (typeof document === "undefined") return 1096;
+  if (widthNow != null) return widthNow;
   const main = document.getElementById("main")?.clientWidth || 1200;
   const pad = window.innerWidth <= 860 ? 32 : 48;
-  return Math.max(120, main - 2 - pad - GUTTER_L - GUTTER_R);
+  widthNow = Math.max(120, main - 2 - pad - GUTTER_L - GUTTER_R);
+  queueMicrotask(() => { widthNow = null; });
+  return widthNow;
 }
 
 // ---------- a page's time state ----------
@@ -265,6 +285,10 @@ export function upToNow(w, now = Date.now()) {
   return { start: w.start, end: Math.max(Math.min(w.end, now), Math.min(w.start + 60e3, w.end)) };
 }
 
+// Just past paint.GESTURE_QUIET, so the catch-up redraw builds everything.
+const SETTLE_REDRAW = 160;
+let catchUp = null;
+
 export function timeState(key, { defaultWindow, future = false, loads = false, now = Date.now() }) {
   const all = (S.ui.time ||= {});
   const st = (all[key] ||= { win: null, range: null });
@@ -272,10 +296,13 @@ export function timeState(key, { defaultWindow, future = false, loads = false, n
   const stored = (w) => (w.toNow && !future ? upToNow(w, now) : limitWindow(w, { now, future }));
   // A new window redraws the screen's regions, not the whole screen, so the
   // plots move from the data already loaded; data for it is asked for once
-  // the window settles (dash:usage-window).
+  // the window settles (dash:usage-window). Parts left as they were while
+  // the window moved (paint.kept) catch up in one more redraw once it is still.
   const changed = () => {
     window.dispatchEvent(new Event("dash:patch"));
     if (loads) window.dispatchEvent(new Event("dash:usage-window"));
+    clearTimeout(catchUp);
+    catchUp = setTimeout(() => window.dispatchEvent(new Event("dash:patch")), SETTLE_REDRAW);
   };
   return {
     key,

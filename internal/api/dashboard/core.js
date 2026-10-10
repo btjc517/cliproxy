@@ -466,8 +466,10 @@ export function fmt(n) {
   return String(Math.round(n));
 }
 
+// toLocaleString builds a formatter on every call; this one is made once.
+const GB = new Intl.NumberFormat("en-GB");
 export function int(n) {
-  return (Number(n) || 0).toLocaleString("en-GB");
+  return GB.format(Number(n) || 0);
 }
 
 // US dollars: "$0.42", "$12.30", "$1,234", "$12.3k", "$1.23M". Each unit is
@@ -479,7 +481,7 @@ export function money(n) {
   const cents = Math.round(a * 100) / 100, dollars = Math.round(a), k = Math.round(a / 100) / 10;
   if (k >= 1e3) return `${sign}$${(Math.round(a / 1e4) / 100).toFixed(2)}M`;
   if (k >= 10) return `${sign}$${k.toFixed(1)}k`;
-  if (cents >= 1e3) return sign + "$" + dollars.toLocaleString("en-GB");
+  if (cents >= 1e3) return sign + "$" + GB.format(dollars);
   return `${sign}$${cents.toFixed(2)}`;
 }
 // Dollars on a chart's y axis, short enough for its column. Below a cent it
@@ -510,24 +512,38 @@ const toMs = (t) => (typeof t === "number" ? t : Date.parse(t));
 
 function tz() { return S.data?.summary?.timezone || undefined; }
 // One formatter per zone and format, made once: building one costs far more
-// than using it, and a long forecast formats thousands of times.
+// than using it, and a long forecast formats thousands of times. Each keeps
+// the texts it made, as a pan or zoom formats the same instants every frame.
+const CLOCK = { hour: "2-digit", minute: "2-digit", hour12: false };
+const DAY_NAME = { weekday: "short", day: "numeric", month: "short" };
+const WEEKDAY = { weekday: "short" };
+const YMD = { year: "numeric", month: "2-digit", day: "2-digit" };
 const formats = new Map();
 function partsOf(t, opts) {
   const zone = tz();
-  const key = `${zone}|${JSON.stringify(opts)}`;
-  let f = formats.get(key);
-  if (!f) {
+  let byZone = formats.get(zone);
+  if (!byZone) formats.set(zone, (byZone = new Map()));
+  let e = byZone.get(opts);
+  if (!e) {
+    let f;
     try { f = new Intl.DateTimeFormat("en-GB", { timeZone: zone, ...opts }); }
-    catch (e) { f = new Intl.DateTimeFormat("en-GB", opts); }
-    formats.set(key, f);
+    catch (err) { f = new Intl.DateTimeFormat("en-GB", opts); }
+    byZone.set(opts, (e = { f, texts: new Map() }));
   }
-  return f.format(new Date(toMs(t)));
+  const ms = toMs(t);
+  let s = e.texts.get(ms);
+  if (s === undefined) {
+    if (e.texts.size > 20000) e.texts.clear();
+    s = e.f.format(new Date(ms));
+    e.texts.set(ms, s);
+  }
+  return s;
 }
-export const clock = (t) => partsOf(t, { hour: "2-digit", minute: "2-digit", hour12: false });
-export const day = (t) => partsOf(t, { weekday: "short", day: "numeric", month: "short" }).replace(",", "");
-export const weekdayTime = (t) => partsOf(t, { weekday: "short" }) + " " + clock(t);
+export const clock = (t) => partsOf(t, CLOCK);
+export const day = (t) => partsOf(t, DAY_NAME).replace(",", "");
+export const weekdayTime = (t) => partsOf(t, WEEKDAY) + " " + clock(t);
 export function dayKey(t) {
-  const p = partsOf(t, { year: "numeric", month: "2-digit", day: "2-digit" }); // dd/mm/yyyy
+  const p = partsOf(t, YMD); // dd/mm/yyyy
   const [d, m, y] = p.split("/");
   return `${y}-${m}-${d}`;
 }

@@ -4,7 +4,7 @@
 // so the time plots, their controller, the scroll position, focus and open
 // menus all stay put. A full render (main.innerHTML) is left for route
 // changes and for redraws that change anything outside a region.
-import { esc } from "./core.js";
+import { S, esc } from "./core.js";
 
 let collecting = null;
 const TOKEN = /\u0000(\d+)\u0000/g;
@@ -19,6 +19,17 @@ export function region(key, html, tag = "div", attrs = "") {
   if (!collecting) return open + html + close;
   collecting.push({ key, html, open, close });
   return `\u0000${collecting.length - 1}\u0000`;
+}
+
+// The html for a region that is not a time plot, such as a table: while a
+// plot is being zoomed or panned it keeps what it shows and is not built, so
+// each frame only redraws the plots and their axes; it catches up when the
+// gesture settles (timeState redraws once then).
+export const GESTURE_QUIET = 150;
+export function kept(key, build) {
+  const busy = Date.now() - (S.gestureAt || 0) < GESTURE_QUIET;
+  if (busy && painted.regions?.has(key)) return painted.regions.get(key);
+  return build();
 }
 
 // Runs fn (a screen's view) and adds to its result the page without its
