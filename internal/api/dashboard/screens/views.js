@@ -256,6 +256,13 @@ const OLD_KEYS = [LOCAL_STORE, "cliproxy-dashboard-views-pending"];
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
+// The fields of view b that differ from view a, as copies.
+export function changedFields(a, b) {
+  const fields = {};
+  for (const f of FIELDS) if (!same(a[f], b[f])) fields[f] = copy(b[f]);
+  return fields;
+}
+
 // The operations that turn store a into store b. names: each view's name as
 // shown before the change, for the note if the change is lost. Deleting the
 // default view clears it as part of the delete, not as a change of its own,
@@ -265,8 +272,7 @@ export function opsFor(a, b) {
   const before = new Map(a.views.map((v) => [v.id, v]));
   const after = new Map(b.views.map((v) => [v.id, v]));
   const changed = (old, v) => {
-    const fields = {};
-    for (const f of FIELDS) if (!same(old[f], v[f])) fields[f] = copy(v[f]);
+    const fields = changedFields(old, v);
     return Object.keys(fields).length ? fields : null;
   };
   // Built-ins always exist: an edit, even one back to how it was built, is

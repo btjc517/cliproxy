@@ -410,3 +410,49 @@ test('the availability forecast follows the weekly cycle to the end of a long wi
   assert.equal(Math.round(valueAt(m, after)), 98);
   assert.equal(available(m, after, now), true);
 });
+
+test('a five-hour forecast a year long for three accounts draws in under 200 ms', async () => {
+  // Run in a child process so a render that blocks for seconds fails on the
+  // time limit instead of holding up the whole suite.
+  const { spawnSync } = await import('node:child_process');
+  const dash = new URL('../../internal/api/dashboard/', import.meta.url).href;
+  const code = `
+    const mem = new Map();
+    globalThis.localStorage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
+    globalThis.window = { dispatchEvent() {}, addEventListener() {} };
+    globalThis.Event = class { constructor(t) { this.type = t; } };
+    const { S, accountScope } = await import(${JSON.stringify(dash + 'core.js')});
+    const { panelContext, buildPanel } = await import(${JSON.stringify(dash + 'screens/panels.js')});
+    const HOUR = 3600e3, DAY = 24 * HOUR, now = Date.now(), iso = (t) => new Date(t).toISOString();
+    const ids = ['a', 'b', 'c'];
+    const ser = (i) => ({ long: false, utilization: 0.4, burn_per_hour: 0.05, burned: 0.2, burned_since: iso(now - 5 * HOUR), last_at: iso(now), reset_at: iso(now + (i + 1) * HOUR), window_seconds: 5 * 3600, step_seconds: 600, start: iso(now - DAY), used: [] });
+    S.data = { accounts: ids.map((id) => ({ id, provider: 'claude', email: id + '@x.com' })), allowance: Object.fromEntries(ids.map((id, i) => [id, [ser(i)]])), summary: {} };
+    const t0 = performance.now();
+    const ctx = panelContext({ key: 'perf', window: { start: now - DAY, end: now + 365 * DAY }, range: null }, accountScope(), { forecast: true });
+    const p = buildPanel('allowance', { window: '5h' }, ctx);
+    buildPanel('available', {}, ctx);
+    const ms = performance.now() - t0;
+    // Reset labels as laid out: a label at the right edge ends there.
+    const W = 1096, textW = (s) => s.length * 6.4 + 16;
+    const spans = [...p.html.matchAll(/<span class="(end|)" style="left:([0-9.]+)%"[^>]*>.*?<b>([^<]*)<\\/b>/g)].map((m) => {
+      const x = (Number(m[2]) / 100) * W, wd = textW(m[3]);
+      return m[1] === 'end' ? { a: W - wd, b: W } : { a: x, b: x + wd };
+    });
+    const overlap = spans.some((s, i) => i > 0 && s.a < spans[i - 1].b);
+    console.log(JSON.stringify({ ms, kb: p.html.length / 1024, dots: (p.html.match(/tp-dot/g) || []).length, marks: spans.length, overlap }));
+  `;
+  // Time a warm run: the first one also compiles every module.
+  let out;
+  for (let i = 0; i < 2; i++) {
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(r.status, 0, `the render finished within 10 s (${r.signal || r.stderr})`);
+    out = JSON.parse(r.stdout.trim().split('\n').pop());
+  }
+  assert.ok(out.ms < 200, `drawn in ${Math.round(out.ms)} ms`);
+  // About 1750 resets an account: reset dots and labels are thinned to what
+  // the plot width can show, so the markup stays a few hundred kB.
+  assert.ok(out.kb < 400, `${Math.round(out.kb)} kB of markup`);
+  assert.ok(out.dots < 1000, `${out.dots} dots`);
+  assert.ok(out.marks > 0 && out.marks < 60, `${out.marks} reset labels`);
+  assert.equal(out.overlap, false, 'no reset label runs into the next');
+});

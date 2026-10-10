@@ -372,17 +372,39 @@ function resetMarks(lines, v, now) {
   const times = [...new Set(lines.flatMap((l) => resetsUntil(l.tr, now, v.end, l.period)).filter((t) => t >= v.start))].sort((a, b) => a - b);
   const groups = [];
   const textW = (s) => s.length * 6.4 + 16;
+  // A label shows its first few resets by name, then a count, so it stays
+  // short and each reset is formatted once: work grows with the number of
+  // resets, not with its square, however far out the window reaches.
+  const SHOWN = 3;
+  const labelOf = (g) => (g.times.length <= SHOWN ? g.text : `${g.text}, ${g.times.length - SHOWN} more`);
+  // Room for the count at its widest, so a label never grows past the next.
+  const roomOf = (g) => textW(g.times.length < SHOWN ? g.text : `${g.text}, 9999 more`);
+  const join = (g, t) => {
+    const prev = g.times[g.times.length - 1];
+    g.times.push(t);
+    if (g.times.length <= SHOWN) g.text += ", " + (dayKey(t) === dayKey(prev) ? clock(t) : resetName(t, now));
+  };
   for (const t of times) {
     const g = groups[groups.length - 1];
     const x = fracOf(v, t) * w;
-    if (g && x - g.x < textW(g.text) + 8) {
-      g.times.push(t);
-      g.text = g.times.map((x2, i) => (i && dayKey(x2) === dayKey(g.times[i - 1]) ? clock(x2) : resetName(x2, now))).join(", ");
-    } else groups.push({ x, times: [t], text: resetName(t, now) });
+    if (g && x - g.x < roomOf(g) + 8) join(g, t);
+    else groups.push({ x, times: [t], text: resetName(t, now) });
   }
+  // A label that would run past the right edge is drawn ending there, so it
+  // reaches back to the left: merge it into the one before while they meet.
+  const left = (g) => Math.min(g.x, w - roomOf(g));
+  while (groups.length > 1) {
+    const g = groups[groups.length - 1], p = groups[groups.length - 2];
+    if (left(g) >= p.x + roomOf(p) + 8) break;
+    for (const t of g.times) join(p, t);
+    groups.pop();
+  }
+  const MAX_TITLES = 12;
   return groups.map((g) => {
+    g.text = labelOf(g);
     const edge = g.x + textW(g.text) > w ? "end" : "";
-    const titles = g.times.map((t) => `${day(t)} ${clock(t)}`).join(", ");
+    const listed = g.times.slice(0, MAX_TITLES).map((t) => `${day(t)} ${clock(t)}`).join(", ");
+    const titles = listed + (g.times.length > MAX_TITLES ? `, and ${g.times.length - MAX_TITLES} more` : "");
     return `<span class="${edge}" style="left:${(g.x / w * 100).toFixed(3)}%" title="Resets to 100%: ${esc(titles)}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" fill="none" stroke="var(--muted-fg)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><b>${esc(g.text)}</b></span>`;
   }).join("");
 }
@@ -453,7 +475,15 @@ function allowancePanel(ctx, o) {
       const pp = projectionParts(l, now, v.end);
       series.push({ color: l.color, acct: l.id, width: 1.5, dash: "5 4", pts: pp.strong });
       if (pp.faded.some(Boolean)) series.push({ color: l.color, acct: l.id, width: 1.5, dash: "5 4", opacity: 0.4, pts: pp.faded });
-      dots += pp.resets.filter((t) => t >= v.start && t <= v.end).map((t) => dot(t, 100, 100, l.color, v, "pt", l.id)).join("");
+      // One reset dot per few pixels: zoomed out to months, five-hour resets
+      // fall closer than a pixel apart and would add thousands of elements.
+      const gap = 6 / Math.max(1, plotWidth()), shown = [];
+      for (const t of pp.resets) {
+        if (t < v.start || t > v.end) continue;
+        if (shown.length && fracOf(v, t) - fracOf(v, shown[shown.length - 1]) < gap) continue;
+        shown.push(t);
+      }
+      dots += shown.map((t) => dot(t, 100, 100, l.color, v, "pt", l.id)).join("");
     }
     if (now >= v.start && now <= v.end) dots += dot(now, l.tr.leftNow, 100, l.color, v, "end", l.id);
   }

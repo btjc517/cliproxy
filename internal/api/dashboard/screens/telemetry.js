@@ -11,7 +11,7 @@ import { pctRate, allowanceRange, resetsUntil } from "./burn.js";
 import { PANELS, panelHtml, buildPanel, panelContext, snapGrid, allowanceLines, leftAt, availability, loadSelection } from "./panels.js";
 import { usageFigures, perfFigures, historyBefore } from "./series.js";
 import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backToNow, zoomHint, endText } from "./timeaxis.js";
-import { V, COLUMN_IDS, findView, defaultId, sameView, viewWindow, hasForecast, loadViews } from "./views.js";
+import { V, COLUMN_IDS, findView, defaultId, sameView, viewWindow, hasForecast, loadViews, changedFields } from "./views.js";
 import { openDisplay, displayOpen, startRename, renameBox, mountRename, setDefaultView, saveDraft, newViewDialog, viewMenu } from "./viewmenus.js";
 
 const KEY = "tv";
@@ -21,12 +21,21 @@ const rerender = () => window.dispatchEvent(new Event("dash:render"));
 // ---------- the open view and its unsaved changes ----------
 
 // The saved view, the view as edited (the draft) and whether they differ.
+// A draft remembers the saved view it started from (its base). When the
+// saved view changes under it, as when a save from this or another tab
+// refreshes the views, the draft keeps only the fields the viewer changed
+// from its base and takes every other field from the saved view. Saving it
+// then sends just those fields, so it never undoes a change made elsewhere.
 export function current(id) {
   const saved = findView(V.store, id);
   if (!saved) return null;
-  const drafts = (S.ui.drafts ||= {});
-  const draft = drafts[id];
-  if (draft && sameView(draft, saved) && draft.name === saved.name) delete drafts[id];
+  const drafts = (S.ui.drafts ||= {}), bases = (S.ui.draftBases ||= {});
+  if (drafts[id]) {
+    const fields = changedFields(bases[id] || saved, drafts[id]);
+    drafts[id] = { ...copy(saved), ...fields };
+    bases[id] = copy(saved);
+    if (sameView(drafts[id], saved) && drafts[id].name === saved.name) dropDraft(id);
+  }
   const view = drafts[id] || saved;
   return { saved, view, dirty: !!drafts[id] };
 }
@@ -38,10 +47,14 @@ export function edit(id, change) {
   const next = copy(c.view);
   change(next);
   S.ui.drafts[id] = next;
-  if (sameView(next, c.saved) && next.name === c.saved.name) delete S.ui.drafts[id];
+  S.ui.draftBases[id] ||= copy(c.saved);
+  if (sameView(next, c.saved) && next.name === c.saved.name) dropDraft(id);
   rerender();
 }
-export const dropDraft = (id) => { if (S.ui.drafts) delete S.ui.drafts[id]; };
+export const dropDraft = (id) => {
+  if (S.ui.drafts) delete S.ui.drafts[id];
+  if (S.ui.draftBases) delete S.ui.draftBases[id];
+};
 
 // The shared window and selection for a view. Opening another view starts
 // it on its own default window with nothing selected, and applies the
@@ -189,7 +202,10 @@ export function tableHtml(view, ctx) {
     if (c.id === "leftAt") { const v = leftAt(l, r.end, now); return cell(c.w, v == null ? dash : meter(v, l.color)); }
     if (c.id === "usedIn") { const u = allowanceRange(l.ser, l.tr, now, r.start, r.end); return cell(c.w, u?.used == null ? dash : Math.round(u.used) + "%"); }
     const list = resetsUntil(l.tr, now, r.end, l.period).filter((t) => t >= r.start);
-    return cell(c.w, list.length ? esc(list.map((t) => resetName(t, now)).join(", ")) : `<span class="muted">None</span>`);
+    // The first few by name, then a count: a long selection holds thousands
+    // of five-hour resets, too many to format or read in one cell.
+    const named = list.slice(0, 3).map((t) => resetName(t, now)).join(", ") + (list.length > 3 ? `, ${list.length - 3} more` : "");
+    return cell(c.w, list.length ? esc(named) : `<span class="muted">None</span>`);
   };
   const usageCell = (c, x) => {
     if (!x) return cell(c.w, dash, c.r, c.cls);

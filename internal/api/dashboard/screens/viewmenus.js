@@ -43,6 +43,8 @@ export function unsavedNote(show) {
 
 // ---------- saving ----------
 
+// current() has already moved the draft onto the saved view as it is now,
+// so the save holds only the fields edited in this draft.
 export async function saveDraft(id) {
   const c = current(id);
   if (!c) return;
@@ -333,7 +335,9 @@ export function mountRename(root) {
     const bad = name ? nameError(name) : "";
     if (save && bad) { toast(bad, true); rerender(); return; }
     if (save && name && name !== current(id)?.saved.name) {
+      // The rename is saved on its own: it is no part of an open draft.
       if (S.ui.drafts?.[id]) S.ui.drafts[id].name = name;
+      if (S.ui.draftBases?.[id]) S.ui.draftBases[id].name = name;
       await commit(renameView(V.store, id, name));
     } else rerender();
   };

@@ -196,8 +196,12 @@ export function windowText(v, now = Date.now()) {
   return spanDays(v.start, v.end);
 }
 
+// "5 to 12 Oct", "28 Sep to 5 Oct", or with years when they differ, as a
+// window zoomed out to a year can run from one April to the next.
 function spanDays(a, b) {
   if (dayKey(a) === dayKey(b)) return dm(a);
+  const ya = dayKey(a).slice(0, 4), yb = dayKey(b).slice(0, 4);
+  if (ya !== yb) return `${dm(a)} ${ya} to ${dm(b)} ${yb}`;
   return sameMonth(a, b) ? `${dm(a).split(" ")[0]} to ${dm(b)}` : `${dm(a)} to ${dm(b)}`;
 }
 

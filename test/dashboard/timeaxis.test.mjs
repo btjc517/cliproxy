@@ -138,6 +138,9 @@ test('ticks fall on whole hours, midnights or Mondays and stay few', () => {
 
 test('window and range labels read as the boards show them', () => {
   assert.equal(windowText({ start: Date.parse('2026-10-05T00:00:00Z'), end: Date.parse('2026-10-12T00:00:00Z') }, now), '5 to 12 Oct');
+  // A window a year long names both years, not "10 to 11 Apr".
+  assert.equal(windowText({ start: Date.parse('2026-04-10T12:00:00Z'), end: Date.parse('2027-04-11T12:00:00Z') }, now), '10 Apr 2026 to 11 Apr 2027');
+  assert.equal(rangeText({ start: Date.parse('2026-12-30T00:00:00Z'), end: Date.parse('2027-01-02T00:00:00Z') }), '30 Dec 2026 to 2 Jan 2027, 3 days');
   assert.equal(windowText({ start: now - 7 * DAY, end: now }, now), '1 Oct 14:00 to 8 Oct 14:00');
   assert.equal(rangeText({ start: Date.parse('2026-10-09T00:00:00Z'), end: Date.parse('2026-10-12T00:00:00Z') }), '9 to 12 Oct, 3 days');
   assert.equal(rangeText({ start: Date.parse('2026-10-08T14:00:00Z'), end: Date.parse('2026-10-08T18:00:00Z') }), '8 Oct 14:00 to 18:00, 4 hours');
