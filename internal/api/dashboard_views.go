@@ -33,9 +33,11 @@ func (s *Server) servesTLS() bool {
 // this server. A request without an Origin header (a script or curl) passes.
 // Otherwise the Origin must be a bare http or https origin whose scheme,
 // hostname and effective port (80 or 443 when left out) equal the request's.
-// The request is https when it arrived over TLS or when serverTLS says the
-// listener is TLS: the multiplexer hands a TLS connection without ALPN to
-// net/http wrapped, which leaves r.TLS nil. X-Forwarded-Proto is not used,
+// The request is https when its TLS handshake completed or when serverTLS
+// says the listener is TLS: the multiplexer hands a TLS connection without
+// ALPN to net/http wrapped, which can leave r.TLS nil. A bare r.TLS proves
+// nothing, because the multiplexer's bufferedConn reports an empty TLS state
+// for plain connections too. X-Forwarded-Proto is not used,
 // because nothing in this server trusts it. An Origin of "null" (sandboxed
 // or file pages) fails. The server's CORS middleware allows every origin, so
 // this is what stops a page on another site, open in a browser on the
@@ -51,7 +53,7 @@ func sameOrigin(r *http.Request, serverTLS bool) bool {
 		return false
 	}
 	scheme := "http"
-	if r.TLS != nil || serverTLS {
+	if (r.TLS != nil && r.TLS.HandshakeComplete) || serverTLS {
 		scheme = "https"
 	}
 	if !strings.EqualFold(parsed.Scheme, scheme) {

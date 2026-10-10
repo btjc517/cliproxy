@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/tls"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -162,7 +164,7 @@ func TestDashboardViewsOriginMatchesSchemeHostAndPort(t *testing.T) {
 		req.Header.Set("Origin", origin)
 		req.Header.Set("If-Match", strconv.FormatInt(revision, 10))
 		if overTLS {
-			req.TLS = &tls.ConnectionState{}
+			req.TLS = &tls.ConnectionState{HandshakeComplete: true}
 		}
 		engine.ServeHTTP(rec, req)
 		if rec.Code == http.StatusOK {
@@ -567,5 +569,60 @@ func TestDashboardViewsRevisionLimits(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(path); string(data) != top {
 		t.Fatalf("refused save changed the file to %s", data)
+	}
+}
+
+// A plain connection through the protocol multiplexer is http. Its
+// bufferedConn reports an empty TLS state, which net/http turns into a
+// non-nil r.TLS, and the live dashboard's own saves were refused as
+// cross-origin when that counted as https.
+func TestDashboardViewsPlainMuxConnectionIsHTTP(t *testing.T) {
+	server, engine, _ := newViewsTestServer(t)
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	muxLn := newMuxListener(listener.Addr(), 1024)
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		_ = server.acceptMuxConnections(listener, muxLn)
+	}()
+	srv := &http.Server{Handler: engine}
+	server.server = srv
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = srv.Serve(muxLn)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = listener.Close()
+		<-serveDone
+		<-acceptDone
+	})
+
+	addr := listener.Addr().String()
+	client := &http.Client{Timeout: 5 * time.Second}
+	put := func(origin string) int {
+		req, errReq := http.NewRequest(http.MethodPut, "http://"+addr+"/dashboard/views", strings.NewReader("{"))
+		if errReq != nil {
+			t.Fatalf("request: %v", errReq)
+		}
+		req.Header.Set("Origin", origin)
+		req.Header.Set("If-Match", `"1"`)
+		resp, errDo := client.Do(req)
+		if errDo != nil {
+			t.Fatalf("PUT: %v", errDo)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode
+	}
+	// The body is not JSON, so a request past the origin check gets 400.
+	if got := put("http://" + addr); got != http.StatusBadRequest {
+		t.Fatalf("plain connection, http origin: status %d, want 400 (past the origin check)", got)
+	}
+	if got := put("https://" + addr); got != http.StatusForbidden {
+		t.Fatalf("plain connection, https origin: status %d, want 403", got)
 	}
 }
