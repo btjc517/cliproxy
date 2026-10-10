@@ -2,6 +2,8 @@ package usagestats
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -28,6 +31,8 @@ const (
 	// maxUpdatedAt is the largest updated_at accepted: the largest integer a
 	// JavaScript number holds exactly.
 	maxUpdatedAt = 1<<53 - 1
+	// MaxViewsRevision is the largest revision stored, for the same reason.
+	MaxViewsRevision = 1<<53 - 1
 	// maxViewsFile is the largest views file read back. A stored file can be
 	// bigger than the request that made it: panels without options gain
 	// "options":{} and encoding/json writes <, > and & as six byte escapes.
@@ -252,8 +257,7 @@ func (v DashboardViews) normalized() DashboardViews {
 	return v
 }
 
-// emptyViews is the document of a store with no views file: no views, no
-// default, revision 0.
+// emptyViews is a document with no views, no default and no revision.
 func emptyViews() DashboardViews {
 	return DashboardViews{Views: []DashboardView{}}.normalized()
 }
@@ -269,21 +273,126 @@ func (s *Store) ViewsPath() string {
 	return filepath.Join(filepath.Dir(s.path), ViewsFileName)
 }
 
-// ReadViews loads the views file at path. A missing file is an empty set at
-// revision 0, and a file saved before revisions existed reads as revision 0.
-func ReadViews(path string) (DashboardViews, error) {
-	data, errRead := os.ReadFile(path)
-	if errors.Is(errRead, os.ErrNotExist) {
-		return emptyViews(), nil
+// viewsBase is the revision handed out for a views file whose own revision
+// is unknown, while the file stays in the state it was given for.
+type viewsBase struct {
+	state    string
+	revision int64
+}
+
+var (
+	// viewsBases maps a views path to its base revision while the file is
+	// missing, damaged or has no revision. Guarded by viewsMu.
+	viewsBases = map[string]viewsBase{}
+	// viewsMaxSeen is the largest revision this process has read, handed
+	// out or written. Guarded by viewsMu.
+	viewsMaxSeen int64
+	// viewsNow is the clock for base revisions, in milliseconds since the
+	// epoch. Tests replace it.
+	viewsNow = func() int64 { return time.Now().UnixMilli() }
+)
+
+// errViewsRevisionLimit is returned when a save would take the revision past
+// MaxViewsRevision.
+var errViewsRevisionLimit = errors.New("views revision is at its limit")
+
+// viewsDamagedError is returned by loadViews for a file that cannot be
+// decoded or holds a revision outside 0 to MaxViewsRevision.
+type viewsDamagedError struct {
+	err error
+}
+
+func (e *viewsDamagedError) Error() string { return e.err.Error() }
+func (e *viewsDamagedError) Unwrap() error { return e.err }
+
+// noteViewsRevision raises viewsMaxSeen to revision. The caller holds viewsMu.
+func noteViewsRevision(revision int64) {
+	if revision > viewsMaxSeen {
+		viewsMaxSeen = revision
 	}
-	if errRead != nil {
+}
+
+// baseViewsRevision is the revision for path while its file is in state and
+// its own revision is unknown. The first call for a state picks the current
+// time in milliseconds, or one more than any revision this process has seen
+// when that is larger, so the base cannot equal a revision handed out before:
+// earlier bases were earlier times, and each save adds only 1. Later calls
+// for the same state return the same base, so a GET and the PUT after it
+// agree. The caller holds viewsMu.
+func baseViewsRevision(path, state string) (int64, error) {
+	if base, ok := viewsBases[path]; ok && base.state == state {
+		return base.revision, nil
+	}
+	revision := viewsNow()
+	if revision <= viewsMaxSeen {
+		revision = viewsMaxSeen + 1
+	}
+	if revision <= 0 || revision > MaxViewsRevision {
+		return 0, errViewsRevisionLimit
+	}
+	viewsBases[path] = viewsBase{state: state, revision: revision}
+	noteViewsRevision(revision)
+	return revision, nil
+}
+
+// loadViews reads the views file at path and settles its revision. A file
+// with a revision from 1 to MaxViewsRevision keeps it. A missing file, a file
+// saved before revisions existed (revision 0) and a damaged file get a base
+// revision from baseViewsRevision. A damaged file also returns a
+// *viewsDamagedError, with the empty set at the base revision. The caller
+// holds viewsMu.
+func loadViews(path string) (DashboardViews, error) {
+	data, errRead := os.ReadFile(path)
+	missing := errors.Is(errRead, os.ErrNotExist)
+	if errRead != nil && !missing {
 		return emptyViews(), errRead
 	}
-	views, errDecode := decodeViews(bytes.NewReader(data), maxViewsFile, "file is larger than 1 MB")
-	if errDecode != nil {
-		return emptyViews(), fmt.Errorf("%s: %w", filepath.Base(path), errDecode)
+	var views DashboardViews
+	var errDamaged error
+	state := "missing"
+	if !missing {
+		sum := sha256.Sum256(data)
+		state = hex.EncodeToString(sum[:])
+		var errDecode error
+		views, errDecode = decodeViews(bytes.NewReader(data), maxViewsFile, "file is larger than 1 MB")
+		switch {
+		case errDecode != nil:
+			errDamaged = errDecode
+		case views.Revision < 0 || views.Revision > MaxViewsRevision:
+			errDamaged = fmt.Errorf("revision %d is outside 0 to %d", views.Revision, int64(MaxViewsRevision))
+		case views.Revision > 0:
+			delete(viewsBases, path)
+			noteViewsRevision(views.Revision)
+			return views.normalized(), nil
+		}
 	}
-	return views.normalized(), nil
+	base, errBase := baseViewsRevision(path, state)
+	if errBase != nil {
+		return emptyViews(), errBase
+	}
+	if missing || errDamaged != nil {
+		views = emptyViews()
+	}
+	views = views.normalized()
+	views.Revision = base
+	if errDamaged != nil {
+		return views, &viewsDamagedError{err: fmt.Errorf("%s: %w", filepath.Base(path), errDamaged)}
+	}
+	return views, nil
+}
+
+// ReadViews loads the views file at path. A missing file is an empty set and
+// a file saved before revisions existed keeps its views. Both get a base
+// revision that no client has seen before (see baseViewsRevision), never 0.
+// A damaged file is an error.
+func ReadViews(path string) (DashboardViews, error) {
+	viewsMu.Lock()
+	defer viewsMu.Unlock()
+	views, errLoad := loadViews(path)
+	if errLoad != nil {
+		return emptyViews(), errLoad
+	}
+	return views, nil
 }
 
 // SaveViews checks views and, when the stored revision equals ifRevision,
@@ -291,9 +400,10 @@ func ReadViews(path string) (DashboardViews, error) {
 // JSON, at revision ifRevision+1. It returns what was stored. When the stored
 // revision differs it writes nothing and returns a *ViewsConflictError that
 // holds the stored document. The read, the check and the write happen under
-// one lock, so two saves from the same revision cannot both succeed. A file
-// that cannot be read counts as the empty set at revision 0, so a client can
-// replace a damaged file.
+// one lock, so two saves from the same revision cannot both succeed. A
+// damaged file counts as the empty set at a base revision, which the
+// conflict reports, so a client can replace it. A save never takes the
+// revision past MaxViewsRevision.
 func SaveViews(path string, ifRevision int64, views DashboardViews) (DashboardViews, error) {
 	if errCheck := views.check(); errCheck != nil {
 		return DashboardViews{}, errCheck
@@ -301,12 +411,16 @@ func SaveViews(path string, ifRevision int64, views DashboardViews) (DashboardVi
 	views = views.normalized()
 	lockViews()
 	defer viewsMu.Unlock()
-	current, errRead := ReadViews(path)
-	if errRead != nil {
-		current = emptyViews()
+	current, errLoad := loadViews(path)
+	var damaged *viewsDamagedError
+	if errLoad != nil && !errors.As(errLoad, &damaged) {
+		return DashboardViews{}, errLoad
 	}
-	if ifRevision < 0 || current.Revision != ifRevision {
+	if ifRevision <= 0 || current.Revision != ifRevision {
 		return DashboardViews{}, &ViewsConflictError{Current: current}
+	}
+	if current.Revision >= MaxViewsRevision {
+		return DashboardViews{}, errViewsRevisionLimit
 	}
 	if viewsTestHook != nil {
 		viewsTestHook("checked")
@@ -319,5 +433,7 @@ func SaveViews(path string, ifRevision int64, views DashboardViews) (DashboardVi
 	if errWrite := writeFileAtomic(path, data); errWrite != nil {
 		return DashboardViews{}, errWrite
 	}
+	delete(viewsBases, path)
+	noteViewsRevision(views.Revision)
 	return views, nil
 }
