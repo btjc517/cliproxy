@@ -92,7 +92,7 @@ export function panelContext(ts, sc, { forecast = false, hint = "" } = {}) {
     usage: usageData(),
     perf: perfScope(sc),
     perfExact: exact,
-    perfLabel: exact ? "" : FIXED_TEXT[S.dataRange] || "",
+    perfLabel: exact || S.data?.summary?.performance?.range === "custom" ? "" : FIXED_TEXT[S.dataRange] || "",
     loading: !dataCurrent(),
     forecast,
     hint,
@@ -483,10 +483,12 @@ function allowancePanel(ctx, o) {
 
 // Each provider's accounts that could take a session over the window, in
 // stretches of equal count, from the same model as the Overview timeline.
-export function availability(ids, v, now) {
+// until: a later time at() must answer too, such as the end of a selection
+// that a zoom left outside the window.
+export function availability(ids, v, now, until = 0) {
   // The model runs a little past now even when the window ends at now, so
   // "now" itself always has an answer.
-  const fr = { start: v.start, end: Math.max(v.end, now + HOUR) };
+  const fr = { start: v.start, end: Math.max(v.end, now + HOUR, until + 1) };
   const picked = accounts().filter((a) => ids.includes(a.id));
   return ["claude", "codex"].map((provider) => {
     const list = picked.filter((a) => a.provider === provider);
@@ -512,7 +514,7 @@ export function availability(ids, v, now) {
 
 function availablePanel(ctx) {
   const v = ctx.window, now = ctx.now;
-  const rows = availability(ctx.sc.ids, v, now);
+  const rows = availability(ctx.sc.ids, v, now, ctx.range?.end || 0);
   const height = Math.max(32, rows.length * 24 + 8);
   const content = rows.map((r, k) => r.segs.map((s, i) => {
     const a = Math.max(0, fracOf(v, s.from)), b = Math.min(1, fracOf(v, s.to));
@@ -566,7 +568,7 @@ const parseKey = (k) => { const [y, m, d] = k.split("-").map(Number); return new
 
 // Token totals per day from the history (provider totals) for the picked
 // providers; with some accounts picked, the days the per-account counters know.
-function activityDays(sc) {
+function activityDays(sc, now) {
   const map = new Map();
   if (!sc.some) {
     for (const d of S.data?.summary?.history?.days || []) {
@@ -576,12 +578,38 @@ function activityDays(sc) {
     }
     return { map, known: () => true };
   }
+  // Picked accounts: only per-account data. Days are known from the last 14
+  // daily counters, and from usage buckets of a day or less for the whole
+  // days they cover.
   const accts = S.data?.summary?.accounts || {};
   const covered = new Set();
   for (const a of Object.values(accts)) for (const d of a?.daily || []) if (d.date) covered.add(d.date);
   for (const k of covered) map.set(k, EMPTY());
   for (const id of sc.ids) for (const d of accts[id]?.daily || []) if (d.date) addC(map.get(d.date), d);
+  const u = usageData();
+  if (u && u.step <= DAY) {
+    const byDay = new Map();
+    u.starts.forEach((t, i) => {
+      const k = dayKey(t);
+      const v = byDay.get(k) || { v: EMPTY(), from: t, to: t };
+      for (const id of sc.ids) addC(v.v, u.accounts[id]?.[i]);
+      v.to = u.ends[i];
+      byDay.set(k, v);
+    });
+    for (const [k, x] of byDay) if (x.from <= midnight(k) && x.to >= Math.min(midnight(addDays(k, 1)), now)) map.set(k, x.v);
+  }
   return { map, known: (k) => map.has(k) };
+}
+
+// Totals for picked accounts from day k0 through today, or null unless
+// every one of those days is known: a total must not quietly leave days out.
+function knownSince(map, k0, today) {
+  const out = EMPTY();
+  for (let k = k0; k <= today; k = addDays(k, 1)) {
+    if (!map.has(k)) return null;
+    addC(out, map.get(k));
+  }
+  return out;
 }
 
 // Exported for tests: the outline around a set of grid cells as one SVG path.
@@ -616,9 +644,17 @@ export function cellOutline(cells, pitch = 22, pad = 2) {
   return path;
 }
 
+// The window a click on a day opens: that day, midnight to midnight. Today
+// ends at now on a page without forecasts, keeping its midnight start; moving
+// the whole day back to end at now would show yesterday afternoon instead.
+export function dayWindow(k, now, future = false) {
+  const start = midnight(k), end = midnight(addDays(k, 1));
+  return { start, end: future ? end : Math.max(start + HOUR, Math.min(end, now)) };
+}
+
 function activityPanel(ctx) {
   const sc = ctx.sc;
-  const { map, known } = activityDays(sc);
+  const { map, known } = activityDays(sc, ctx.now);
   const today = dayKey(ctx.now);
   const t = parseKey(today);
   const monday = new Date(t); monday.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7));
@@ -664,10 +700,15 @@ function activityPanel(ctx) {
   const h = S.data?.summary?.history || {};
   const sumFrom = (k0) => { const out = EMPTY(); for (const [k, x] of map) if (k >= k0) addC(out, x); return out; };
   const weekKey = monday.toISOString().slice(0, 10), monthKey = today.slice(0, 8) + "01";
-  const pick = (x, k0) => (!sc.some && sc.prov === "all" && x ? { ...EMPTY(), ...x } : sumFrom(k0));
+  // Every account: the history's own totals, else the sum of its days. Picked
+  // accounts: a total only when every day in it is known, and no lifetime.
+  const pick = (x, k0) => {
+    if (!sc.some) return sc.prov === "all" && x ? { ...EMPTY(), ...x } : sumFrom(k0);
+    return k0 ? knownSince(map, k0, today) : null;
+  };
   const sums = [["Today", pick(h.today, today)], ["This week", pick(h.this_week, weekKey)], ["This month", pick(h.this_month, monthKey)], ["Lifetime", pick(h.lifetime, "")]];
   const cost = costKnown();
-  const stat = ([label, x]) => `<div class="act-stat"><span class="muted">${label}</span><b>${x ? fmt(tokens(x)) : "–"}</b>${cost && x ? `<span class="muted">${esc(money(apiCost(x)))} at API prices</span>` : ""}</div>`;
+  const stat = ([label, x]) => `<div class="act-stat"><span class="muted">${label}</span><b>${x ? fmt(tokens(x)) : "–"}</b>${x ? (cost ? `<span class="muted">${esc(money(apiCost(x)))} at API prices</span>` : "") : sc.some ? `<span class="muted">Not kept per account</span>` : ""}</div>`;
   const firstDay = [...map.entries()].filter(([, x]) => tokens(x) > 0).map(([k]) => k).sort()[0];
   const life = sums[3][1];
   const html = `<div class="act">
@@ -693,7 +734,7 @@ function activityPanel(ctx) {
     const clear = () => { tip?.remove(); tip = null; if (held) { S.hold = Math.max(0, S.hold - 1); held = false; } };
     sec.querySelectorAll(".act-cells button[data-w]").forEach((b) => {
       const d = cols[Number(b.dataset.w)][Number(b.dataset.d)];
-      b.onclick = () => { clear(); setWindow({ start: midnight(d.k), end: midnight(addDays(d.k, 1)) }); };
+      b.onclick = () => { clear(); setWindow(dayWindow(d.k, Date.now(), ctx.forecast)); };
       b.onmouseenter = () => {
         if (!held) { S.hold++; held = true; }
         if (!tip) { tip = document.createElement("div"); tip.className = "tcard"; sec.querySelector(".act-grid").appendChild(tip); }

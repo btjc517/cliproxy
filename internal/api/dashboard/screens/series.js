@@ -1,8 +1,8 @@
 // Measures over time for any window: usage buckets per account, performance
 // buckets for the picked accounts, and sums over a stretch of time. Every
 // panel, table and figure card reads through here, so their numbers agree.
-import { S, scopeParam, dayKey, loadSpan, fallbackRange } from "../core.js";
-import { midnight, addDays } from "./timeaxis.js";
+import { S, scopeParam, dayKey, fallbackRange } from "../core.js";
+import { midnight, tzOffset } from "./timeaxis.js";
 
 export const EMPTY = () => ({ requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 });
 export function addC(a, b) { if (b) for (const k in a) a[k] += Number(b[k]) || 0; return a; }
@@ -10,20 +10,26 @@ const nonZero = (c) => !!c && ["requests", "input_tokens", "output_tokens", "cac
 
 // ---------- bucket edges ----------
 
-// Where a bucket starting at t ends: whole days end at the next local
-// midnight, so a 23 or 25 hour day across a clock change keeps its length.
-function localEnd(t, step) {
-  if (step >= 864e5 && step % 864e5 === 0) {
-    const k = dayKey(t);
-    if (midnight(k) === t) return midnight(addDays(k, step / 864e5));
-  }
-  return t + step;
+// The instant a wall-clock time in the proxy's time zone falls on, near
+// guess. A wall time skipped when clocks go forward lands just after the gap.
+function wallToTime(wall, guess) {
+  const a = wall - tzOffset(guess);
+  const b = wall - tzOffset(a);
+  return wall - tzOffset(b) === b ? b : a;
 }
 
-// Each bucket ends where the next one starts, or where its own local length
-// ends when there is a gap after it, as the last one always has.
+// Where a bucket starting at t ends: step later on the local clock, as the
+// proxy lays buckets out. A bucket across a clock change is an hour longer
+// or shorter: London's three hours from midnight on 25 October run to 03:00
+// GMT, four hours later.
+function localEnd(t, step) {
+  return wallToTime(t + tzOffset(t) + step, t);
+}
+
+// Each bucket ends where the next one starts; the proxy lists every bucket,
+// so that is exact across clock changes. The last ends one local step on.
 export function bucketEnds(starts, step) {
-  return starts.map((t, i) => (i + 1 < starts.length ? Math.min(starts[i + 1], localEnd(t, step)) : localEnd(t, step)));
+  return starts.map((t, i) => (i + 1 < starts.length ? starts[i + 1] : localEnd(t, step)));
 }
 
 // ---------- usage ----------
@@ -109,15 +115,16 @@ export function bucketAt(d, t) {
 }
 
 // Provider totals per day from the history, for days before per-account
-// detail starts. days: [{date, providers: {claude: counters}}].
-export function historyBefore(before, from, provs) {
+// detail starts and inside the stretch [from, to): a day counts when it
+// starts before to. days: [{date, providers: {claude: counters}}].
+export function historyBefore(before, from, provs, to = Infinity) {
   const h = S.data?.summary?.history?.days || [];
   const sum = EMPTY();
   let any = false;
   const fromKey = from ? dayKey(from) : "";
   const beforeKey = dayKey(before);
   for (const d of h) {
-    if (d.date >= beforeKey || (fromKey && d.date < fromKey)) continue;
+    if (d.date >= beforeKey || (fromKey && d.date < fromKey) || midnight(d.date) >= to) continue;
     for (const [p, x] of Object.entries(d.providers || {})) if (!provs || provs.includes(p)) { addC(sum, x); any = true; }
   }
   return any ? sum : null;
@@ -183,19 +190,42 @@ export const perfAt = (ps, t) => (ps?.series || []).find((b) => b.t0 <= t && t <
 // wider than it (two-day buckets in a yearly window). Percentiles cannot be
 // added up from buckets either. So a selection loads its own reply, with
 // usage and performance for just that range. RD holds the last one.
-export const RD = { key: "", summary: null, scope: "", at: 0, loading: "" };
+// exact: the reply's window is the selection itself, rounded to five
+// minutes, so its summaries (totals and percentiles) describe the selection.
+export const RD = { key: "", summary: null, scope: "", at: 0, exact: false, loading: "", req: 0 };
 
 const rangeKey = (span, scope) => (span ? span.start + "," + span.end + "|" + scope : "");
+const FIVE_MIN = 5 * 60e3;
+// How long a loaded selection holds: a minute while it runs up to now, five
+// otherwise, as usage can be recorded late.
+const FRESH_LIVE = 60e3, FRESH_PAST = 5 * 60e3;
+let requests = 0;
+
+// The window to load for a selection: the selection itself in whole five
+// minutes, so its totals and percentiles are its own. The proxy stops a
+// window at now, so a running selection asks for its full length. A window
+// is at least an hour: a shorter selection gets the hour from its start,
+// which contains it, and its figures then come from buckets (exact: false).
+export function selectionSpan(range) {
+  const start = Math.floor(range.start / FIVE_MIN) * FIVE_MIN, end = Math.ceil(range.end / FIVE_MIN) * FIVE_MIN;
+  if (end - start >= 3600e3) return { start: Math.max(start, end - 366 * 864e5), end, exact: end - start <= 366 * 864e5 };
+  return { start, end: start + 3600e3, exact: false };
+}
 
 // Loads usage and performance for a selected range, once per range and
-// scope (again after a minute while the range runs up to now), then redraws.
+// scope until it is stale, then redraws. Each request has its own number,
+// and only the latest one's reply is kept, so an older reply for the same
+// range never replaces a newer one.
 export async function loadRangeData(range, scope, fetchFn = globalThis.fetch, now = Date.now()) {
   if (!range || range.start >= now) return;
-  const span = loadSpan(range, now);
+  const span = selectionSpan(range);
   const key = rangeKey(span, scope);
-  const stale = RD.key === key && range.end > RD.at && now - RD.at > 60e3;
-  if ((RD.key === key && !stale) || RD.loading === key) return;
+  const fresh = range.end > RD.at ? FRESH_LIVE : FRESH_PAST;
+  if ((RD.key === key && now - RD.at <= fresh) || RD.loading === key) return;
+  const my = ++requests;
   RD.loading = key;
+  RD.req = my;
+  const exact = span.exact;
   try {
     const iso = (t) => new Date(t).toISOString().replace(/\.\d{3}Z$/, "Z");
     const q = new URLSearchParams({ range: fallbackRange(span.start, now), usage_start: iso(span.start), usage_end: iso(span.end), perf_start: iso(span.start), perf_end: iso(span.end) });
@@ -203,11 +233,11 @@ export async function loadRangeData(range, scope, fetchFn = globalThis.fetch, no
     const res = await fetchFn("/dashboard/data?" + q, { cache: "no-store" });
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
-    if (RD.loading !== key) return;
-    Object.assign(RD, { key, summary: data?.summary || null, scope, at: now, loading: "" });
+    if (RD.req !== my) return;
+    Object.assign(RD, { key, summary: data?.summary || null, scope, at: now, exact, loading: "" });
     globalThis.window?.dispatchEvent(new Event("dash:render"));
   } catch (e) {
-    if (RD.loading === key) RD.loading = "";
+    if (RD.req === my) RD.loading = "";
   }
 }
 
@@ -238,9 +268,12 @@ export function spanData(ctx) {
   }
   const from = r.start, to = Math.min(r.end, now);
   const scope = ctx.sc.some ? scopeParam(ctx.sc.ids) : "";
-  if (RD.summary && RD.key === rangeKey(loadSpan(r, now), scope)) {
+  if (RD.summary && RD.key === rangeKey(selectionSpan(r), scope)) {
     const p = RD.summary.performance || null;
-    return { from, to, usage: usageData(RD.summary), perfSrc: p, merged: RD.scope, exact: p?.range === "custom", ready: true, sel: true };
+    // Its summaries hold only when the reply's window is the selection; a
+    // reply for a wider window (an hour around a short selection) gives
+    // counts from its buckets and no percentiles.
+    return { from, to, usage: usageData(RD.summary), perfSrc: p, merged: RD.scope, exact: p?.range === "custom" && RD.exact, ready: true, sel: true };
   }
   // Until it arrives, the loaded window answers where its buckets line up
   // with the selection; elsewhere the figures wait.
@@ -264,8 +297,11 @@ export function perfFigures(sd, sc) {
   }
   const c = perfCounts(ps, sd.from, sd.to);
   // Without an exact reading a selection has no percentiles. The window
-  // keeps its own, which the panels label with the fixed range they cover.
-  return { ps, q: sd.sel ? null : ps.q, requests: c.requests, failed: c.failed, failovers: c.hasFailovers ? c.failovers : undefined, any: c.any };
+  // keeps those of a fixed fallback range, which the panels label with the
+  // range they cover, but not those of another custom window (the one before
+  // a zoom, still loaded).
+  const fixed = sd.perfSrc.range !== "custom";
+  return { ps, q: !sd.sel && fixed ? ps.q : null, requests: c.requests, failed: c.failed, failovers: c.hasFailovers ? c.failovers : undefined, any: c.any };
 }
 
 // Usage totals over a span for the given accounts, or null while they load.

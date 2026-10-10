@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 const mem = new Map();
 globalThis.localStorage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
 const { S, fallbackRange, loadSpan, dataQuery, perfExact, scopeParam } = await import('../../internal/api/dashboard/core.js');
-const { usageData, usageSum, bucketAt, historyBefore, perfScope, perfCounts, loadRangeData, RD } = await import('../../internal/api/dashboard/screens/series.js');
+const { usageData, usageSum, bucketAt, historyBefore, perfScope, perfCounts, perfFigures, loadRangeData, RD } = await import('../../internal/api/dashboard/screens/series.js');
 const { projectionParts, historyLine, cellOutline, opt } = await import('../../internal/api/dashboard/screens/panels.js');
 
 const HOUR = 3600e3, DAY = 24 * HOUR;
@@ -46,13 +46,33 @@ test('the data query carries the window for usage and performance', () => {
 });
 
 test('percentiles count as exact only when the backend answered with a custom window', () => {
-  S.dataPerf = '2026-10-01T14:00:00Z,2026-10-08T14:00:00Z';
+  const week = '2026-10-01T14:00:00Z,2026-10-08T14:00:00Z';
+  const at = Date.parse('2026-10-08T14:00:00Z');
   S.data = { summary: { performance: { range: '7d' } } };
-  assert.equal(perfExact(), false);
+  assert.equal(perfExact(week, week, at), false);
   S.data = { summary: { performance: { range: 'custom' } } };
-  assert.equal(perfExact(), true);
-  S.dataPerf = '';
-  assert.equal(perfExact(), false);
+  assert.equal(perfExact(week, week, at), true);
+  assert.equal(perfExact(week, '', at), false);
+});
+
+test('a reading for another window is not exact for the one on screen', () => {
+  S.data = { summary: { performance: { range: 'custom' } } };
+  const at = Date.parse('2026-10-08T14:00:00Z');
+  const week = '2026-10-01T14:00:00Z,2026-10-08T14:00:00Z';
+  const hour = '2026-10-08T13:00:00Z,2026-10-08T14:00:00Z';
+  // Changed from seven days to an hour: the week's reading is still loaded.
+  assert.equal(perfExact(hour, week, at), false);
+  // A live window moved on by five minutes keeps its last reading meanwhile.
+  assert.equal(perfExact('2026-10-01T14:05:00Z,2026-10-08T14:05:00Z', week, at + 3 * 60e3), true);
+  // A past window five minutes off is another window.
+  assert.equal(perfExact('2026-09-01T14:05:00Z,2026-09-08T14:05:00Z', '2026-09-01T14:00:00Z,2026-09-08T14:00:00Z', at), false);
+  // What the panels read: counts from the week's buckets inside the hour, and
+  // no percentiles, rather than the week's totals.
+  const series = Array.from({ length: 168 }, (_, i) => ({ start: new Date(at - (168 - i) * HOUR).toISOString(), requests: 4 }));
+  const src = { range: 'custom', bucket_seconds: 3600, scopes: { all: { requests: 672, failed: 7, ttft_ms: { p50: 900 }, series } } };
+  const f = perfFigures({ from: at - HOUR, to: at, perfSrc: src, merged: '', exact: perfExact(hour, week, at), sel: false }, { some: false, prov: 'all', ids: [] });
+  assert.equal(f.requests, 4);
+  assert.equal(f.q, null);
 });
 
 // Usage buckets: hourly for the last 6 hours, for two accounts.
@@ -134,6 +154,43 @@ test('a selection loads its own usage and performance, once per range and scope'
   assert.equal(calls.length, 2);
   await loadRangeData({ start: now + HOUR, end: now + 2 * HOUR }, '', fetchFn, now);
   assert.equal(calls.length, 2);
+  RD.key = ''; RD.summary = null;
+});
+
+test('only the latest request for a selection is kept: scope A, then B, then A again', async () => {
+  RD.key = ''; RD.summary = null; RD.loading = '';
+  S.data = { summary: { performance: { range: 'custom' } } };
+  const range = { start: now - 3 * HOUR, end: now - HOUR };
+  const waiting = [];
+  const fetchFn = (url) => new Promise((resolve) => waiting.push({ url, resolve }));
+  const answer = (i, requests) => waiting[i].resolve({ ok: true, json: async () => ({ summary: { performance: { range: 'custom', scopes: { all: { requests, series: [] } } } } }) });
+  const first = loadRangeData(range, 'a', fetchFn, now);
+  const other = loadRangeData(range, 'b', fetchFn, now);
+  const again = loadRangeData(range, 'a', fetchFn, now);
+  assert.equal(waiting.length, 3);
+  // The first A reply arrives late, after the second A was asked for.
+  answer(0, 1);
+  await first;
+  answer(2, 2);
+  await again;
+  answer(1, 99);
+  await other;
+  assert.equal(RD.summary.performance.scopes.all.requests, 2, 'the newer A reply is kept');
+  assert.equal(RD.scope, 'a');
+  RD.key = ''; RD.summary = null;
+});
+
+test('a past selection loads again after five minutes, as usage can be recorded late', async () => {
+  RD.key = ''; RD.summary = null; RD.loading = '';
+  S.data = { summary: { performance: { range: 'custom' } } };
+  let calls = 0;
+  const fetchFn = async () => { calls++; return { ok: true, json: async () => ({ summary: {} }) }; };
+  const range = { start: now - 5 * HOUR, end: now - 2 * HOUR };
+  await loadRangeData(range, '', fetchFn, now);
+  await loadRangeData(range, '', fetchFn, now + 4 * 60e3);
+  assert.equal(calls, 1);
+  await loadRangeData(range, '', fetchFn, now + 6 * 60e3);
+  assert.equal(calls, 2);
   RD.key = ''; RD.summary = null;
 });
 

@@ -65,9 +65,19 @@ export function wantRange() {
 export const wantUsageViewport = () => spanParam(loadSpan(screenWants()?.usage));
 export const wantPerfWindow = () => spanParam(loadSpan(screenWants()?.perf));
 
-// Whether the loaded performance covers exactly the window asked for. A
-// backend without custom windows answers with the fixed fallback range.
-export const perfExact = () => !!S.dataPerf && S.data?.summary?.performance?.range === "custom";
+// Whether the loaded performance covers exactly the window on screen: the
+// reply is for a custom window (a backend without them answers with the fixed
+// fallback range) and that window is the one the screen wants now. A window
+// that runs up to now moves on every five minutes; until the next reading
+// arrives, the last one counts while it has the same length and is at most
+// five minutes behind.
+export function perfExact(want = wantPerfWindow(), loaded = S.dataPerf, now = Date.now()) {
+  if (!loaded || !want || S.data?.summary?.performance?.range !== "custom") return false;
+  if (loaded === want) return true;
+  const [a0, a1] = loaded.split(",").map(Date.parse), [b0, b1] = want.split(",").map(Date.parse);
+  const live = b1 >= now - FIVE_MIN;
+  return live && a1 - a0 === b1 - b0 && b1 > a1 && b1 - a1 <= FIVE_MIN;
+}
 
 // ---------- account selection ----------
 

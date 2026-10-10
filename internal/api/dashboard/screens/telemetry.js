@@ -236,7 +236,7 @@ export function tableHtml(view, ctx) {
     // Per-account counts start later than the provider history from local logs.
     if (sums.first > from + 60e3 && !sc.some) {
       const provs = sc.prov === "all" ? null : [sc.prov];
-      const early = historyBefore(sums.first, from, provs);
+      const early = historyBefore(sums.first, from, provs, sd.to);
       if (early) rows.push(`<div class="tr earlier"><div class="c acct" style="min-width:${acctW}px">Earlier, from local logs</div>${shownCols.map((c) => usageCell(c, early)).join("")}</div>`);
     }
   }
