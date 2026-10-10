@@ -1,9 +1,10 @@
 // Overview: weekly allowance per provider, the last 24 hours, active sessions.
 import {
-  S, esc, icon, logo, pill, warnState, accounts, status, limits, left, queue, plan, planDay, planDaysAway, resetShort, clock,
+  esc, icon, logo, pill, warnState, accounts, status, limits, left, queue, plan, planDay, planDaysAway, resetShort, clock,
   providerTitle, sessions, isToday, accountScope,
 } from "../core.js";
-import { perfFor, readAt, usageStrip, sessionTable, sessionInScope } from "./common.js";
+import { readAt, sessionTable, sessionInScope } from "./common.js";
+import { timeStrip, stripTime } from "./strip.js";
 import { accountPicker, bindAccountPicker } from "./account-picker.js";
 import { allowanceSeries, trajectory } from "./burn.js";
 import { timeline } from "./timeline.js";
@@ -73,13 +74,18 @@ function allowanceGroup(provider, keep) {
   </div>`;
 }
 
+// The windows Overview loads: its strip's.
+export function wants() {
+  const w = stripTime("ovStrip").window;
+  return { usage: w, perf: w };
+}
+
 export function view() {
   const sc = accountScope();
   const keep = new Set(sc.ids);
   const groups = ["claude", "codex"].map((p) => allowanceGroup(p, keep)).filter(Boolean).join("");
   const tl = timeline(sc.shown);
-  // Stacked by provider while every account shows, else by account.
-  const strip = usageStrip({ key: "ovMetric", chart: "overview", ids: sc.ids, p: perfFor(sc), stackBy: sc.prov === "all" && !sc.some ? "provider" : "account" });
+  const strip = timeStrip({ key: "ovStrip", sc });
 
   const all = sessions().filter((s) => sessionInScope(s, sc));
   const active = all.filter((s) => Date.now() - Date.parse(s.last_seen) < 10 * 60e3);
