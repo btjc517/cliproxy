@@ -22,10 +22,11 @@ func (s *Server) dashboardViewsPath() string {
 }
 
 // servesTLS reports whether Start put this server's listener behind TLS. It
-// reads the listener's state, not the config, which can change on reload
-// without a restart.
+// reads what Start recorded, not the config, which can change on reload
+// without a restart, and not the http.Server's TLSConfig, which Serve fills
+// in on a plain listener too.
 func (s *Server) servesTLS() bool {
-	return s.server != nil && s.server.TLSConfig != nil
+	return s.listenerTLS.Load()
 }
 
 // sameOrigin reports whether a browser request comes from a page served by
