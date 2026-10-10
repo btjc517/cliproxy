@@ -49,6 +49,11 @@ type Server struct {
 	listenerMu      sync.Mutex
 	muxBaseListener net.Listener
 
+	// listenerTLS records whether Start put the listener behind TLS. The
+	// http.Server's TLSConfig cannot tell: Serve fills in an empty one for
+	// HTTP/2 even on a plain listener.
+	listenerTLS atomic.Bool
+
 	// muxHTTPListener receives HTTP connections selected by the multiplexer.
 	muxHTTPListener *muxListener
 
@@ -337,6 +342,7 @@ func (s *Server) Start() error {
 		log.Debugf("Starting API server on %s", addr)
 	}
 
+	s.listenerTLS.Store(useTLS)
 	httpListener := newMuxListener(listener.Addr(), 1024)
 	s.listenerMu.Lock()
 	s.muxBaseListener = listener

@@ -207,12 +207,24 @@ func TestDashboardViewsOriginMatchesSchemeHostAndPort(t *testing.T) {
 
 	// On a TLS listener, a connection the multiplexer hands over wrapped
 	// (r.TLS nil) still counts as https.
-	server.server = &http.Server{TLSConfig: &tls.Config{}}
+	server.listenerTLS.Store(true)
 	if got := put("dash.example", "https://dash.example", false); got != http.StatusOK {
 		t.Fatalf("TLS server, wrapped connection, https origin: status %d, want 200", got)
 	}
 	if got := put("dash.example", "http://dash.example", false); got != http.StatusForbidden {
 		t.Fatalf("TLS server, http origin: status %d, want 403", got)
+	}
+
+	// A plain listener whose http.Server has a TLSConfig, as Serve leaves it
+	// after setting up HTTP/2, is still http: the live dashboard's own saves
+	// were refused when this read the TLSConfig.
+	server.listenerTLS.Store(false)
+	server.server = &http.Server{TLSConfig: &tls.Config{}}
+	if got := put("dash.example:8317", "http://dash.example:8317", false); got != http.StatusOK {
+		t.Fatalf("plain server with a TLSConfig, http origin: status %d, want 200", got)
+	}
+	if got := put("dash.example:8317", "https://dash.example:8317", false); got != http.StatusForbidden {
+		t.Fatalf("plain server with a TLSConfig, https origin: status %d, want 403", got)
 	}
 }
 
