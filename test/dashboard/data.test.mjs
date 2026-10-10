@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 const mem = new Map();
 globalThis.localStorage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
-const { S, fallbackRange, loadSpan, dataQuery, perfExact, scopeParam } = await import('../../internal/api/dashboard/core.js');
+const { S, fallbackRange, loadSpan, dataQuery, perfCurrent, scopeParam } = await import('../../internal/api/dashboard/core.js');
 const { usageData, usageSum, bucketAt, historyBefore, perfScope, perfCounts, perfFigures, loadRangeData, RD } = await import('../../internal/api/dashboard/screens/series.js');
 const { projectionParts, historyLine, cellOutline, opt } = await import('../../internal/api/dashboard/screens/panels.js');
 
@@ -49,10 +49,10 @@ test('percentiles count as exact only when the backend answered with a custom wi
   const week = '2026-10-01T14:00:00Z,2026-10-08T14:00:00Z';
   const at = Date.parse('2026-10-08T14:00:00Z');
   S.data = { summary: { performance: { range: '7d' } } };
-  assert.equal(perfExact(week, week, at), false);
+  assert.equal(perfCurrent(week, week, at), false);
   S.data = { summary: { performance: { range: 'custom' } } };
-  assert.equal(perfExact(week, week, at), true);
-  assert.equal(perfExact(week, '', at), false);
+  assert.equal(perfCurrent(week, week, at), true);
+  assert.equal(perfCurrent(week, '', at), false);
 });
 
 test('a reading for another window is not exact for the one on screen', () => {
@@ -61,16 +61,16 @@ test('a reading for another window is not exact for the one on screen', () => {
   const week = '2026-10-01T14:00:00Z,2026-10-08T14:00:00Z';
   const hour = '2026-10-08T13:00:00Z,2026-10-08T14:00:00Z';
   // Changed from seven days to an hour: the week's reading is still loaded.
-  assert.equal(perfExact(hour, week, at), false);
+  assert.equal(perfCurrent(hour, week, at), false);
   // A live window moved on by five minutes keeps its last reading meanwhile.
-  assert.equal(perfExact('2026-10-01T14:05:00Z,2026-10-08T14:05:00Z', week, at + 3 * 60e3), true);
+  assert.equal(perfCurrent('2026-10-01T14:05:00Z,2026-10-08T14:05:00Z', week, at + 3 * 60e3), true);
   // A past window five minutes off is another window.
-  assert.equal(perfExact('2026-09-01T14:05:00Z,2026-09-08T14:05:00Z', '2026-09-01T14:00:00Z,2026-09-08T14:00:00Z', at), false);
+  assert.equal(perfCurrent('2026-09-01T14:05:00Z,2026-09-08T14:05:00Z', '2026-09-01T14:00:00Z,2026-09-08T14:00:00Z', at), false);
   // What the panels read: counts from the week's buckets inside the hour, and
   // no percentiles, rather than the week's totals.
   const series = Array.from({ length: 168 }, (_, i) => ({ start: new Date(at - (168 - i) * HOUR).toISOString(), requests: 4 }));
   const src = { range: 'custom', bucket_seconds: 3600, scopes: { all: { requests: 672, failed: 7, ttft_ms: { p50: 900 }, series } } };
-  const f = perfFigures({ from: at - HOUR, to: at, perfSrc: src, merged: '', exact: perfExact(hour, week, at), sel: false }, { some: false, prov: 'all', ids: [] });
+  const f = perfFigures({ from: at - HOUR, to: at, perfSrc: src, merged: '', exact: perfCurrent(hour, week, at), sel: false }, { some: false, prov: 'all', ids: [] });
   assert.equal(f.requests, 4);
   assert.equal(f.q, null);
 });

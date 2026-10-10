@@ -4,7 +4,7 @@
 // hover card. Telemetry views stack them; Overview and Account use them too.
 import {
   S, esc, fmt, int, ms, money, moneyAxis, pctText, rateText, clock, day, dayKey, isToday, logo, accounts, tokens, cacheReuse, apiCost,
-  costKnown, providerTitle, perfExact, dataCurrent, scopeParam,
+  costKnown, providerTitle, perfCurrent, dataCurrent, scopeParam,
 } from "../core.js";
 import { accountColor } from "./common.js";
 import { allowanceSeries, trajectory, projectedAt, projectionPoints, resetsUntil, readingAt, deadZones, accountLabels } from "./burn.js";
@@ -80,7 +80,6 @@ const FIXED_TEXT = { "24h": "last 24 hours", "7d": "last 7 days", "30d": "last 3
 // What every panel on a page reads: the shared window and selection (a
 // timeState), the picked accounts, and the loaded data for them.
 export function panelContext(ts, sc, { forecast = false, hint = "" } = {}) {
-  const exact = perfExact();
   const ctx = {
     group: ts.key,
     window: ts.window,
@@ -91,15 +90,28 @@ export function panelContext(ts, sc, { forecast = false, hint = "" } = {}) {
     scope: sc.some ? scopeParam(sc.ids) : "",
     usage: usageData(),
     perf: perfScope(sc),
-    perfExact: exact,
-    perfLabel: exact || S.data?.summary?.performance?.range === "custom" ? "" : FIXED_TEXT[S.dataRange] || "",
+    perfCurrent: perfCurrent(),
     loading: !dataCurrent(),
     forecast,
     hint,
   };
   // What every figure reads: the selection's own data, else the window's.
   ctx.span = spanData(ctx);
+  ctx.perfExact = ctx.span.exact;
+  ctx.perfLabel = perfLabel(ctx);
   return ctx;
+}
+
+// What the window's performance figures cover when it is not exactly the
+// window: the fixed fallback range, or the window widened to whole buckets.
+function perfLabel(ctx) {
+  if (ctx.range || ctx.perfExact || !ctx.perf) return "";
+  if (S.data?.summary?.performance?.range !== "custom") return FIXED_TEXT[S.dataRange] || "";
+  const s = ctx.perf.series;
+  if (!ctx.perfCurrent || !s.length) return "";
+  const at = (t) => `${dm(t)} ${clock(t)}`;
+  const end = s[s.length - 1].t1;
+  return `${at(s[0].t0)} to ${end > ctx.now ? "now" : at(end)}`;
 }
 
 // Loads what a page's selection needs, if it has one. Every page with a
@@ -233,7 +245,7 @@ function perfFigure(ctx, pick) {
   const f = perfFigures(ctx.span, ctx.sc);
   return f?.q ? pick(f.q) : null;
 }
-const perfQual = (ctx, base) => base + (!ctx.range && !ctx.perfExact && ctx.perf && ctx.perfLabel ? `, ${ctx.perfLabel}` : "");
+const perfQual = (ctx, base) => base + (ctx.perfLabel ? `, ${ctx.perfLabel}` : "");
 
 function perfPlot(ctx, type, series, max, yfmt, extra = "") {
   const html = plot({ group: ctx.group, panel: type, window: ctx.window, ticks: ctx.ticks, height: PANELS[type].height, labels: ctx.labels, hatch: true, y: { max, fmt: yfmt }, content: series + extra, over: ctx.hint || "" });
@@ -451,7 +463,9 @@ function allowancePanel(ctx, o) {
   const provOf = (id) => all.find((a) => a.id === id)?.provider;
   let figure, qual;
   if (ctx.range) {
-    const t = Math.min(ctx.range.end, v.end > now ? ctx.range.end : now);
+    // The selection's own end, wherever the window is: a pan or zoom must
+    // not change what the figure says about it.
+    const t = ctx.range.end;
     const have = ls.filter((l) => (leftAt(l, t, now) ?? 0) > 0).length;
     figure = `${have} of ${ls.length}`;
     qual = `have allowance by ${endText(ctx.range.end)}`;
@@ -644,12 +658,13 @@ export function cellOutline(cells, pitch = 22, pad = 2) {
   return path;
 }
 
-// The window a click on a day opens: that day, midnight to midnight. Today
-// ends at now on a page without forecasts, keeping its midnight start; moving
-// the whole day back to end at now would show yesterday afternoon instead.
+// The window a click on a day opens: that day, midnight to midnight. On a
+// page without forecasts today runs from midnight to now (toNow, see
+// timeState), even in its first hour: moving the day back to end at now, or
+// stretching it to the shortest zoom, would show part of yesterday.
 export function dayWindow(k, now, future = false) {
   const start = midnight(k), end = midnight(addDays(k, 1));
-  return { start, end: future ? end : Math.max(start + HOUR, Math.min(end, now)) };
+  return !future && end > now ? { start, end, toNow: true } : { start, end };
 }
 
 function activityPanel(ctx) {

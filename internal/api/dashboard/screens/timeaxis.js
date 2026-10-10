@@ -241,10 +241,19 @@ export function plotWidth() {
 // A window and selection kept per page in S.ui.time[key], so they survive a
 // re-render and a refresh. The window is null while it follows its default,
 // which moves with now. loads: whether a new window needs new data.
-export function timeState(key, { defaultWindow, future = false, loads = false }) {
+// A stored window may run to now (toNow): from its start to now, or to its
+// own end once now passes it. It keeps its start even when that leaves it
+// shorter than the shortest zoom, as clicking today at 00:30 should show
+// today, not the last hour.
+export function upToNow(w, now = Date.now()) {
+  return { start: w.start, end: Math.max(Math.min(w.end, now), Math.min(w.start + 60e3, w.end)) };
+}
+
+export function timeState(key, { defaultWindow, future = false, loads = false, now = Date.now() }) {
   const all = (S.ui.time ||= {});
   const st = (all[key] ||= { win: null, range: null });
-  const def = () => limitWindow(defaultWindow(Date.now()), { future });
+  const def = () => limitWindow(defaultWindow(now), { now, future });
+  const stored = (w) => (w.toNow && !future ? upToNow(w, now) : limitWindow(w, { now, future }));
   const changed = () => {
     window.dispatchEvent(new Event("dash:render"));
     if (loads) window.dispatchEvent(new Event("dash:usage-window"));
@@ -252,7 +261,7 @@ export function timeState(key, { defaultWindow, future = false, loads = false })
   return {
     key,
     future,
-    window: st.win ? limitWindow(st.win, { future }) : def(),
+    window: st.win ? stored(st.win) : def(),
     range: st.range,
     moved: !!st.win,
     defaultWindow: def,
@@ -260,7 +269,7 @@ export function timeState(key, { defaultWindow, future = false, loads = false })
       const d = def();
       // Back at the default (Home, or zoomed and panned back): follow now again.
       const home = Math.abs(w.start - d.start) < 60e3 && Math.abs(w.end - d.end) < 60e3;
-      st.win = home ? null : { start: w.start, end: w.end };
+      st.win = home ? null : { start: w.start, end: w.end, ...(w.toNow ? { toNow: true } : {}) };
       changed();
     },
     setRange(r) {

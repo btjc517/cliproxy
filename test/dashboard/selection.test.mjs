@@ -7,9 +7,9 @@ globalThis.Event = class { constructor(t) { this.type = t; } };
 const { S, accountScope, setScreenWants, wantPerfWindow } = await import('../../internal/api/dashboard/core.js');
 const { usageData, usageSum, coverageStart, bucketEnds, perfScope, perfCounts, perfAt, historyBefore, loadRangeData, RD, spanData, perfFigures } = await import('../../internal/api/dashboard/screens/series.js');
 const { panelContext, buildPanel, dayWindow } = await import('../../internal/api/dashboard/screens/panels.js');
-const { tableHtml, viewTime } = await import('../../internal/api/dashboard/screens/telemetry.js');
+const { tableHtml, viewTime, view } = await import('../../internal/api/dashboard/screens/telemetry.js');
 const { V } = await import('../../internal/api/dashboard/screens/views.js');
-const { limitWindow } = await import('../../internal/api/dashboard/screens/timeaxis.js');
+const { limitWindow, timeState } = await import('../../internal/api/dashboard/screens/timeaxis.js');
 
 const HOUR = 3600e3, DAY = 24 * HOUR;
 const iso = (t) => new Date(t).toISOString();
@@ -39,9 +39,9 @@ test('mixed table columns show each value under its own heading, the total row t
       b: [counters({ input_tokens: 1, output_tokens: 2, cache_read_tokens: 3 })],
     } },
     performance: { range: 'custom', bucket_seconds: 3600, scopes: {
-      all: { requests: 12, failed: 0, throughput: { p50: 80 }, series: [] },
-      a: { requests: 11, failed: 0, throughput: { p50: 77 }, series: [] },
-      b: { requests: 1, failed: 0, throughput: { p50: 50 }, series: [] },
+      all: { requests: 12, failed: 0, throughput: { p50: 80 }, series: [{ start: iso(start), requests: 12 }] },
+      a: { requests: 11, failed: 0, throughput: { p50: 77 }, series: [{ start: iso(start), requests: 11 }] },
+      b: { requests: 1, failed: 0, throughput: { p50: 50 }, series: [{ start: iso(start), requests: 1 }] },
     } },
   } };
   const ctx = panelContext(ts({ start, end: T }), accountScope());
@@ -84,8 +84,9 @@ test('a zoom leaves a selection\'s totals alone: they come from data for the who
 test('every figure of a selection reads the same data: failures panel, strip numbers and table agree', async () => {
   const { window, range } = zoomed();
   // The window's bucket says 5 of 10 failed; the selection's own reading says none of 10.
-  const own = { summary: { usage_range: { bucket_seconds: 3600, starts: [], accounts: {} }, performance: { range: 'custom', bucket_seconds: 3600, scopes: { all: { requests: 10, failed: 0, failovers: 0, series: [] }, a: { requests: 10, failed: 0, failovers: 0, series: [] } } } } };
   const sel = { start: T + 3 * HOUR, end: T + 4 * HOUR };
+  const one = [{ start: iso(sel.start), requests: 10, failed: 0, failovers: 0 }];
+  const own = { summary: { usage_range: { bucket_seconds: 3600, starts: [], accounts: {} }, performance: { range: 'custom', bucket_seconds: 3600, scopes: { all: { requests: 10, failed: 0, failovers: 0, series: one }, a: { requests: 10, failed: 0, failovers: 0, series: one } } } } };
   // A one hour selection inside a window of wider buckets.
   S.data.summary.performance.bucket_seconds = 7200;
   S.data.summary.performance.scopes.all.series = [{ start: iso(T + 2 * HOUR), requests: 100, failed: 50 }];
@@ -279,10 +280,111 @@ test('a selection kept through a zoom counts available accounts at its own end',
 test('clicking today opens midnight to now, not yesterday afternoon to now', () => {
   reset();
   S.data = { summary: { timezone: 'UTC' } };
-  const now = Date.parse('2026-10-10T14:00:00Z');
-  const w = limitWindow(dayWindow('2026-10-10', now, false), { now, future: false });
-  assert.deepEqual([iso(w.start), iso(w.end)], ['2026-10-10T00:00:00.000Z', '2026-10-10T14:00:00.000Z']);
+  // The window a page shows after the click, as the Usage view keeps it.
+  const opened = (k, now) => {
+    S.ui = {};
+    const opts = { defaultWindow: (t) => ({ start: t - 7 * DAY, end: t }), future: false, now };
+    timeState('tv', opts).setWindow(dayWindow(k, now, false));
+    const w = timeState('tv', opts).window;
+    return [iso(w.start), iso(w.end)];
+  };
+  assert.deepEqual(opened('2026-10-10', Date.parse('2026-10-10T14:00:00Z')), ['2026-10-10T00:00:00.000Z', '2026-10-10T14:00:00.000Z']);
+  // In the first hour of the day too: midnight to now, not yesterday 23:30.
+  assert.deepEqual(opened('2026-10-10', Date.parse('2026-10-10T00:30:00Z')), ['2026-10-10T00:00:00.000Z', '2026-10-10T00:30:00.000Z']);
+  // Later the same window has grown with now, and stops at the day's end.
+  S.ui = {};
+  const opts = (now) => ({ defaultWindow: (t) => ({ start: t - 7 * DAY, end: t }), future: false, now });
+  timeState('tv', opts(Date.parse('2026-10-10T00:30:00Z'))).setWindow(dayWindow('2026-10-10', Date.parse('2026-10-10T00:30:00Z'), false));
+  assert.equal(iso(timeState('tv', opts(Date.parse('2026-10-10T09:00:00Z'))).window.end), '2026-10-10T09:00:00.000Z');
+  assert.equal(iso(timeState('tv', opts(Date.parse('2026-10-11T09:00:00Z'))).window.end), '2026-10-11T00:00:00.000Z');
   // A page with forecasts opens the whole day; an earlier day opens whole too.
-  assert.equal(iso(dayWindow('2026-10-10', now, true).end), '2026-10-11T00:00:00.000Z');
-  assert.equal(iso(limitWindow(dayWindow('2026-10-08', now, false), { now, future: false }).start), '2026-10-08T00:00:00.000Z');
+  assert.equal(iso(dayWindow('2026-10-10', Date.parse('2026-10-10T14:00:00Z'), true).end), '2026-10-11T00:00:00.000Z');
+  assert.deepEqual(opened('2026-10-08', Date.parse('2026-10-10T14:00:00Z')), ['2026-10-08T00:00:00.000Z', '2026-10-09T00:00:00.000Z']);
+});
+
+test('a window on the current hour asks for that hour, not the hour before now, and its figures are exact', () => {
+  reset();
+  // A forecast window showing this hour, which runs past now.
+  const h0 = Math.floor(Date.now() / HOUR) * HOUR;
+  const win = { start: h0, end: h0 + HOUR };
+  setScreenWants(() => ({ perf: win }));
+  assert.equal(wantPerfWindow(), `${noMs(h0)},${noMs(h0 + HOUR)}`, 'the same rule as a selection');
+  S.dataPerf = wantPerfWindow();
+  S.data = { accounts: ACCOUNTS, summary: { performance: { range: 'custom', bucket_seconds: 3600, scopes: { all: { requests: 10, failed: 0, ttft_ms: { p50: 900 }, series: [{ start: iso(h0), requests: 10 }] } } } } };
+  const ctx = panelContext(ts(win), accountScope(), { forecast: true });
+  assert.equal(ctx.perfExact, true);
+  assert.equal(buildPanel('ttft', {}, ctx).figure, '900ms');
+  assert.equal(buildPanel('ttft', {}, ctx).qual, 'median');
+});
+
+test('exactness comes from the reply\'s bucket edges, not from the window asked for', async () => {
+  reset();
+  S.data = { accounts: ACCOUNTS, summary: { timezone: 'UTC', performance: { range: 'custom', scopes: {} } } };
+  // A wide past selection; the proxy answers in two-day buckets from 12 December.
+  const sel = { start: Date.parse('2025-12-13T00:00:00Z'), end: Date.parse('2026-10-08T00:00:00Z') };
+  const starts = [];
+  for (let t = Date.parse('2025-12-12T00:00:00Z'); t < sel.end; t += 2 * DAY) starts.push(t);
+  const reply = { summary: { performance: { range: 'custom', bucket_seconds: 172800, scopes: { all: { requests: 2, failed: 0, ttft_ms: { p50: 700 }, series: starts.map((t, i) => ({ start: iso(t), requests: i === 0 ? 1 : i === 1 ? 1 : 0 })) } } } } };
+  await loadRangeData(sel, '', async () => ({ ok: true, json: async () => reply }));
+  const ctx = panelContext(ts({ start: sel.start - DAY, end: sel.end + DAY }, sel), accountScope());
+  assert.equal(ctx.span.exact, false, 'its first bucket starts a day before the selection');
+  assert.equal(perfFigures(ctx.span, ctx.sc).q, null);
+  assert.equal(buildPanel('ttft', {}, ctx).figure, '–');
+  // The window: buckets wider than it keep their percentiles, labelled with what they cover.
+  reset();
+  const win = { start: T + 30 * 60e3, end: T + 3 * HOUR + 30 * 60e3 };
+  loadedFor(win);
+  S.data = { accounts: ACCOUNTS, summary: { timezone: 'UTC', performance: { range: 'custom', bucket_seconds: 3600, scopes: { all: { requests: 4, failed: 0, ttft_ms: { p50: 800 }, series: [0, 1, 2, 3].map((i) => ({ start: iso(T + i * HOUR), requests: 1 })) } } } } };
+  const wctx = panelContext(ts(win), accountScope());
+  assert.equal(wctx.perfExact, false);
+  const p = buildPanel('ttft', {}, wctx);
+  assert.equal(p.figure, '800ms');
+  const hm = (t) => new Date(t).toISOString().slice(11, 16);
+  assert.match(p.qual, new RegExp(`^median, \\d+ \\w+ ${hm(T)} to \\d+ \\w+ ${hm(T + 4 * HOUR)}$`));
+});
+
+test('a kept selection\'s allowance count is for its own end, wherever the window is panned', () => {
+  reset();
+  const now = Date.now();
+  S.data = {
+    accounts: [{ id: 'a', provider: 'claude', email: 'a@x.com' }],
+    // 10% left, burning 2% an hour: none left by tomorrow, reset in five days.
+    allowance: { a: [{ long: true, utilization: 0.9, burned: 0.48, burned_since: iso(now - DAY), last_at: iso(now), reset_at: iso(now + 5 * DAY), window_seconds: 7 * 86400, step_seconds: 600, start: iso(now - DAY), used: [] }] },
+    summary: {},
+  };
+  const sel = { start: now + 20 * HOUR, end: now + DAY };
+  const figure = (win) => buildPanel('allowance', { window: 'week' }, panelContext(ts(win, sel), accountScope(), { forecast: true })).figure;
+  assert.equal(figure({ start: now - DAY, end: now + 2 * DAY }), '0 of 1');
+  // Panned into the past, the same selection still says 0 of 1.
+  assert.equal(figure({ start: now - 3 * DAY, end: now - 2 * DAY }), '0 of 1');
+});
+
+test('hourly bucket ends follow the London clock change, the last bucket too', () => {
+  reset();
+  S.data = { summary: { timezone: 'Europe/London' } };
+  const end = (s) => iso(bucketEnds([Date.parse(s)], HOUR)[0]);
+  // 25 October: 00:00 BST, 01:00 BST, then 01:00 GMT again, each an hour.
+  assert.equal(end('2026-10-24T23:00:00Z'), '2026-10-25T00:00:00.000Z');
+  assert.equal(end('2026-10-25T00:00:00Z'), '2026-10-25T01:00:00.000Z');
+  assert.equal(end('2026-10-25T01:00:00Z'), '2026-10-25T02:00:00.000Z');
+  // 29 March: 00:00 GMT runs to 02:00 BST, an hour.
+  assert.equal(end('2026-03-29T00:00:00Z'), '2026-03-29T01:00:00.000Z');
+  // Days and three-hour buckets as before.
+  assert.equal(iso(bucketEnds([Date.parse('2026-10-24T23:00:00Z')], DAY)[0]), '2026-10-26T00:00:00.000Z');
+  assert.equal(iso(bucketEnds([Date.parse('2026-10-24T23:00:00Z')], 3 * HOUR)[0]), '2026-10-25T03:00:00.000Z');
+});
+
+test('a saved view can be deleted on a narrow screen, from the options in its header', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const css = await readFile(new URL('../../internal/api/dashboard/app.css', import.meta.url), 'utf8');
+  // Every rule inside a narrow-screen block.
+  const block = css.split('@media (max-width: 860px)').slice(1).map((s) => s.slice(0, s.indexOf('\n}\n'))).join('\n');
+  assert.match(block, /\.nav \.vrow \.vmore \{ display: none !important; \}/, 'the sidebar options stay hidden there');
+  assert.match(block, /\.tbar \.vopts \{ display: inline-flex; \}/, 'the header options show instead');
+  reset();
+  V.loaded = true;
+  V.store = { views: [{ id: 'v-mine', name: 'Mine', panels: [], columns: [], window: 'last7d', accounts: null, builtin: false }], default: '' };
+  S.data = { accounts: ACCOUNTS, summary: {} };
+  const out = view({ params: ['v-mine'] });
+  assert.match(out.html, /<button class="vopts" data-vopts[^>]*aria-label="Mine options"/);
 });

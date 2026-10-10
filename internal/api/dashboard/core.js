@@ -58,20 +58,36 @@ export function loadSpan(v, now = Date.now()) {
 const iso = (t) => new Date(t).toISOString().replace(/\.\d{3}Z$/, "Z");
 const spanParam = (s) => (s ? iso(s.start) + "," + iso(s.end) : "");
 
-export function wantRange() {
-  const p = loadSpan(screenWants()?.perf);
-  return p ? fallbackRange(p.start, p.end) : "24h";
+// The performance window to ask for, for a window on screen or a selection
+// alike: the stretch itself in whole five minutes, so totals and percentiles
+// are its own. The end is not moved back to now, as the proxy stops a window
+// at now itself; moving it would stretch the start back before the stretch.
+// The proxy needs an hour to 366 days: a shorter stretch gets the hour from
+// its start, which contains it, and a longer one its last 366 days.
+export function perfSpan(v) {
+  if (!v) return null;
+  let start = Math.floor(v.start / FIVE_MIN) * FIVE_MIN;
+  let end = Math.ceil(v.end / FIVE_MIN) * FIVE_MIN;
+  if (end - start < 3600e3) end = start + 3600e3;
+  start = Math.max(start, end - 366 * 864e5);
+  return { start, end };
+}
+
+export function wantRange(now = Date.now()) {
+  const p = perfSpan(screenWants()?.perf);
+  return p ? fallbackRange(p.start, Math.min(p.end, now)) : "24h";
 }
 export const wantUsageViewport = () => spanParam(loadSpan(screenWants()?.usage));
-export const wantPerfWindow = () => spanParam(loadSpan(screenWants()?.perf));
+export const wantPerfWindow = () => spanParam(perfSpan(screenWants()?.perf));
 
-// Whether the loaded performance covers exactly the window on screen: the
-// reply is for a custom window (a backend without them answers with the fixed
+// Whether the loaded performance is for the window on screen: the reply is
+// for a custom window (a backend without them answers with the fixed
 // fallback range) and that window is the one the screen wants now. A window
 // that runs up to now moves on every five minutes; until the next reading
 // arrives, the last one counts while it has the same length and is at most
-// five minutes behind.
-export function perfExact(want = wantPerfWindow(), loaded = S.dataPerf, now = Date.now()) {
+// five minutes behind. Whether its buckets cover exactly the window is a
+// second question, which series.coversExactly answers.
+export function perfCurrent(want = wantPerfWindow(), loaded = S.dataPerf, now = Date.now()) {
   if (!loaded || !want || S.data?.summary?.performance?.range !== "custom") return false;
   if (loaded === want) return true;
   const [a0, a1] = loaded.split(",").map(Date.parse), [b0, b1] = want.split(",").map(Date.parse);

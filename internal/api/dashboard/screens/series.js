@@ -1,8 +1,8 @@
 // Measures over time for any window: usage buckets per account, performance
 // buckets for the picked accounts, and sums over a stretch of time. Every
 // panel, table and figure card reads through here, so their numbers agree.
-import { S, scopeParam, dayKey, fallbackRange } from "../core.js";
-import { midnight, tzOffset } from "./timeaxis.js";
+import { S, scopeParam, dayKey, fallbackRange, perfSpan } from "../core.js";
+import { midnight, addDays, tzOffset } from "./timeaxis.js";
 
 export const EMPTY = () => ({ requests: 0, failed: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, api_cost: 0 });
 export function addC(a, b) { if (b) for (const k in a) a[k] += Number(b[k]) || 0; return a; }
@@ -10,26 +10,34 @@ const nonZero = (c) => !!c && ["requests", "input_tokens", "output_tokens", "cac
 
 // ---------- bucket edges ----------
 
-// The instant a wall-clock time in the proxy's time zone falls on, near
-// guess. A wall time skipped when clocks go forward lands just after the gap.
-function wallToTime(wall, guess) {
-  const a = wall - tzOffset(guess);
-  const b = wall - tzOffset(a);
-  return wall - tzOffset(b) === b ? b : a;
+// The proxy's own rule for where buckets of hours local hours start, walked
+// in quarter hours as it does (usagestats isBucketStart and nextBucketStart):
+// a whole local hour divisible by hours, or a quarter hour whose local day,
+// or hours-long block of the day, differs from the one before it. So an
+// hourly bucket from 01:00 BST on 25 October ends at 01:00 GMT, an hour on,
+// while a three hour one from midnight BST runs to 03:00 GMT, four hours on.
+const SLOT = 15 * 60e3;
+function isBucketStart(t, hours) {
+  const at = new Date(t + tzOffset(t)), before = new Date(t - SLOT + tzOffset(t - SLOT));
+  if (hours < 24 && at.getUTCMinutes() === 0 && at.getUTCSeconds() === 0 && at.getUTCHours() % hours === 0) return true;
+  return at.toISOString().slice(0, 10) !== before.toISOString().slice(0, 10) || Math.floor(at.getUTCHours() / hours) !== Math.floor(before.getUTCHours() / hours);
 }
 
-// Where a bucket starting at t ends: step later on the local clock, as the
-// proxy lays buckets out. A bucket across a clock change is an hour longer
-// or shorter: London's three hours from midnight on 25 October run to 03:00
-// GMT, four hours later.
-function localEnd(t, step) {
-  return wallToTime(t + tzOffset(t) + step, t);
+// The start of the bucket after the one starting at t: the next local
+// boundary, or for buckets of several days, that many local days on.
+export function nextBucketStart(t, step) {
+  const hours = Math.max(1, Math.round(step / 3600e3));
+  if (hours > 24) return midnight(addDays(dayKey(t), Math.round(hours / 24)));
+  let next = Math.floor(t / SLOT) * SLOT + SLOT;
+  for (let i = 0; i < 4 * 24 * 3 && !isBucketStart(next, hours); i++) next += SLOT;
+  return next;
 }
 
 // Each bucket ends where the next one starts; the proxy lists every bucket,
-// so that is exact across clock changes. The last ends one local step on.
+// so that is exact across clock changes. The last ends at the next local
+// bucket start.
 export function bucketEnds(starts, step) {
-  return starts.map((t, i) => (i + 1 < starts.length ? starts[i + 1] : localEnd(t, step)));
+  return starts.map((t, i) => (i + 1 < starts.length ? starts[i + 1] : nextBucketStart(t, step)));
 }
 
 // ---------- usage ----------
@@ -190,42 +198,28 @@ export const perfAt = (ps, t) => (ps?.series || []).find((b) => b.t0 <= t && t <
 // wider than it (two-day buckets in a yearly window). Percentiles cannot be
 // added up from buckets either. So a selection loads its own reply, with
 // usage and performance for just that range. RD holds the last one.
-// exact: the reply's window is the selection itself, rounded to five
-// minutes, so its summaries (totals and percentiles) describe the selection.
-export const RD = { key: "", summary: null, scope: "", at: 0, exact: false, loading: "", req: 0 };
+export const RD = { key: "", summary: null, scope: "", at: 0, loading: "", req: 0 };
 
 const rangeKey = (span, scope) => (span ? span.start + "," + span.end + "|" + scope : "");
-const FIVE_MIN = 5 * 60e3;
 // How long a loaded selection holds: a minute while it runs up to now, five
 // otherwise, as usage can be recorded late.
 const FRESH_LIVE = 60e3, FRESH_PAST = 5 * 60e3;
 let requests = 0;
 
-// The window to load for a selection: the selection itself in whole five
-// minutes, so its totals and percentiles are its own. The proxy stops a
-// window at now, so a running selection asks for its full length. A window
-// is at least an hour: a shorter selection gets the hour from its start,
-// which contains it, and its figures then come from buckets (exact: false).
-export function selectionSpan(range) {
-  const start = Math.floor(range.start / FIVE_MIN) * FIVE_MIN, end = Math.ceil(range.end / FIVE_MIN) * FIVE_MIN;
-  if (end - start >= 3600e3) return { start: Math.max(start, end - 366 * 864e5), end, exact: end - start <= 366 * 864e5 };
-  return { start, end: start + 3600e3, exact: false };
-}
-
 // Loads usage and performance for a selected range, once per range and
-// scope until it is stale, then redraws. Each request has its own number,
-// and only the latest one's reply is kept, so an older reply for the same
-// range never replaces a newer one.
+// scope until it is stale, then redraws. The window asked for comes from
+// perfSpan, the same rule as for the window on screen. Each request has its
+// own number, and only the latest one's reply is kept, so an older reply for
+// the same range never replaces a newer one.
 export async function loadRangeData(range, scope, fetchFn = globalThis.fetch, now = Date.now()) {
   if (!range || range.start >= now) return;
-  const span = selectionSpan(range);
+  const span = perfSpan(range);
   const key = rangeKey(span, scope);
   const fresh = range.end > RD.at ? FRESH_LIVE : FRESH_PAST;
   if ((RD.key === key && now - RD.at <= fresh) || RD.loading === key) return;
   const my = ++requests;
   RD.loading = key;
   RD.req = my;
-  const exact = span.exact;
   try {
     const iso = (t) => new Date(t).toISOString().replace(/\.\d{3}Z$/, "Z");
     const q = new URLSearchParams({ range: fallbackRange(span.start, now), usage_start: iso(span.start), usage_end: iso(span.end), perf_start: iso(span.start), perf_end: iso(span.end) });
@@ -234,7 +228,7 @@ export async function loadRangeData(range, scope, fetchFn = globalThis.fetch, no
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
     if (RD.req !== my) return;
-    Object.assign(RD, { key, summary: data?.summary || null, scope, at: now, exact, loading: "" });
+    Object.assign(RD, { key, summary: data?.summary || null, scope, at: now, loading: "" });
     globalThis.window?.dispatchEvent(new Event("dash:render"));
   } catch (e) {
     if (RD.req === my) RD.loading = "";
@@ -251,6 +245,20 @@ function lineUp(starts, ends, from, to, now) {
   return Math.abs(a - from) < 60e3 && (Math.abs(b - to) < 60e3 || (to >= now - 60e3 && b >= now));
 }
 
+// Whether a reply's performance buckets cover exactly [from, to), cut at
+// now: its first bucket starts at from, and its last ends at to, or holds
+// now when to is later. The proxy widens a window to whole buckets, so a
+// reply's totals and percentiles describe the stretch only when its own
+// bucket edges say so, whatever window was asked for.
+export function coversExactly(ps, from, to, now) {
+  const s = ps?.series || [];
+  if (!s.length) return false;
+  const first = s[0], last = s[s.length - 1];
+  if (Math.abs(first.t0 - from) >= 60e3) return false;
+  if (to > now) return last.t0 <= now && now < last.t1;
+  return Math.abs(last.t1 - to) < 60e3;
+}
+
 // What a figure, chip or table cell reads for the stretch it describes: the
 // selection while there is one, else the window. One answer for every panel,
 // strip and table on a page:
@@ -258,29 +266,34 @@ function lineUp(starts, ends, from, to, now) {
 //   usage      usage buckets covering it, or null while they load
 //   perfSrc    performance covering it (its scopes), or null while it loads
 //   merged     the account scope perfSrc merged, for perfScope
-//   exact      perfSrc measured exactly this stretch, so its summaries hold
+//   current    perfSrc is for this window, not one before a zoom or pan
+//   exact      perfSrc's buckets cover exactly this stretch, so its summaries hold
 //   ready      false while a selection waits for its own reply
 //   sel        it describes a selection, not the window
 export function spanData(ctx) {
   const r = ctx.range, now = ctx.now;
   if (!r) {
-    return { from: ctx.window.start, to: Math.min(ctx.window.end, now), usage: ctx.usage, perfSrc: S.data?.summary?.performance || null, merged: S.dataScope, exact: !!ctx.perfExact, ready: true, sel: false };
+    const to = Math.min(ctx.window.end, now);
+    const current = !!ctx.perfCurrent;
+    return { from: ctx.window.start, to, usage: ctx.usage, perfSrc: S.data?.summary?.performance || null, merged: S.dataScope, current, exact: current && coversExactly(ctx.perf, ctx.window.start, ctx.window.end, now), ready: true, sel: false };
   }
   const from = r.start, to = Math.min(r.end, now);
   const scope = ctx.sc.some ? scopeParam(ctx.sc.ids) : "";
-  if (RD.summary && RD.key === rangeKey(selectionSpan(r), scope)) {
+  if (RD.summary && RD.key === rangeKey(perfSpan(r), scope)) {
     const p = RD.summary.performance || null;
-    // Its summaries hold only when the reply's window is the selection; a
-    // reply for a wider window (an hour around a short selection) gives
-    // counts from its buckets and no percentiles.
-    return { from, to, usage: usageData(RD.summary), perfSrc: p, merged: RD.scope, exact: p?.range === "custom" && RD.exact, ready: true, sel: true };
+    // Its summaries hold only when its buckets are the selection's; a reply
+    // that covers more (an hour around a short selection, or buckets wider
+    // than the selection's edges) gives counts from its buckets and no
+    // percentiles.
+    const exact = p?.range === "custom" && coversExactly(perfScope(ctx.sc, p, RD.scope), r.start, r.end, now);
+    return { from, to, usage: usageData(RD.summary), perfSrc: p, merged: RD.scope, current: true, exact, ready: true, sel: true };
   }
   // Until it arrives, the loaded window answers where its buckets line up
   // with the selection; elsewhere the figures wait.
   const u = ctx.usage && lineUp(ctx.usage.starts, ctx.usage.ends, from, to, now) ? ctx.usage : null;
   const ps = ctx.perf;
   const p = ps && lineUp(ps.series.map((b) => b.t0), ps.series.map((b) => b.t1), from, to, now) ? S.data?.summary?.performance || null : null;
-  return { from, to, usage: u, perfSrc: p, merged: S.dataScope, exact: false, ready: false, sel: true };
+  return { from, to, usage: u, perfSrc: p, merged: S.dataScope, current: false, exact: false, ready: false, sel: true };
 }
 
 // Performance figures over a span for some accounts (an account scope, or
@@ -297,11 +310,11 @@ export function perfFigures(sd, sc) {
   }
   const c = perfCounts(ps, sd.from, sd.to);
   // Without an exact reading a selection has no percentiles. The window
-  // keeps those of a fixed fallback range, which the panels label with the
-  // range they cover, but not those of another custom window (the one before
-  // a zoom, still loaded).
+  // keeps those of what was loaded for it, a fixed fallback range or its own
+  // window widened to whole buckets, which the panels label with the stretch
+  // they cover; never those of another window still loaded before a zoom.
   const fixed = sd.perfSrc.range !== "custom";
-  return { ps, q: !sd.sel && fixed ? ps.q : null, requests: c.requests, failed: c.failed, failovers: c.hasFailovers ? c.failovers : undefined, any: c.any };
+  return { ps, q: !sd.sel && (fixed || sd.current) ? ps.q : null, requests: c.requests, failed: c.failed, failovers: c.hasFailovers ? c.failovers : undefined, any: c.any };
 }
 
 // Usage totals over a span for the given accounts, or null while they load.
