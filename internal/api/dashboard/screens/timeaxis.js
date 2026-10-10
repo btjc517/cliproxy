@@ -78,18 +78,30 @@ function nextBound(t, grid) {
   return t + (grid?.step || 60e3);
 }
 
-// Drags one edge of a range to time t. Past the other edge the two swap, and
-// the returned edge says which one the pointer now holds.
-export function resizeRange(r, edge, t, grid) {
-  const snapped = snapTime(t, grid);
-  const fixed = edge === "start" ? r.end : r.start;
-  if (edge === "start" ? snapped < fixed : snapped > fixed) {
-    return { range: edge === "start" ? { start: snapped, end: fixed } : { start: fixed, end: snapped }, edge };
+function prevBound(t, grid) {
+  const b = grid?.bounds;
+  if (Array.isArray(b) && b.length > 1) {
+    for (let i = b.length - 1; i >= 0; i--) if (b[i] < t) return b[i];
+    return t - (b[1] - b[0]);
   }
-  // At or past the other edge: the dragged edge becomes the other one.
-  const swapped = edge === "start" ? "end" : "start";
-  const moved = snapped === fixed ? (swapped === "end" ? nextBound(fixed, grid) : fixed - (nextBound(fixed, grid) - fixed)) : snapped;
-  return { range: swapped === "end" ? { start: fixed, end: moved } : { start: moved, end: fixed }, edge: swapped };
+  return t - (grid?.step || 60e3);
+}
+
+// Drags one edge of a range to time t; the other edge stays fixed. The range
+// keeps at least one bucket. The edges swap only once the pointer is more
+// than half a bucket past the fixed edge, and swap back only once it is half
+// a bucket back on the first side, so small moves near the edge never flip
+// it. The returned edge says which one the pointer now holds.
+export function resizeRange(r, edge, t, grid) {
+  const fixed = edge === "start" ? r.end : r.start;
+  const after = nextBound(fixed, grid), before = prevBound(fixed, grid);
+  const snapped = snapTime(t, grid);
+  if (edge === "start") {
+    if (t <= fixed + (after - fixed) / 2) return { range: { start: Math.min(snapped, before), end: fixed }, edge };
+    return { range: { start: fixed, end: Math.max(snapped, after) }, edge: "end" };
+  }
+  if (t >= fixed - (fixed - before) / 2) return { range: { start: fixed, end: Math.max(snapped, after) }, edge };
+  return { range: { start: Math.min(snapped, before), end: fixed }, edge: "start" };
 }
 
 // Moves a range by dt keeping its length, with its start snapped.
@@ -334,16 +346,19 @@ export function bindTime(root, group) {
   drawRange(range);
 
   // ----- crosshair -----
-  let marks = [];
+  let marks = [], hidden = [];
+  const unhide = () => { for (const el of hidden) el.classList.remove("under-chip"); hidden = []; };
   const clearHover = () => {
     for (const m of marks) m.remove();
     marks = [];
+    unhide();
     hoverPlot = null;
     hold(false);
   };
   const showHover = (t, over) => {
     for (const m of marks) m.remove();
     marks = [];
+    unhide();
     if (t < win.start || t > win.end) { hoverPlot = null; return hold(false); }
     hold(true);
     hoverPlot = over;
@@ -368,6 +383,12 @@ export function bindTime(root, group) {
         chip.style.top = info.chipTop != null ? info.chipTop + "px" : `calc(100% - 22px)`;
         const cw = chip.offsetWidth;
         chip.style.left = (x + 8 + cw > w ? x - 8 - cw : x + 8) + "px";
+        // A label the chip lands on hides until the crosshair moves on.
+        const cr = chip.getBoundingClientRect();
+        for (const el of p.querySelectorAll("[data-chip-avoid]")) {
+          const r = el.getBoundingClientRect();
+          if (r.right > cr.left && r.left < cr.right && r.bottom > cr.top && r.top < cr.bottom) { el.classList.add("under-chip"); hidden.push(el); }
+        }
       }
       if (p === over && info.card) {
         const card = add(document.createElement("div"));

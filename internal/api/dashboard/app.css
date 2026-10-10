@@ -16,6 +16,7 @@
   --surface-3: #F4F4F4;       /* selected tab, selected menu item */
   --nav-on: #E7E7E7;
   --nav-hover: #EDEDED;
+  --vrow-hover: rgb(231 231 231 / 60%);
   --hover: #FAFAFA;
   --ring: #0A0A0A1A;
   --brand: #266DF0;           /* --color-app-brand */
@@ -57,6 +58,7 @@
     --surface-3: #262626;
     --nav-on: #262626;
     --nav-hover: #1C1C1C;
+    --vrow-hover: #1C1C1C;
     --hover: #191A19;
     --ring: #FFFFFF1F;
     --brand: #5EA7FF;         /* --color-app-brand-dark */
@@ -97,6 +99,7 @@
   --surface-3: #262626;
   --nav-on: #262626;
   --nav-hover: #1C1C1C;
+  --vrow-hover: #1C1C1C;
   --hover: #191A19;
   --ring: #FFFFFF1F;
   --brand: #5EA7FF;
@@ -807,6 +810,8 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .tp.av .av-logos .logo { width: 14px; height: 14px; }
 .av-seg { position: absolute; height: 20px; display: flex; align-items: center; gap: 4px; padding-left: 8px; border-radius: 4px; background: var(--surface-2); font-weight: 500; white-space: nowrap; overflow: hidden; box-shadow: inset 1px 0 0 var(--panel), inset -1px 0 0 var(--panel); }
 .av-seg b { font-weight: 500; }
+.av-lbl { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.under-chip { visibility: hidden; }
 .av-seg.none { background: color-mix(in srgb, var(--error-text) 12%, transparent); color: var(--error-text); }
 
 /* Crosshair, hover card and range, drawn by timeaxis.js on every plot */
@@ -876,7 +881,7 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .tstrip .figend { padding-top: 10px; }
 .panel .pnote { font-size: 12px; color: var(--muted-fg); white-space: nowrap; }
 .act { display: flex; align-items: flex-start; gap: 64px; min-width: 0; }
-.act-grid { position: relative; flex: 1 1 0; min-width: 0; }
+.act-grid { position: relative; flex: 0 1 auto; min-width: 0; }
 .act-scroll { overflow-x: auto; overflow-y: hidden; padding: 3px; margin: -3px; scrollbar-width: thin; }
 .act-cells { position: relative; display: flex; gap: 4px; width: max-content; }
 .act-cells .wk { display: flex; flex-direction: column; gap: 4px; }
@@ -952,7 +957,7 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .nav .vrow { position: relative; display: flex; align-items: center; border-radius: 6px; }
 .nav .vrow > a { flex: 1 1 0; min-width: 0; }
 .nav .vrow > a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.nav .vrow:hover > a, .nav .vrow.open > a { background: rgb(231 231 231 / 60%); }
+.nav .vrow:hover > a, .nav .vrow.open > a { background: var(--vrow-hover); }
 .nav .vrow > a.on { background: var(--nav-on); }
 .nav .vrow .vmore { position: absolute; right: 4px; width: 22px; height: 22px; border-radius: 4px; display: none; align-items: center; justify-content: center; }
 .nav .vrow:hover .vmore, .nav .vrow.open .vmore, .nav .vrow .vmore:focus-visible { display: inline-flex; }
@@ -960,8 +965,6 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .nav .vrow:hover > a, .nav .vrow.open > a { padding-right: 30px; }
 .nav a.newview { color: var(--muted-fg); }
 .nav a.newview:hover { color: var(--fg); }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .nav .vrow:hover > a { background: var(--nav-hover); } }
-:root[data-theme="dark"] .nav .vrow:hover > a { background: var(--nav-hover); }
 
 @media (max-width: 860px) {
   .tbar { height: auto; min-height: 48px; flex-wrap: wrap; padding: 8px 16px; row-gap: 8px; }

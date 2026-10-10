@@ -84,6 +84,27 @@ test('a handle dragged past the other edge swaps the edges', () => {
   assert.ok(c.range.end > c.range.start);
 });
 
+test('a handle near the other edge keeps one bucket and does not flip back and forth', () => {
+  // 00:00 to 02:00, dragging the start handle to the right a pointer move at a time.
+  let range = { start: week.start, end: week.start + 2 * HOUR }, edge = 'start';
+  const seen = [];
+  for (const h of [1.6, 1.9, 2.0, 2.1, 2.4, 2.6, 2.4, 2.1, 2.0, 1.6, 2.2]) {
+    const res = resizeRange(range, edge, week.start + h * HOUR, hours);
+    range = res.range; edge = res.edge;
+    assert.ok(range.end - range.start >= HOUR, `at ${h} the range keeps a bucket`);
+    seen.push([h, (range.start - week.start) / HOUR, (range.end - week.start) / HOUR, edge]);
+  }
+  // Up to half a bucket past 02:00 the range stays 01:00 to 02:00 on the start handle.
+  for (const [h, s, e, ed] of seen.slice(0, 5)) assert.deepEqual([s, e, ed], [1, 2, 'start'], `at ${h}`);
+  // Past 02:30 it swaps once: 02:00 to 03:00 on the end handle.
+  assert.deepEqual(seen[5].slice(1), [2, 3, 'end']);
+  // Coming back within the hour after 02:00, and even half an hour before it, it stays swapped.
+  for (const [h, s, e, ed] of seen.slice(6)) assert.deepEqual([s, e, ed], [2, 3, 'end'], `at ${h}`);
+  // Only past 01:30 does it swap back.
+  const back = resizeRange(range, edge, week.start + 1.4 * HOUR, hours);
+  assert.deepEqual([(back.range.start - week.start) / HOUR, (back.range.end - week.start) / HOUR, back.edge], [1, 2, 'start']);
+});
+
 test('dragging inside the range moves it and keeps its length', () => {
   const r = { start: week.start + 10 * HOUR, end: week.start + 20 * HOUR };
   const m = moveRange(r, 3.4 * HOUR, hours);
