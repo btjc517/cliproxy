@@ -10,20 +10,19 @@ import { accountColor } from "./common.js";
 import { allowanceSeries, trajectory, projectedAt, projectionPoints, resetsUntil, readingAt, deadZones, accountLabels } from "./burn.js";
 import { model as availModel, available } from "./timeline.js";
 import { EMPTY, addC, usageData, displayBuckets, usageSum, bucketAt, bucketsIn, perfScope, perfCounts, perfAt, historyBefore, spanData, perfFigures, usageFigures, loadRangeData } from "./series.js";
-import { HOUR, DAY, fracOf, plotWidth, addDays, midnight, timeTicks, endText } from "./timeaxis.js";
+import { HOUR, DAY, fracOf, plotWidth, addDays, midnight, timeTicks, endText, spanLabel, dateText, dayText } from "./timeaxis.js";
 import { plot, lines, dot, bars, band, card, legend, yTop } from "./tplot.js";
 
 const FORMAT = { key: "format", choices: [["lines", "Lines"], ["bars", "Bars"]], def: "lines" };
 const WINDOW = { key: "window", choices: [["week", "Weekly"], ["5h", "5-hour"]], def: "week" };
-const dm = (t) => day(t).split(" ").slice(1).join(" ");
 
 // "Wed 7 Oct 12:00", "Mon 5 Oct" for a day bucket, "Wed 7 Oct 12:00 to 13:00" for an hour.
 export function bucketName(t0, t1) {
-  const name = (t) => (isToday(t) ? "Today" : day(t));
+  const name = (t) => (isToday(t) ? "Today" : dayText(t));
   if (t1 - t0 >= 23 * HOUR) return name(t0);
   return `${name(t0)} ${clock(t0)} to ${clock(t1)}`;
 }
-const instant = (t, now) => `${isToday(t) ? "Today" : day(t)} ${clock(t)}${t > now ? ", at this rate" : ""}`;
+const instant = (t, now) => `${isToday(t) ? "Today" : dayText(t, now)} ${clock(t)}${t > now ? ", at this rate" : ""}`;
 
 // ---------- the registry ----------
 
@@ -109,9 +108,8 @@ function perfLabel(ctx) {
   if (S.data?.summary?.performance?.range !== "custom") return FIXED_TEXT[S.dataRange] || "";
   const s = ctx.perf.series;
   if (!ctx.perfCurrent || !s.length) return "";
-  const at = (t) => `${dm(t)} ${clock(t)}`;
   const end = s[s.length - 1].t1;
-  return `${at(s[0].t0)} to ${end > ctx.now ? "now" : at(end)}`;
+  return spanLabel(s[0].t0, Math.min(end, ctx.now), { toNow: end > ctx.now });
 }
 
 // Loads what a page's selection needs, if it has one. Every page with a
@@ -193,7 +191,7 @@ function usagePanel(ctx, o, type, m) {
     const sum = usageFigures(ctx.span, ids, ctx.now);
     if (sum?.any) {
       figure = m.f(m.val(sum.sum));
-      if (!sum.covered && sum.first > s.from) qual = `since ${dm(sum.first)}`;
+      if (!sum.covered && sum.first > s.from) qual = `since ${dateText(sum.first, ctx.now)}`;
     }
   }
   const probe = (t, el, hovered) => {
@@ -363,49 +361,61 @@ export function deadSpans(lines, long, v, now) {
 }
 
 // "Sun 09:00" for a reset in the coming week, else "Sun 11 Oct".
-const resetName = (t, now) => (t - now < 6 * DAY ? day(t).split(" ")[0] + " " + clock(t) : day(t));
+const resetName = (t, now) => (t - now < 6 * DAY ? day(t).split(" ")[0] + " " + clock(t) : dayText(t, now));
+
+// The width of a reset label's text in the plot's 12px font: measured in
+// the page, estimated a little wide elsewhere (tests).
+let measure = null;
+function textWidth(font) {
+  if (typeof document === "undefined") return (s) => s.length * 7;
+  measure ||= document.createElement("canvas").getContext("2d");
+  if (!measure) return (s) => s.length * 7;
+  measure.font = font;
+  // Tabular digits run slightly wider than the canvas measures them.
+  return (s) => Math.ceil(measure.measureText(s).width * 1.04) + 1;
+}
+
+// The reset row's layout, as app.css draws it: the 12px icon and a 4px gap
+// before the text; a label starts 6px left of its reset, or, when that
+// would cross the plot's right edge, ends 6px right of it (class "end").
+export const MARK = { icon: 16, shift: 6, gap: 8 };
+export function markBox(x, width, plotW) {
+  const end = x - MARK.shift + width > plotW;
+  return end ? { a: x + MARK.shift - width, b: x + MARK.shift, end } : { a: x - MARK.shift, b: x - MARK.shift + width, end };
+}
 
 // The reset row above the plot: one icon and label per reset, merged with
-// the next when their labels would overlap, as "Sun 09:00, 15:00".
+// its neighbour when their boxes would meet, as "Sun 09:00, 15:00". A label
+// names its first few resets, then a count, and keeps at most 12 for its
+// hover text, so the work grows with the number of resets, not its square.
 function resetMarks(lines, v, now) {
   const w = plotWidth();
   const times = [...new Set(lines.flatMap((l) => resetsUntil(l.tr, now, v.end, l.period)).filter((t) => t >= v.start))].sort((a, b) => a - b);
-  const groups = [];
-  const textW = (s) => s.length * 6.4 + 16;
-  // A label shows its first few resets by name, then a count, so it stays
-  // short and each reset is formatted once: work grows with the number of
-  // resets, not with its square, however far out the window reaches.
-  const SHOWN = 3;
-  const labelOf = (g) => (g.times.length <= SHOWN ? g.text : `${g.text}, ${g.times.length - SHOWN} more`);
-  // Room for the count at its widest, so a label never grows past the next.
-  const roomOf = (g) => textW(g.times.length < SHOWN ? g.text : `${g.text}, 9999 more`);
-  const join = (g, t) => {
-    const prev = g.times[g.times.length - 1];
-    g.times.push(t);
-    if (g.times.length <= SHOWN) g.text += ", " + (dayKey(t) === dayKey(prev) ? clock(t) : resetName(t, now));
+  const font = typeof document === "undefined" ? "" : `12px ${getComputedStyle(document.body).fontFamily}`;
+  const tw = textWidth(font);
+  const SHOWN = 3, MAX_TITLES = 12;
+  const named = (ts) => ts.map((t, i) => (i && dayKey(t) === dayKey(ts[i - 1]) ? clock(t) : resetName(t, now))).join(", ");
+  const group = (x, first, n, text) => ({ x, first, n, text: text ?? named(first.slice(0, SHOWN)) });
+  const labelOf = (g) => (g.n <= SHOWN ? g.text : `${g.text}, ${g.n - SHOWN} more`);
+  const box = (g) => markBox(g.x, MARK.icon + tw(labelOf(g)), w);
+  const merge = (p, g) => {
+    if (p.first.length >= MAX_TITLES) return group(p.x, p.first, p.n + g.n, p.text);
+    const first = p.first.concat(g.first).slice(0, MAX_TITLES);
+    return group(p.x, first, p.n + g.n, p.first.length >= SHOWN ? p.text : undefined);
   };
+  // Each reset starts a label; while it meets the label before it, the two
+  // become one at the earlier reset, which can then meet the one before.
+  const stack = [];
   for (const t of times) {
-    const g = groups[groups.length - 1];
-    const x = fracOf(v, t) * w;
-    if (g && x - g.x < roomOf(g) + 8) join(g, t);
-    else groups.push({ x, times: [t], text: resetName(t, now) });
+    let g = group(fracOf(v, t) * w, [t], 1);
+    while (stack.length && box(stack[stack.length - 1]).b + MARK.gap > box(g).a) g = merge(stack.pop(), g);
+    stack.push(g);
   }
-  // A label that would run past the right edge is drawn ending there, so it
-  // reaches back to the left: merge it into the one before while they meet.
-  const left = (g) => Math.min(g.x, w - roomOf(g));
-  while (groups.length > 1) {
-    const g = groups[groups.length - 1], p = groups[groups.length - 2];
-    if (left(g) >= p.x + roomOf(p) + 8) break;
-    for (const t of g.times) join(p, t);
-    groups.pop();
-  }
-  const MAX_TITLES = 12;
-  return groups.map((g) => {
-    g.text = labelOf(g);
-    const edge = g.x + textW(g.text) > w ? "end" : "";
-    const listed = g.times.slice(0, MAX_TITLES).map((t) => `${day(t)} ${clock(t)}`).join(", ");
-    const titles = listed + (g.times.length > MAX_TITLES ? `, and ${g.times.length - MAX_TITLES} more` : "");
-    return `<span class="${edge}" style="left:${(g.x / w * 100).toFixed(3)}%" title="Resets to 100%: ${esc(titles)}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" fill="none" stroke="var(--muted-fg)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><b>${esc(g.text)}</b></span>`;
+  return stack.map((g) => {
+    const text = labelOf(g);
+    const listed = g.first.map((t) => `${dayText(t, now)} ${clock(t)}`).join(", ");
+    const titles = listed + (g.n > MAX_TITLES ? `, and ${g.n - MAX_TITLES} more` : "");
+    return `<span class="${box(g).end ? "end" : ""}" style="left:${(g.x / w * 100).toFixed(3)}%" title="Resets to 100%: ${esc(titles)}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" fill="none" stroke="var(--muted-fg)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><b>${esc(text)}</b></span>`;
   }).join("");
 }
 
@@ -498,7 +508,7 @@ function allowancePanel(ctx, o) {
     const t = ctx.range.end;
     const have = ls.filter((l) => (leftAt(l, t, now) ?? 0) > 0).length;
     figure = `${have} of ${ls.length}`;
-    qual = `have allowance by ${endText(ctx.range.end)}`;
+    qual = `have allowance by ${endText(ctx.range.end, now)}`;
   } else {
     const used = ls.filter((l) => l.tr.usedUp);
     if (used.length) {
@@ -582,7 +592,7 @@ function availablePanel(ctx) {
   if (ctx.range) {
     const t = ctx.range.end;
     figure = `${countAt(t)} of ${total}`;
-    qual = t > now ? `by ${dm(t)}, forecast` : `at ${dm(t)} ${clock(t)}`;
+    qual = t > now ? `by ${dateText(t, now)}, forecast` : `at ${dateText(t, now)} ${clock(t)}`;
   } else {
     figure = `${countAt(now)} of ${total}${v.end > now ? " now" : ""}`;
     const dead = rows.filter((r) => r.at(now) === 0);

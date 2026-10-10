@@ -10,7 +10,7 @@ import { accountPicker, bindAccountPicker } from "./account-picker.js";
 import { pctRate, allowanceRange, resetsUntil } from "./burn.js";
 import { PANELS, panelHtml, buildPanel, panelContext, snapGrid, allowanceLines, leftAt, availability, loadSelection } from "./panels.js";
 import { usageFigures, perfFigures, historyBefore } from "./series.js";
-import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backToNow, zoomHint, endText } from "./timeaxis.js";
+import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backToNow, zoomHint, endText, dayText } from "./timeaxis.js";
 import { V, COLUMN_IDS, findView, defaultId, sameView, viewWindow, hasForecast, loadViews, changedFields } from "./views.js";
 import { openDisplay, displayOpen, startRename, renameBox, mountRename, setDefaultView, saveDraft, newViewDialog, viewMenu } from "./viewmenus.js";
 
@@ -85,7 +85,7 @@ export function wants(params) {
 
 // ---------- the table ----------
 
-const resetName = (t, now) => (t - now < 6 * DAY ? `${day(t).split(" ")[0]} ${clock(t)}` : `${day(t)} ${clock(t)}`);
+const resetName = (t, now) => (t - now < 6 * DAY ? `${day(t).split(" ")[0]} ${clock(t)}` : `${dayText(t, now)} ${clock(t)}`);
 const ALLOWANCE_COLS = ["weekLeft", "perDay", "heading", "nextReset"];
 const USAGE_COLS = ["tokens", "requests", "input", "cacheWrite", "cacheRead", "output", "cost", "cacheReuse"];
 const PERF_COLS = ["requests", "ttft50", "ttft90", "throughput", "failures", "failovers"];
@@ -117,7 +117,7 @@ const meter = (pct, color, cls = "") => `<span class="pctcell"><span class="mete
 const reuseCell = (x) => { const r = cacheReuse(x); return r == null ? `<span class="muted">–</span>` : `<span class="pctcell"><span class="meter reuse"><i style="width:${Math.round(r)}%"></i></span><span class="muted">${Math.round(r)}%</span></span>`; };
 const perSec = (x) => (x ? (x < 10 ? x.toFixed(1) : String(Math.round(x))) + " tokens/s" : "–");
 
-const fullTime = (t) => `${day(t)}, ${clock(t)}`;
+const fullTime = (t) => `${dayText(t)}, ${clock(t)}`;
 
 // Where an account's week is heading, and under it what follows: after a
 // used-up week, how the next one goes at the same rate.
@@ -160,7 +160,7 @@ export function tableHtml(view, ctx) {
   const shownCols = [];
   for (const c of cols) {
     if (ALLOWANCE_COLS.includes(c) && r) {
-      if (!shownCols.some((x) => x.sel)) shownCols.push({ id: "leftAt", sel: true, ...SEL_COLS.leftAt, label: `Left at ${endText(r.end)}` }, { id: "usedIn", sel: true, ...SEL_COLS.usedIn }, { id: "resetsIn", sel: true, ...SEL_COLS.resetsIn });
+      if (!shownCols.some((x) => x.sel)) shownCols.push({ id: "leftAt", sel: true, ...SEL_COLS.leftAt, label: `Left at ${endText(r.end, now)}` }, { id: "usedIn", sel: true, ...SEL_COLS.usedIn }, { id: "resetsIn", sel: true, ...SEL_COLS.resetsIn });
     } else shownCols.push({ id: c, ...COLUMNS[c] });
   }
   const head = `<div class="tr head">${`<div class="c acct" style="min-width:${acctW}px">${r ? selectionLabel(r) : esc("Accounts, " + windowText(ctx.window, now))}</div>`}${shownCols.map((c) => cell(c.w, esc(c.label), c.r, c.cls)).join("")}</div>`;

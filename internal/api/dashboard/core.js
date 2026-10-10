@@ -315,9 +315,19 @@ export const validTime = (iso) => (iso && Date.parse(iso) > Date.UTC(2001, 0, 1)
 const toMs = (t) => (typeof t === "number" ? t : Date.parse(t));
 
 function tz() { return S.data?.summary?.timezone || undefined; }
+// One formatter per zone and format, made once: building one costs far more
+// than using it, and a long forecast formats thousands of times.
+const formats = new Map();
 function partsOf(t, opts) {
-  try { return new Date(toMs(t)).toLocaleString("en-GB", { timeZone: tz(), ...opts }); }
-  catch (e) { return new Date(toMs(t)).toLocaleString("en-GB", opts); }
+  const zone = tz();
+  const key = `${zone}|${JSON.stringify(opts)}`;
+  let f = formats.get(key);
+  if (!f) {
+    try { f = new Intl.DateTimeFormat("en-GB", { timeZone: zone, ...opts }); }
+    catch (e) { f = new Intl.DateTimeFormat("en-GB", opts); }
+    formats.set(key, f);
+  }
+  return f.format(new Date(toMs(t)));
 }
 export const clock = (t) => partsOf(t, { hour: "2-digit", minute: "2-digit", hour12: false });
 export const day = (t) => partsOf(t, { weekday: "short", day: "numeric", month: "short" }).replace(",", "");

@@ -188,21 +188,30 @@ export function timeTicks(v, maxTicks = 8) {
 const dm = (t) => dayMonth(t);
 const sameMonth = (a, b) => day(a).split(" ")[2] === day(b).split(" ")[2];
 
-// "5 to 12 Oct", "28 Sep to 5 Oct", or "1 Oct 14:00 to 8 Oct 14:00" when the
-// window ends now or is shorter than three days ("9 Oct 04:00 to 12:00" within a day).
-export function windowText(v, now = Date.now()) {
-  const timed = Math.abs(v.end - now) < 90e3 || v.end - v.start < 3 * DAY;
-  if (timed) return dayKey(v.start) === dayKey(v.end) ? `${dm(v.start)} ${clock(v.start)} to ${clock(v.end)}` : `${dm(v.start)} ${clock(v.start)} to ${dm(v.end)} ${clock(v.end)}`;
-  return spanDays(v.start, v.end);
+const yearOf = (t) => dayKey(t).slice(0, 4);
+
+// The one label for a stretch of time from a to b, used by every window and
+// range label so each shows years the same way. Both ends name their year
+// when the years differ, as a window zoomed out to a year can run from one
+// October to the next.
+//   whole days  "5 to 12 Oct", "28 Sep to 5 Oct", "30 Dec 2026 to 2 Jan 2027"
+//   timed       "1 Oct 14:00 to 8 Oct 14:00", "9 Oct 04:00 to 12:00"
+//   toNow       "9 Oct 16:00 to now"
+export function spanLabel(a, b, { timed = true, toNow = false } = {}) {
+  const years = yearOf(a) !== yearOf(b);
+  const date = (t) => (years ? `${dm(t)} ${yearOf(t)}` : dm(t));
+  if (!timed) {
+    if (dayKey(a) === dayKey(b)) return dm(a);
+    if (years || !sameMonth(a, b)) return `${date(a)} to ${date(b)}`;
+    return `${dm(a).split(" ")[0]} to ${dm(b)}`;
+  }
+  const end = toNow ? "now" : dayKey(a) === dayKey(b) ? clock(b) : `${date(b)} ${clock(b)}`;
+  return `${date(a)} ${clock(a)} to ${end}`;
 }
 
-// "5 to 12 Oct", "28 Sep to 5 Oct", or with years when they differ, as a
-// window zoomed out to a year can run from one April to the next.
-function spanDays(a, b) {
-  if (dayKey(a) === dayKey(b)) return dm(a);
-  const ya = dayKey(a).slice(0, 4), yb = dayKey(b).slice(0, 4);
-  if (ya !== yb) return `${dm(a)} ${ya} to ${dm(b)} ${yb}`;
-  return sameMonth(a, b) ? `${dm(a).split(" ")[0]} to ${dm(b)}` : `${dm(a)} to ${dm(b)}`;
+// A window's label: timed when it ends now or is shorter than three days.
+export function windowText(v, now = Date.now()) {
+  return spanLabel(v.start, v.end, { timed: Math.abs(v.end - now) < 90e3 || v.end - v.start < 3 * DAY });
 }
 
 export function spanText(ms) {
@@ -213,18 +222,21 @@ export function spanText(ms) {
   return amount(hours / 24, "day");
 }
 
+// One day on its own: "9 Oct", with the year when it is not this year's.
+export const dateText = (t, now = Date.now()) => (yearOf(t) === yearOf(now) ? dm(t) : `${dm(t)} ${yearOf(t)}`);
+// The same with its weekday: "Fri 9 Oct", "Sat 13 Mar 2027".
+export const dayText = (t, now = Date.now()) => (yearOf(t) === yearOf(now) ? day(t) : `${day(t)} ${yearOf(t)}`);
+
 // A selection's end: "12 Oct" at midnight, else "9 Oct 06:00".
-export const endText = (t) => (clock(t) === "00:00" ? dm(t) : `${dm(t)} ${clock(t)}`);
+export function endText(t, now = Date.now()) {
+  return clock(t) === "00:00" ? dateText(t, now) : `${dateText(t, now)} ${clock(t)}`;
+}
 
 // "9 to 12 Oct, 3 days" or "8 Oct 14:00 to 18:00, 4 hours".
 export function rangeText(r) {
   const len = r.end - r.start;
   const whole = (t) => clock(t) === "00:00";
-  let text;
-  if (len >= DAY && whole(r.start) && whole(r.end)) text = spanDays(r.start, r.end);
-  else if (dayKey(r.start) === dayKey(r.end)) text = `${dm(r.start)} ${clock(r.start)} to ${clock(r.end)}`;
-  else text = `${dm(r.start)} ${clock(r.start)} to ${dm(r.end)} ${clock(r.end)}`;
-  return `${text}, ${spanText(len)}`;
+  return `${spanLabel(r.start, r.end, { timed: !(len >= DAY && whole(r.start) && whole(r.end)) })}, ${spanText(len)}`;
 }
 
 // ---------- shared plot geometry ----------

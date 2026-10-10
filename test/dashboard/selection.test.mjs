@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 const mem = new Map();
 globalThis.localStorage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
 globalThis.window = { dispatchEvent() {}, addEventListener() {} };
@@ -340,7 +341,8 @@ test('exactness comes from the reply\'s bucket edges, not from the window asked 
   const p = buildPanel('ttft', {}, wctx);
   assert.equal(p.figure, '800ms');
   const hm = (t) => new Date(t).toISOString().slice(11, 16);
-  assert.match(p.qual, new RegExp(`^median, \\d+ \\w+ ${hm(T)} to \\d+ \\w+ ${hm(T + 4 * HOUR)}$`));
+  // The shared span label: the end's date only when it is another day.
+  assert.match(p.qual, new RegExp(`^median, \\d+ \\w+ ${hm(T)} to (\\d+ \\w+ )?${hm(T + 4 * HOUR)}$`));
 });
 
 test('a kept selection\'s allowance count is for its own end, wherever the window is panned', () => {
@@ -432,14 +434,8 @@ test('a five-hour forecast a year long for three accounts draws in under 200 ms'
     const p = buildPanel('allowance', { window: '5h' }, ctx);
     buildPanel('available', {}, ctx);
     const ms = performance.now() - t0;
-    // Reset labels as laid out: a label at the right edge ends there.
-    const W = 1096, textW = (s) => s.length * 6.4 + 16;
-    const spans = [...p.html.matchAll(/<span class="(end|)" style="left:([0-9.]+)%"[^>]*>.*?<b>([^<]*)<\\/b>/g)].map((m) => {
-      const x = (Number(m[2]) / 100) * W, wd = textW(m[3]);
-      return m[1] === 'end' ? { a: W - wd, b: W } : { a: x, b: x + wd };
-    });
-    const overlap = spans.some((s, i) => i > 0 && s.a < spans[i - 1].b);
-    console.log(JSON.stringify({ ms, kb: p.html.length / 1024, dots: (p.html.match(/tp-dot/g) || []).length, marks: spans.length, overlap }));
+    const marks = [...p.html.matchAll(/<span class="(end|)" style="left:([0-9.]+)%"[^>]*>.*?<b>([^<]*)<\\/b>/g)].map((m) => [m[1], Number(m[2]), m[3]]);
+    console.log(JSON.stringify({ ms, kb: p.html.length / 1024, dots: (p.html.match(/tp-dot/g) || []).length, marks }));
   `;
   // Time a warm run: the first one also compiles every module.
   let out;
@@ -453,6 +449,53 @@ test('a five-hour forecast a year long for three accounts draws in under 200 ms'
   // the plot width can show, so the markup stays a few hundred kB.
   assert.ok(out.kb < 400, `${Math.round(out.kb)} kB of markup`);
   assert.ok(out.dots < 1000, `${out.dots} dots`);
-  assert.ok(out.marks > 0 && out.marks < 60, `${out.marks} reset labels`);
-  assert.equal(out.overlap, false, 'no reset label runs into the next');
+  assert.ok(out.marks.length > 0 && out.marks.length < 60, `${out.marks.length} reset labels`);
+  assertMarksApart(out.marks);
+});
+
+// Reset labels placed the way app.css places them, read from the CSS
+// itself: a label starts its shift left of its reset, or with class "end"
+// ends that far right of it. Widths are the 12px icon, its 4px gap and the
+// text at 7px a character, the width the panel assumes outside a browser.
+const CSS = readFileSync(new URL('../../internal/api/dashboard/app.css', import.meta.url), 'utf8');
+function markRules() {
+  const plain = /\.tp-marks > span \{[^}]*transform: translateX\(-(\d+)px\)/.exec(CSS);
+  const end = /\.tp-marks > span\.end \{[^}]*transform: translateX\(calc\(-100% \+ (\d+)px\)\)/.exec(CSS);
+  const gap = /\.tp-marks > span \{[^}]*gap: (\d+)px/.exec(CSS);
+  assert.ok(plain && end && gap, 'app.css still places reset labels by translateX');
+  return { plain: Number(plain[1]), end: Number(end[1]), gap: Number(gap[1]) };
+}
+function assertMarksApart(marks, W = 1096) {
+  const r = markRules();
+  const boxes = marks.map(([cls, pct, text]) => {
+    const x = (pct / 100) * W, width = 12 + r.gap + text.length * 7;
+    return cls === 'end' ? { a: x + r.end - width, b: x + r.end, text } : { a: x - r.plain, b: x - r.plain + width, text };
+  });
+  for (let i = 1; i < boxes.length; i++) {
+    assert.ok(boxes[i].a >= boxes[i - 1].b, `"${boxes[i - 1].text}" ends at ${boxes[i - 1].b.toFixed(1)}px but "${boxes[i].text}" starts at ${boxes[i].a.toFixed(1)}px`);
+  }
+  for (const b of boxes) assert.ok(b.b <= W + r.end && b.a >= -r.plain - 0.01, `"${b.text}" stays on the plot`);
+}
+
+test('reset labels near the right edge never overlap, placed as the CSS places them', () => {
+  reset();
+  const now = Date.now();
+  const ids = ['a', 'b', 'c'];
+  // Three five-hour accounts resetting in half an hour, 2.5 and 4.5 hours.
+  const ser = (h) => ({ long: false, utilization: 0.4, burn_per_hour: 0.05, burned: 0.2, burned_since: iso(now - 5 * HOUR), last_at: iso(now), reset_at: iso(now + h * HOUR), window_seconds: 5 * 3600, step_seconds: 600, start: iso(now - DAY), used: [] });
+  S.data = { accounts: ids.map((id) => ({ id, provider: 'claude', email: id + '@x.com' })), allowance: { a: [ser(0.5)], b: [ser(2.5)], c: [ser(4.5)] }, summary: {} };
+  const windows = [
+    { start: now, end: now + DAY },
+    { start: now - HOUR, end: now + DAY },
+    { start: now - 12 * HOUR, end: now + 12 * HOUR },
+    { start: now - DAY, end: now + DAY },
+    { start: now - DAY, end: now + 3 * DAY },
+    { start: now - DAY, end: now + 30 * DAY },
+  ];
+  for (const win of windows) {
+    const html = buildPanel('allowance', { window: '5h' }, panelContext(ts(win), accountScope(), { forecast: true })).html;
+    const marks = [...html.matchAll(/<span class="(end|)" style="left:([0-9.]+)%"[^>]*>.*?<b>([^<]*)<\/b>/g)].map((m) => [m[1], Number(m[2]), m[3]]);
+    assert.ok(marks.length > 0, 'the row has reset labels');
+    assertMarksApart(marks);
+  }
 });

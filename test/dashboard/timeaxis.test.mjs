@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import {
   HOUR, DAY, MIN_SPAN, MAX_SPAN, limitWindow, zoomWindow, panWindow, timeAt, fracOf, snapTime, makeRange, resizeRange, moveRange, timeTicks, windowText, rangeText, endText,
 } from '../../internal/api/dashboard/screens/timeaxis.js';
+import * as axis from '../../internal/api/dashboard/screens/timeaxis.js';
+import { readFileSync } from 'node:fs';
+// Missing before the shared label helpers: these fail clearly rather than at import.
+const missing = (name) => () => { throw new Error(`timeaxis.js has no ${name}`); };
+const spanLabel = axis.spanLabel || missing('spanLabel'), dayText = axis.dayText || missing('dayText'), dateText = axis.dateText || missing('dateText');
 import { S } from '../../internal/api/dashboard/core.js';
 
 // Every time in the proxy's zone: UTC keeps the expected labels exact.
@@ -145,6 +150,32 @@ test('window and range labels read as the boards show them', () => {
   assert.equal(rangeText({ start: Date.parse('2026-10-09T00:00:00Z'), end: Date.parse('2026-10-12T00:00:00Z') }), '9 to 12 Oct, 3 days');
   assert.equal(rangeText({ start: Date.parse('2026-10-08T14:00:00Z'), end: Date.parse('2026-10-08T18:00:00Z') }), '8 Oct 14:00 to 18:00, 4 hours');
   // A selection's end names the time unless it falls at midnight.
-  assert.equal(endText(Date.parse('2026-10-12T00:00:00Z')), '12 Oct');
-  assert.equal(endText(Date.parse('2026-10-09T06:00:00Z')), '9 Oct 06:00');
+  assert.equal(endText(Date.parse('2026-10-12T00:00:00Z'), now), '12 Oct');
+  assert.equal(endText(Date.parse('2026-10-09T06:00:00Z'), now), '9 Oct 06:00');
+});
+
+test('every window and range label names both years when they differ', () => {
+  // 366 days ending now: a timed label, which once read "7 Oct 14:00 to 8 Oct 14:00".
+  assert.equal(windowText({ start: now - 366 * DAY, end: now }, now), '7 Oct 2025 14:00 to 8 Oct 2026 14:00');
+  // A short window across New Year.
+  assert.equal(windowText({ start: Date.parse('2026-12-31T22:00:00Z'), end: Date.parse('2027-01-01T02:00:00Z') }, now), '31 Dec 2026 22:00 to 1 Jan 2027 02:00');
+  // A selection that does not start or end at midnight.
+  assert.equal(rangeText({ start: Date.parse('2025-10-08T06:00:00Z'), end: Date.parse('2026-10-08T06:00:00Z') }), '8 Oct 2025 06:00 to 8 Oct 2026 06:00, 365 days');
+  // A selection's end in another year than now.
+  assert.equal(endText(Date.parse('2027-03-13T06:00:00Z'), now), '13 Mar 2027 06:00');
+  assert.equal(endText(Date.parse('2025-10-09T00:00:00Z'), now), '9 Oct 2025');
+  // Within one year nothing changes.
+  assert.equal(spanLabel(Date.parse('2026-10-09T16:00:00Z'), now, { toNow: true }), '9 Oct 16:00 to now');
+  assert.equal(spanLabel(Date.parse('2025-10-09T16:00:00Z'), now, { toNow: true }), '9 Oct 2025 16:00 to now');
+  assert.equal(dayText(Date.parse('2027-03-13T06:00:00Z'), now), 'Sat 13 Mar 2027');
+  assert.equal(dateText(Date.parse('2026-03-13T06:00:00Z'), now), '13 Mar');
+});
+
+test('panel labels outside the window header use the same year rule', async () => {
+  const src = (f) => readFileSync(new URL(`../../internal/api/dashboard/screens/${f}`, import.meta.url), 'utf8');
+  // Only timeaxis.js formats a day and month; the panels and table take its helpers.
+  for (const f of ['panels.js', 'telemetry.js']) {
+    assert.doesNotMatch(src(f), /const dm = |dayMonth\(/, `${f} formats dates on its own`);
+    assert.doesNotMatch(src(f), /`\$\{day\(t\)\}/, `${f} names a day without the year rule`);
+  }
 });
