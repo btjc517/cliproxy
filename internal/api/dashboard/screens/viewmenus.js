@@ -5,8 +5,8 @@ import { check } from "./account-picker.js";
 import { PANELS, PANEL_ORDER } from "./panels.js";
 import { forgetTime } from "./timeaxis.js";
 import {
-  V, BUILTINS, COLUMN_IDS, WINDOWS, MAX_VIEWS, findView, isBuiltin, persist, saveView, saveAsNew, resetView, renameView, duplicateView,
-  deleteView, setDefault, viewHref, nameError, MAX_NAME, retrySaves,
+  V, COLUMN_IDS, WINDOWS, findView, isBuiltin, persist, saveView, saveAsNew, resetView, renameView, duplicateView,
+  deleteView, setDefault, viewHref, nameError, MAX_NAME, retrySaves, LIMIT_TEXT,
 } from "./views.js";
 import { current, edit, dropDraft, COLUMNS } from "./telemetry.js";
 
@@ -275,11 +275,12 @@ export function newViewDialog(base, { title = "Save as new view", name = "" } = 
     const bad = nameError(nm);
     if (bad) { if (nm) toast(bad, true); scrim.querySelector("#dlg-name").focus(); return; }
     const res = saveAsNew(V.store, base, nm, { keepAccounts: keep, accounts: accountSelection() });
-    if (!res.id) { toast(`You can keep up to ${MAX_VIEWS - BUILTINS.length} views. Delete one first.`, true); return; }
+    if (!res.id) { toast(LIMIT_TEXT, true); return; }
     if (findView(V.store, base.id)) dropDraft(base.id);
     close();
     await commit(res.store);
-    location.hash = viewHref(res.id);
+    // Left out at the limit by a save from another tab: stay put.
+    if (findView(V.store, res.id)) location.hash = viewHref(res.id);
   };
   const onKey = (e) => {
     if (e.key === "Escape") { e.preventDefault(); close(); }
@@ -367,9 +368,9 @@ export function viewMenu(anchor, id) {
         if (a === "rename") startRename(id);
         else if (a === "duplicate") {
           const res = duplicateView(V.store, id);
-          if (!res.id) { toast(`You can keep up to ${MAX_VIEWS - BUILTINS.length} views. Delete one first.`, true); return; }
+          if (!res.id) { toast(LIMIT_TEXT, true); return; }
           await commit(res.store);
-          location.hash = viewHref(res.id);
+          if (findView(V.store, res.id)) location.hash = viewHref(res.id);
         } else if (a === "default") await commit(setDefault(V.store, id));
         else if (a === "reset") { dropDraft(id); await commit(resetView(V.store, id)); }
         else if (a === "delete") {

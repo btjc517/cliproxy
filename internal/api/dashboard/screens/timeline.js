@@ -97,7 +97,10 @@ export function model(a, now, fr) {
   m.pts.push({ t: now, v: v0 });
   const stopAll = Math.min(fr.end, m.endAt);
   let t0 = now, v = v0;
-  for (let guard = 0; guard < 12 && t0 < stopAll; guard++) {
+  // One pass per weekly cycle, as many as the window holds: a window can be
+  // a year long, so a fixed count of passes would stop short of its end.
+  const passes = Math.min(1000, Math.ceil(Math.max(0, stopAll - now) / WEEK) + 3);
+  for (let guard = 0; guard < passes && t0 < stopAll; guard++) {
     const stop = Math.min(R || Infinity, stopAll);
     const out = v <= 0 ? t0 : rate > 0 ? t0 + (v / rate) * HOUR : Infinity;
     if (out < stop) {
@@ -111,7 +114,9 @@ export function model(a, now, fr) {
     m.pts.push({ t: R, v: 100 });
     t0 = R; v = 100; R += WEEK;
   }
-  if (!m.drawEnd) m.drawEnd = stopAll;
+  // Should the passes ever run out, the forecast ends where its points do:
+  // later times are unknown, never the last value held.
+  if (!m.drawEnd) m.drawEnd = t0 >= stopAll ? stopAll : m.pts[m.pts.length - 1].t;
   // Merge touching stretches.
   m.outs.sort((x, y) => x[0] - y[0]);
   m.outs = m.outs.reduce((acc, o) => {

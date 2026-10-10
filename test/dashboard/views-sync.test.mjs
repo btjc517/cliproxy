@@ -314,3 +314,88 @@ test('a proxy without revisions gets plain saves, with no If-Match and no new fi
   for (const s of sent) assert.equal(s.headers['If-Match'], undefined);
   assert.deepEqual(body.views, []);
 });
+
+test('a create whose reply was lost is not repeated, and cannot bring back a view deleted meanwhile', async () => {
+  fresh();
+  const srv = contractServer();
+  await tabA.loadViews(srv.fetch);
+  // The PUT reaches the proxy, but its reply is lost.
+  let drop = true;
+  const flaky = async (url, init = {}) => {
+    const res = await srv.fetch(url, init);
+    if (init.method === 'PUT' && drop) { drop = false; throw new Error('connection reset'); }
+    return res;
+  };
+  const a = saveAsNew(tabA.V.store, findView(tabA.V.store, 'usage'), 'Sent once', { rand });
+  assert.equal(await tabA.persist(a.store, flaky), 'failed');
+  assert.deepEqual(names(srv.doc), ['Sent once']);
+  // Retry finds it already there: done, no second copy.
+  assert.equal(await tabA.retrySaves(srv.fetch), 'server');
+  assert.deepEqual(names(srv.doc), ['Sent once']);
+  assert.equal(tabA.V.notice, '');
+  // Again, but another tab deletes it before the retry.
+  drop = true;
+  const b = saveAsNew(tabA.V.store, findView(tabA.V.store, 'usage'), 'Deleted elsewhere', { rand });
+  assert.equal(await tabA.persist(b.store, flaky), 'failed');
+  await tabB.loadViews(srv.fetch);
+  assert.equal(await tabB.persist(deleteView(tabB.V.store, b.id), srv.fetch), 'server');
+  assert.equal(await tabA.retrySaves(srv.fetch), 'server');
+  assert.deepEqual(names(srv.doc), ['Sent once']);
+  assert.ok(srv.doc.deleted.some((d) => d.id === b.id), 'the deletion record stays');
+  assert.equal(tabA.V.notice, 'Deleted elsewhere changed elsewhere, your edit was not saved');
+  assert.deepEqual(tabA._test.pending(), []);
+});
+
+test('renaming a built-in back keeps a field another tab changed in its override', async () => {
+  fresh();
+  const srv = contractServer();
+  await tabA.loadViews(srv.fetch);
+  assert.equal(await tabA.persist(renameView(tabA.V.store, 'usage', 'My usage'), srv.fetch), 'server');
+  await tabB.loadViews(srv.fetch);
+  const win = saveView(tabB.V.store, { ...findView(tabB.V.store, 'usage'), window: 'last24h' });
+  assert.equal(await tabB.persist(win, srv.fetch), 'server');
+  // Tab A, still showing last7d, renames it back to Usage.
+  assert.equal(await tabA.persist(renameView(tabA.V.store, 'usage', 'Usage'), srv.fetch), 'server');
+  const over = srv.doc.views.find((x) => x.id === 'usage');
+  assert.deepEqual([over?.name, over?.window], ['Usage', 'last24h']);
+  // With no field left differing from the built-in, the override goes.
+  const back = saveView(tabA.V.store, { ...findView(tabA.V.store, 'usage'), window: 'last7d' });
+  assert.equal(await tabA.persist(back, srv.fetch), 'server');
+  assert.equal(srv.doc.views.some((x) => x.id === 'usage'), false);
+});
+
+test('a new view past the limit is not saved, not kept, and says why', async () => {
+  fresh();
+  const custom = Array.from({ length: 46 }, (_, i) => v(`v-c${i}`, `View ${i}`, 1000));
+  const overrides = ['allowance', 'usage', 'performance'].map((id) => ({ ...v(id, `${id} mine`, 1000), builtin: true }));
+  const srv = contractServer([...overrides, ...custom]);
+  await tabA.loadViews(srv.fetch);
+  await tabB.loadViews(srv.fetch);
+  const a = saveAsNew(tabA.V.store, findView(tabA.V.store, 'usage'), 'Fiftieth', { rand });
+  const b = saveAsNew(tabB.V.store, findView(tabB.V.store, 'usage'), 'Fifty-first', { rand });
+  assert.ok(a.id && b.id, 'each tab saw room for one more');
+  assert.equal(await tabA.persist(a.store, srv.fetch), 'server');
+  assert.equal(await tabB.persist(b.store, srv.fetch), 'full');
+  assert.equal(srv.doc.views.length, 50);
+  assert.ok(srv.doc.views.some((x) => x.name === 'Fiftieth'));
+  assert.equal(srv.doc.views.some((x) => x.name === 'Fifty-first'), false);
+  assert.equal(findView(tabB.V.store, b.id), null);
+  assert.deepEqual(tabB._test.pending(), []);
+  assert.equal(tabB.V.notice, tabA.LIMIT_TEXT);
+  assert.match(tabA.LIMIT_TEXT, /Delete one first/);
+});
+
+test('resetting a built-in that is the default keeps it the default', async () => {
+  fresh();
+  const srv = contractServer([{ ...v('performance', 'My performance', 1000), builtin: true }], { default: 'performance' });
+  await tabA.loadViews(srv.fetch);
+  assert.equal(await tabA.persist(tabA.resetView(tabA.V.store, 'performance'), srv.fetch), 'server');
+  assert.deepEqual(srv.doc.views, []);
+  assert.equal(srv.doc.default, 'performance');
+  assert.equal(tabA.defaultId(tabA.V.store), 'performance');
+  // The reset belongs to that one save: a later edit elsewhere is not undone by the next save here.
+  await tabB.loadViews(srv.fetch);
+  assert.equal(await tabB.persist(renameView(tabB.V.store, 'performance', 'Perf'), srv.fetch), 'server');
+  assert.equal(await tabA.persist(setDefault(tabA.V.store, 'usage'), srv.fetch), 'server');
+  assert.equal(srv.doc.views.find((x) => x.id === 'performance')?.name, 'Perf');
+});

@@ -33,6 +33,8 @@ export const BUILTINS = [
   },
 ];
 const BUILTIN_IDS = BUILTINS.map((v) => v.id);
+// What the viewer is told when a new view would pass the limit.
+export const LIMIT_TEXT = `You can keep up to ${MAX_VIEWS - BUILTINS.length} views. Delete one first.`;
 export const isBuiltin = (id) => BUILTIN_IDS.includes(id);
 const copy = (v) => JSON.parse(JSON.stringify(v));
 
@@ -126,7 +128,7 @@ export function saveView(store, draft) {
   if (v.builtin) {
     const base = BUILTINS.find((b) => b.id === v.id);
     // Saved exactly as built in: no override needed.
-    if (sameView(v, base) && v.name === base.name) return resetView(store, v.id);
+    if (sameView(v, base) && v.name === base.name) return dropOverride(store, v.id);
     const has = store.views.some((x) => x.id === v.id);
     return withViews(store, has ? store.views.map((x) => (x.id === v.id ? v : x)) : [...store.views, v]);
   }
@@ -152,7 +154,14 @@ export function saveAsNew(store, draft, name, { keepAccounts = false, accounts =
 }
 
 // Drops a built-in's override, back to how it was built.
-export const resetView = (store, id) => withViews(store, store.views.filter((v) => v.id !== id));
+// Drops a built-in's override without saying it was reset: the view was
+// edited back to how it was built, field by field.
+const dropOverride = (store, id) => withViews(store, store.views.filter((v) => v.id !== id));
+
+// Resets a built-in to how it was built, as the viewer asked: every field,
+// whatever another tab changed. reset marks it so the save sends a reset
+// rather than field changes; persist does not keep the mark.
+export const resetView = (store, id) => ({ ...dropOverride(store, id), reset: [...(store.reset || []), id] });
 
 export function renameView(store, id, name) {
   const v = findView(store, id);
@@ -255,15 +264,28 @@ export function opsFor(a, b) {
   const out = [];
   const before = new Map(a.views.map((v) => [v.id, v]));
   const after = new Map(b.views.map((v) => [v.id, v]));
-  for (const [id, v] of after) {
-    const old = findView(a, id);
-    if (!old) { out.push({ op: "create", id, view: copy(v), name: v.name }); continue; }
+  const changed = (old, v) => {
     const fields = {};
     for (const f of FIELDS) if (!same(old[f], v[f])) fields[f] = copy(v[f]);
-    if (Object.keys(fields).length) out.push({ op: "update", id, fields, name: old.name });
+    return Object.keys(fields).length ? fields : null;
+  };
+  // Built-ins always exist: an edit, even one back to how it was built, is
+  // the fields that changed, so other fields another tab set are kept. Only
+  // an explicit reset drops the whole override.
+  for (const bv of BUILTINS) {
+    if (b.reset?.includes(bv.id)) { if (before.has(bv.id)) out.push({ op: "reset", id: bv.id, name: findView(a, bv.id).name }); continue; }
+    const fields = changed(findView(a, bv.id), findView(b, bv.id));
+    if (fields) out.push({ op: "update", id: bv.id, fields, name: findView(a, bv.id).name });
   }
-  for (const [id, v] of before) if (!after.has(id)) out.push({ op: "delete", id, name: v.name });
-  const cleared = !b.default && a.default && before.has(a.default) && !after.has(a.default);
+  for (const [id, v] of after) {
+    if (isBuiltin(id)) continue;
+    const old = findView(a, id);
+    if (!old) { out.push({ op: "create", id, view: copy(v), name: v.name }); continue; }
+    const fields = changed(old, v);
+    if (fields) out.push({ op: "update", id, fields, name: old.name });
+  }
+  for (const [id, v] of before) if (!after.has(id) && !isBuiltin(id)) out.push({ op: "delete", id, name: v.name });
+  const cleared = !b.default && a.default && !isBuiltin(a.default) && before.has(a.default) && !after.has(a.default);
   if ((a.default || "") !== (b.default || "") && !cleared) out.push({ op: "default", id: b.default || "" });
   return out;
 }
@@ -288,19 +310,37 @@ export function readDoc(body) {
 
 // Applies operations to a document. Returns the new document and the
 // operations that were lost because their view was deleted elsewhere.
+// Applies operations to a document. Returns the new document, the operations
+// lost because their view was deleted elsewhere, and those refused because
+// the document would hold more than MAX_VIEWS views. Nothing is ever cut to
+// fit: a refused operation is left out whole.
+//   create   done already when its id is in the document (its earlier save
+//            reached the proxy and only the reply was lost); lost when its id
+//            was deleted since. A create never removes a deletion record.
+//   update   the changed fields on top of the fresh view; for a built-in,
+//            the override goes only when no field differs from the built-in.
+//   reset    drops a built-in's override; it stays the default if it was.
+//   delete   of a view already gone is done.
+//   default  lost when the view it names was deleted.
 export function applyOps(doc, ops, now = Date.now()) {
   let views = doc.store.views.slice(), def = doc.store.default || "";
   const at = { ...doc.at };
   let deleted = doc.deleted.slice();
-  const lost = [];
+  const lost = [], full = [];
+  const gone = (id) => deleted.some((d) => d.id === id);
+  // Adds an entry, unless the document is full.
+  const add = (v, op) => {
+    if (views.length >= MAX_VIEWS) { full.push(op); return false; }
+    views = [...views, v];
+    return true;
+  };
   for (const op of ops) {
     const i = views.findIndex((v) => v.id === op.id);
     if (op.op === "create") {
+      if (i >= 0) continue;
+      if (gone(op.id)) { lost.push(op); continue; }
       const v = cleanView(op.view);
-      if (!v) continue;
-      views = i >= 0 ? views.map((x, j) => (j === i ? v : x)) : [...views, v];
-      at[op.id] = now;
-      deleted = deleted.filter((d) => d.id !== op.id);
+      if (v && add(v, op)) at[op.id] = now;
     } else if (op.op === "update") {
       // A built-in without an override is the built-in itself.
       const base = i >= 0 ? views[i] : isBuiltin(op.id) ? BUILTINS.find((b) => b.id === op.id) : null;
@@ -308,18 +348,21 @@ export function applyOps(doc, ops, now = Date.now()) {
       const v = cleanView({ ...copy(base), ...copy(op.fields), id: op.id });
       const plain = v.builtin && BUILTINS.find((b) => b.id === v.id);
       if (plain && sameView(v, plain) && v.name === plain.name) {
-        // Edited back to how it was built: no override needed.
+        // No field differs from the built-in any more: no override needed.
         views = views.filter((x) => x.id !== op.id);
         delete at[op.id];
-      } else {
-        views = i >= 0 ? views.map((x, j) => (j === i ? v : x)) : [...views, v];
+      } else if (i >= 0) {
+        views = views.map((x, j) => (j === i ? v : x));
         at[op.id] = now;
-      }
+      } else if (add(v, op)) at[op.id] = now;
+    } else if (op.op === "reset") {
+      views = views.filter((x) => x.id !== op.id);
+      delete at[op.id];
     } else if (op.op === "delete") {
       if (i < 0) continue;
       views = views.filter((x) => x.id !== op.id);
       delete at[op.id];
-      if (!isBuiltin(op.id)) deleted = [...deleted.filter((d) => d.id !== op.id), { id: op.id, updated_at: now }];
+      deleted = [...deleted.filter((d) => d.id !== op.id), { id: op.id, updated_at: now }];
       if (def === op.id) def = "";
     } else if (op.op === "default") {
       if (op.id && !isBuiltin(op.id) && i < 0) { lost.push(op); continue; }
@@ -327,7 +370,7 @@ export function applyOps(doc, ops, now = Date.now()) {
     }
   }
   deleted = deleted.sort((a, b) => a.updated_at - b.updated_at).slice(-200);
-  return { doc: { store: cleanStore({ views, default: def }), at, deleted, revision: doc.revision }, lost };
+  return { doc: { store: cleanStore({ views, default: def }), at, deleted, revision: doc.revision }, lost, full };
 }
 
 // The body a proxy stores: with versions and deletions when it keeps
@@ -395,7 +438,8 @@ function drop(ops) {
   pending = pending.filter((op) => !gone.has(op));
 }
 
-// Sends this tab's operations once. Returns "server", "failed" when the
+// Sends this tab's operations once. Returns "server", "full" when a new
+// view was left out at the limit (the rest was saved), "failed" when the
 // proxy could not be reached or kept changing (they stay in memory for a
 // retry), or "rejected" when it refused them as invalid (they are dropped,
 // as it would refuse them every time).
@@ -405,15 +449,21 @@ async function flush(fetchFn) {
   let doc = await getDoc(fetchFn);
   for (let tries = 0; doc && tries < TRIES; tries++) {
     const m = applyOps(doc, ops);
-    const res = await putDoc(m.doc, fetchFn);
+    // A view that would go past the limit is not saved and not kept: the
+    // limit note says so. The rest of the save goes ahead.
+    const notes = [];
+    if (m.lost.length) notes.push(lostText(m.lost));
+    if (m.full.length) notes.push(LIMIT_TEXT);
+    const nothing = m.full.length + m.lost.length === ops.length;
+    const res = nothing ? { ok: true, doc } : await putDoc(m.doc, fetchFn);
     if (res.ok) {
       drop(ops);
       V.doc = res.doc;
       V.store = applyOps(res.doc, pending).doc.store;
       V.unsaved = pending.length > 0;
       V.note = "";
-      if (m.lost.length) say(lostText(m.lost));
-      return "server";
+      if (notes.length) say(notes.join(". "));
+      return m.full.length ? "full" : "server";
     }
     if (res.status === 409) { doc = res.doc; continue; }
     if (res.status === 400) {
@@ -458,10 +508,11 @@ export function loadViews(fetchFn = globalThis.fetch) {
 }
 
 // Saves the change from the views shown to next. V.store shows next at once.
-// Returns "server", "failed" or "rejected" (see flush).
+// Returns "server", "full", "failed" or "rejected" (see flush).
 export async function persist(next, fetchFn = globalThis.fetch) {
   const ops = opsFor(V.store, next);
-  V.store = next;
+  // A reset mark belongs to this one change; the store shown does not keep it.
+  V.store = { views: next.views, default: next.default };
   V.notice = "";
   if (!ops.length) return V.unsaved ? "failed" : "server";
   pending.push(...ops);

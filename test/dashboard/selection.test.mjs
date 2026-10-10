@@ -388,3 +388,25 @@ test('a saved view can be deleted on a narrow screen, from the options in its he
   const out = view({ params: ['v-mine'] });
   assert.match(out.html, /<button class="vopts" data-vopts[^>]*aria-label="Mine options"/);
 });
+
+test('the availability forecast follows the weekly cycle to the end of a long window', async () => {
+  reset();
+  const { model, available, valueAt } = await import('../../internal/api/dashboard/screens/timeline.js');
+  const now = Date.now();
+  const reset1 = now + DAY;
+  S.data = {
+    accounts: [{ id: 'a', provider: 'claude', email: 'a@x.com' }],
+    // Half left, burning 2% an hour, refilled every week from tomorrow.
+    router: { accounts: { a: { meters: [{ name: '7d', long: true, utilization: 0.5, burn_per_hour: 0.02, reset_at: iso(reset1) }] } } },
+    summary: {},
+  };
+  const m = model(S.data.accounts[0], now, { start: now, end: now + 110 * DAY });
+  // Day 102 is three days after a refill; 100% lasts 50 hours, so none is left.
+  const day102 = now + 102 * DAY;
+  assert.equal(valueAt(m, day102), 0);
+  assert.equal(available(m, day102, now), false);
+  // An hour after the refill on day 99 it is nearly full again.
+  const after = reset1 + 14 * 7 * DAY + HOUR;
+  assert.equal(Math.round(valueAt(m, after)), 98);
+  assert.equal(available(m, after, now), true);
+});
