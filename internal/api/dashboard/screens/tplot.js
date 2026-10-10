@@ -3,6 +3,7 @@
 // up. Interaction lives in timeaxis.js; this file only draws.
 import { esc, fmt, niceMax } from "../core.js";
 import { fracOf, plotWidth } from "./timeaxis.js";
+import { region } from "../paint.js";
 
 const pc = (f) => (f * 100).toFixed(3) + "%";
 const clamp01 = (f) => Math.max(0, Math.min(1, f));
@@ -52,15 +53,18 @@ export function plot(o) {
       return `<span class="${edge} ${it.now ? "now" : ""}" style="left:${pc(it.f)}">${esc(it.text)}</span>`;
     }).join("")}</div>`;
   }
+  // Everything that moves with the window is a region, so a pan or zoom
+  // redraws these and leaves the plot area, which the controller owns.
+  const key = (part) => `${o.group}|${o.panel}|${part}`;
   return `<div class="tp" style="height:${total}px">
-    ${o.y ? `<div class="tp-y">${ylab}</div>` : ""}
-    ${o.marks != null ? `<div class="tp-marks">${o.marks}</div>` : ""}
+    ${o.y ? region(key("y"), ylab, "div", `class="tp-y"`) : ""}
+    ${o.marks != null ? region(key("marks"), o.marks, "div", `class="tp-marks"`) : ""}
     <div class="tp-area" data-tplot="${esc(o.group)}" data-panel="${esc(o.panel)}" style="top:${pad.top}px;height:${o.height}px">
       ${hlines}
-      <div class="tp-content">${vlines}${hatch}${o.content || ""}${nowLine}</div>
-      ${o.over || ""}
+      ${region(key("c"), `${vlines}${hatch}${o.content || ""}${nowLine}`, "div", `class="tp-content"`)}
+      ${region(key("over"), o.over || "", "div", `style="display:contents"`)}
     </div>
-    ${xl}
+    ${o.labels ? region(key("x"), xl, "div", `style="display:contents"`) : ""}
   </div>`;
 }
 

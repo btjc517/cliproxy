@@ -8,6 +8,7 @@ import { accountLabels } from "./burn.js";
 import { buildPanel, panelContext, snapGrid, loadSelection } from "./panels.js";
 import { usageFigures, perfFigures } from "./series.js";
 import { DAY, timeState, bindTime, selectionLabel, backToNow, zoomHint } from "./timeaxis.js";
+import { region } from "../paint.js";
 
 const METRICS = [
   { id: "requests", label: "Requests", panel: "requests" },
@@ -53,9 +54,11 @@ export function timeStrip({ key, sc }) {
   const end = ts.range ? selectionLabel(ts.range, "data-strip-clear") : `${leg}${ts.moved ? backToNow("data-strip-home") : ""}`;
   const provs = accounts().filter((a) => sc.ids.includes(a.id)).map((a) => a.provider);
   const note = metric.id === "cost" ? `<div class="muted cnote">${esc(costNote(provs))}</div>` : "";
+  // The figures and the row's end follow the window: regions, so a pan or
+  // zoom redraws them with the plot and nothing else.
   const html = `<div class="figs tstrip" data-strip="${esc(key)}">
-    <div class="figrow"><div class="figtabs">${figs}</div><div class="figend">${end}${fmtToggle}</div></div>
-    <div class="tstrip-plot">${built.html}</div>${note}
+    ${region(key + "|figs", `<div class="figtabs">${figs}</div><div class="figend">${end}${fmtToggle}</div>`, "div", `class="figrow"`)}
+    <div class="tstrip-plot">${built.html}</div>${region(key + "|note", note, "div", `style="display:contents"`)}
   </div>`;
 
   const mount = (root) => {

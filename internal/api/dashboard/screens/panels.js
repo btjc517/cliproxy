@@ -12,6 +12,7 @@ import { model as availModel, available } from "./timeline.js";
 import { EMPTY, addC, usageData, displayBuckets, usageSum, bucketAt, bucketsIn, perfScope, perfCounts, perfAt, historyBefore, spanData, perfFigures, usageFigures, loadRangeData } from "./series.js";
 import { HOUR, DAY, fracOf, plotWidth, addDays, midnight, timeTicks, endText, spanLabel, dateText, dayText } from "./timeaxis.js";
 import { plot, lines, dot, bars, band, card, legend, yTop } from "./tplot.js";
+import { region } from "../paint.js";
 
 const FORMAT = { key: "format", choices: [["lines", "Lines"], ["bars", "Bars"]], def: "lines" };
 const WINDOW = { key: "window", choices: [["week", "Weekly"], ["5h", "5-hour"]], def: "week" };
@@ -63,10 +64,13 @@ export function panelHtml(type, idx, built, options) {
   const right = built.legend ? legend(built.legend)
     : opts ? `<div class="po" role="group" aria-label="${esc(def.title)} options">${opts}</div>`
     : built.note ? `<span class="pnote">${esc(built.note)}</span>` : "";
+  // The figure and the legend follow the window: regions, so a pan or zoom
+  // redraws them without the rest of the page.
+  const title = `<b>${esc(def.title)}</b>${built.figure ? `<span class="pf">${esc(built.figure)}</span>` : ""}${built.qual ? `<span class="pq">${esc(built.qual)}</span>` : ""}`;
   return `<section class="panel" data-panel-type="${type}" data-idx="${idx}">
     <div class="ph">
-      <div class="pt"><b>${esc(def.title)}</b>${built.figure ? `<span class="pf">${esc(built.figure)}</span>` : ""}${built.qual ? `<span class="pq">${esc(built.qual)}</span>` : ""}</div>
-      ${right}
+      ${region(`ph|${idx}|${type}`, title, "div", `class="pt"`)}
+      ${region(`pr|${idx}|${type}`, right, "div", `style="display:contents"`)}
     </div>
     ${built.html}
   </section>`;
@@ -90,7 +94,9 @@ export function panelContext(ts, sc, { forecast = false, hint = "" } = {}) {
     usage: usageData(),
     perf: perfScope(sc),
     perfCurrent: perfCurrent(),
-    loading: !dataCurrent(),
+    // "Loading" only where nothing loaded draws the window; a window inside
+    // the loaded margin draws from it while newer data is on its way.
+    loading: !S.data || !dataCurrent(),
     forecast,
     hint,
   };
@@ -108,8 +114,10 @@ function perfLabel(ctx) {
   if (S.data?.summary?.performance?.range !== "custom") return FIXED_TEXT[S.dataRange] || "";
   const s = ctx.perf.series;
   if (!ctx.perfCurrent || !s.length) return "";
-  const end = s[s.length - 1].t1;
-  return spanLabel(s[0].t0, Math.min(end, ctx.now), { toNow: end > ctx.now });
+  // A padded reply's summaries cover its figure window, not its whole series.
+  const start = ctx.perf.fig ? ctx.perf.fig.t0 : s[0].t0;
+  const end = ctx.perf.fig ? ctx.perf.fig.t1 : s[s.length - 1].t1;
+  return spanLabel(start, Math.min(end, ctx.now), { toNow: end > ctx.now });
 }
 
 // Loads what a page's selection needs, if it has one. Every page with a
@@ -766,9 +774,12 @@ function activityPanel(ctx) {
   const stat = ([label, x]) => `<div class="act-stat"><span class="muted">${label}</span><b>${x ? fmt(tokens(x)) : "–"}</b>${x ? (cost ? `<span class="muted">${esc(money(apiCost(x)))} at API prices</span>` : "") : sc.some ? `<span class="muted">Not kept per account</span>` : ""}</div>`;
   const firstDay = [...map.entries()].filter(([, x]) => tokens(x) > 0).map(([k]) => k).sort()[0];
   const life = sums[3][1];
+  // The cells, the window's outline and the totals are regions: a pan or a
+  // new reply redraws them and keeps the grid's scroll position.
+  const contents = `style="display:contents"`;
   const html = `<div class="act">
-    <div class="act-grid"><div class="act-scroll" data-act-scroll><div class="act-cells">${grid}${outline}</div><div class="act-months">${months}</div></div></div>
-    <div class="act-stats">${sums.map(stat).join("")}</div>
+    <div class="act-grid"><div class="act-scroll" data-act-scroll><div class="act-cells">${region("act|cells", grid, "div", contents)}${region("act|outline", outline, "div", contents)}</div><div class="act-months">${region("act|months", months, "div", contents)}</div></div></div>
+    ${region("act|stats", sums.map(stat).join(""), "div", `class="act-stats"`)}
   </div>`;
   const dayCard = (d) => {
     const x = d.v || EMPTY();
@@ -782,26 +793,32 @@ function activityPanel(ctx) {
     const scroll = sec.querySelector("[data-act-scroll]");
     const outlineEl = sec.querySelector(".act-outline");
     if (outlineEl) { outlineEl.setAttribute("width", String(cols.length * 22)); outlineEl.setAttribute("height", String(7 * 22)); }
-    // Show the outlined window, else this week.
+    // Show the outlined window, else this week. A redraw that keeps the grid
+    // scrolls it only when the window's first week moved.
     const first = [...inWin].map((k) => Number(k.split(",")[0])).sort((a, b) => a - b)[0];
-    scroll.scrollLeft = first != null && first * 22 < scroll.scrollWidth - scroll.clientWidth ? Math.max(0, first * 22 - scroll.clientWidth / 2) : scroll.scrollWidth;
-    let tip = null, held = false;
-    const clear = () => { tip?.remove(); tip = null; if (held) { S.hold = Math.max(0, S.hold - 1); held = false; } };
+    if (sec._actFirst !== (first ?? -1)) {
+      sec._actFirst = first ?? -1;
+      scroll.scrollLeft = first != null && first * 22 < scroll.scrollWidth - scroll.clientWidth ? Math.max(0, first * 22 - scroll.clientWidth / 2) : scroll.scrollWidth;
+    }
+    // The hover card lives on the section, so a redraw that keeps it, and
+    // binds the cells again, still clears the card and its hold.
+    const st = (sec._act ||= { tip: null, held: false });
+    const clear = () => { st.tip?.remove(); st.tip = null; if (st.held) { S.hold = Math.max(0, S.hold - 1); st.held = false; } };
     sec.querySelectorAll(".act-cells button[data-w]").forEach((b) => {
       const d = cols[Number(b.dataset.w)][Number(b.dataset.d)];
       b.onclick = () => { clear(); setWindow(dayWindow(d.k, Date.now(), ctx.forecast)); };
       b.onmouseenter = () => {
-        if (!held) { S.hold++; held = true; }
-        if (!tip) { tip = document.createElement("div"); tip.className = "tcard"; sec.querySelector(".act-grid").appendChild(tip); }
-        tip.innerHTML = dayCard(d);
+        if (!st.held) { S.hold++; st.held = true; }
+        if (!st.tip) { st.tip = document.createElement("div"); st.tip.className = "tcard"; sec.querySelector(".act-grid").appendChild(st.tip); }
+        st.tip.innerHTML = dayCard(d);
         const gr = sec.querySelector(".act-grid").getBoundingClientRect(), cr = b.getBoundingClientRect();
-        tip.style.left = Math.max(0, Math.min(cr.left - gr.left - 140 + 9, gr.width - 280)) + "px";
-        let y = cr.top - gr.top - tip.offsetHeight - 8;
+        st.tip.style.left = Math.max(0, Math.min(cr.left - gr.left - 140 + 9, gr.width - 280)) + "px";
+        let y = cr.top - gr.top - st.tip.offsetHeight - 8;
         if (y < 0) y = cr.bottom - gr.top + 8;
-        tip.style.top = y + "px";
+        st.tip.style.top = y + "px";
       };
     });
-    sec.querySelector(".act-grid").addEventListener("mouseleave", clear);
+    sec.querySelector(".act-grid").onmouseleave = clear;
   };
   return { html, figure: life ? fmt(tokens(life)) : "–", qual: firstDay ? `since ${Number(firstDay.slice(8))} ${MONTHS[Number(firstDay.slice(5, 7)) - 1]}` : "", note: "Past year, click a day to jump to it", mount, probe: () => null };
 }

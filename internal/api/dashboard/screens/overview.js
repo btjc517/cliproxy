@@ -8,6 +8,7 @@ import { timeStrip, stripTime } from "./strip.js";
 import { accountPicker, bindAccountPicker } from "./account-picker.js";
 import { allowanceSeries, trajectory } from "./burn.js";
 import { timeline } from "./timeline.js";
+import { region } from "../paint.js";
 
 // A warning when the account's weekly allowance runs out before it resets, at this rate.
 function runningOut(acct) {
@@ -77,7 +78,8 @@ function allowanceGroup(provider, keep) {
 // The windows Overview loads: its strip's.
 export function wants() {
   const w = stripTime("ovStrip").window;
-  return { usage: w, perf: w };
+  // The strip's first-token figure is a median for its window.
+  return { usage: w, perf: w, percentiles: true };
 }
 
 export function view() {
@@ -92,18 +94,17 @@ export function view() {
   const today = all.filter((s) => isToday(s.last_seen)).length;
 
   const html = `
-    <div class="bar"><div class="end"><span class="muted nowrap">${esc(readAt("Live, read"))}</span>${accountPicker()}</div></div>
+    <div class="bar"><div class="end">${region("ov|read", esc(readAt("Live, read")), "span", `class="muted nowrap"`)}${accountPicker()}</div></div>
     <div class="body">
-      ${groups ? `<div class="allow">${groups}</div>` : `<div class="empty">No accounts signed in.</div>`}
+      ${region("ov|allow", groups ? `<div class="allow">${groups}</div>` : `<div class="empty">No accounts signed in.</div>`, "div", `style="display:contents"`)}
       ${tl.html}
       ${strip.html}
-      <div class="sec last">
+      ${region("ov|sessions", `
         <div class="sech">
           <div class="t"><b>Active sessions</b><span class="muted">Seen in the last 10 minutes</span></div>
           <a class="linkbtn" href="#/sessions">All ${today} today ${icon("chevronRight", 14)}</a>
         </div>
-        ${sessionTable(active, { empty: "No sessions in the last 10 minutes." })}
-      </div>
+        ${sessionTable(active, { empty: "No sessions in the last 10 minutes." })}`, "div", `class="sec last"`)}
     </div>`;
   return {
     html,

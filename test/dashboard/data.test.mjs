@@ -258,3 +258,22 @@ test('allowance history: a refill starts a new stretch and time used up is left 
   // Missing readings stay gaps.
   assert.deepEqual(historyLine([p(0, 50), null, p(2, 40)]).map((x) => (x ? x.v : null)), [50, null, 40]);
 });
+
+test('a padded reply is exact for its figure window only, and sums the window from its wider series', async () => {
+  const { coversExactly } = await import('../../internal/api/dashboard/screens/series.js');
+  // A day's window, padded half a day each side, in hourly buckets.
+  const from = now - 36 * HOUR, to = now - 12 * HOUR;
+  const series = Array.from({ length: 48 }, (_, i) => ({ start: iso(now - (48 - i) * HOUR), requests: 2, failed: i % 2 }));
+  const src = { range: 'custom', bucket_seconds: 3600, figure_start: iso(from), figure_end: iso(to), scopes: { all: { requests: 48, failed: 12, ttft_ms: { p50: 700 }, series } } };
+  const ps = perfScope({ some: false, prov: 'all', ids: [] }, src);
+  assert.deepEqual(ps.fig, { t0: from, t1: to });
+  assert.equal(ps.series.length, 48);
+  // The window the figures were read for is exact; the padded edges are not.
+  assert.equal(coversExactly(ps, from, to, now), true);
+  assert.equal(coversExactly(ps, now - 48 * HOUR, now, now), false);
+  assert.equal(coversExactly(ps, from - HOUR, to - HOUR, now), false);
+  // A window panned inside the margin counts its own buckets, with no percentiles.
+  const f = perfFigures({ from: from - 6 * HOUR, to: to - 6 * HOUR, perfSrc: src, merged: '', current: false, exact: false, sel: false }, { some: false, prov: 'all', ids: [] });
+  assert.equal(f.requests, 48);
+  assert.equal(f.q, null);
+});

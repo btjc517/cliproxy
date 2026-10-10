@@ -155,10 +155,14 @@ export function perfScope(sc, src = S.data?.summary?.performance, merged = S.dat
     const ends = bucketEnds(list.map((b) => Date.parse(b.start)), step);
     return list.map((b, i) => ({ ...b, t0: Date.parse(b.start), t1: ends[i] }));
   };
+  // A padded reply's series reach past the window; its summaries cover the
+  // window's buckets only, from figure_start to figure_end.
+  const f0 = Date.parse(src.figure_start || ""), f1 = Date.parse(src.figure_end || "");
+  const fig = Number.isFinite(f0) && Number.isFinite(f1) ? { t0: f0, t1: f1 } : null;
   let q;
   if (!sc.some) q = src.scopes[sc.prov];
   else if (merged && merged === scopeParam(sc.ids) && src.scopes.selection) q = src.scopes.selection;
-  if (q) return { q, series: withTimes(q.series), step, custom: src.range === "custom", range: src.range };
+  if (q) return { q, series: withTimes(q.series), step, custom: src.range === "custom", range: src.range, fig };
   const list = sc.ids.map((id) => src.scopes[id]).filter(Boolean);
   if (!list.length) return null;
   const len = Math.max(0, ...list.map((p) => (p.series || []).length));
@@ -172,7 +176,7 @@ export function perfScope(sc, src = S.data?.summary?.performance, merged = S.dat
   const out = { requests: 0, failed: 0, partial: true };
   for (const p of list) { out.requests += Number(p.requests) || 0; out.failed += Number(p.failed) || 0; }
   if (list.some((p) => "failovers" in p)) out.failovers = list.reduce((t, p) => t + (Number(p.failovers) || 0), 0);
-  return { q: out, series: withTimes(series), step, custom: src.range === "custom", range: src.range };
+  return { q: out, series: withTimes(series), step, custom: src.range === "custom", range: src.range, fig };
 }
 
 // Counts over [from, to) from performance buckets.
@@ -229,7 +233,7 @@ export async function loadRangeData(range, scope, fetchFn = globalThis.fetch, no
     const data = await res.json();
     if (RD.req !== my) return;
     Object.assign(RD, { key, summary: data?.summary || null, scope, at: now, loading: "" });
-    globalThis.window?.dispatchEvent(new Event("dash:render"));
+    globalThis.window?.dispatchEvent(new Event("dash:patch"));
   } catch (e) {
     if (RD.req === my) RD.loading = "";
   }
@@ -249,11 +253,14 @@ function lineUp(starts, ends, from, to, now) {
 // now: its first bucket starts at from, and its last ends at to, or holds
 // now when to is later. The proxy widens a window to whole buckets, so a
 // reply's totals and percentiles describe the stretch only when its own
-// bucket edges say so, whatever window was asked for.
+// bucket edges say so, whatever window was asked for. A padded reply gives
+// the edges of the buckets its summaries cover (fig); its series run wider.
 export function coversExactly(ps, from, to, now) {
   const s = ps?.series || [];
   if (!s.length) return false;
-  const first = s[0], last = s[s.length - 1];
+  const inFig = ps.fig ? s.filter((b) => b.t0 >= ps.fig.t0 - 60e3 && b.t1 <= ps.fig.t1 + 60e3) : s;
+  if (!inFig.length) return false;
+  const first = inFig[0], last = inFig[inFig.length - 1];
   if (Math.abs(first.t0 - from) >= 60e3) return false;
   if (to > now) return last.t0 <= now && now < last.t1;
   return Math.abs(last.t1 - to) < 60e3;

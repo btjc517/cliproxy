@@ -407,6 +407,11 @@ type Performance struct {
 	Ranges []string        `json:"ranges"`
 	Since  *time.Time      `json:"since,omitempty"`
 	Scopes map[string]Perf `json:"scopes"`
+	// FigureStart and FigureEnd are the edges of the buckets the totals,
+	// percentiles and histograms cover, set only when the series was padded
+	// past them (PerformanceBetweenPadded).
+	FigureStart *time.Time `json:"figure_start,omitempty"`
+	FigureEnd   *time.Time `json:"figure_end,omitempty"`
 }
 
 // Perf is request timing for one scope: everything, one provider or one

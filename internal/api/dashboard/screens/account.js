@@ -8,6 +8,7 @@ import { allowanceSeries, trajectory, outlook, rateText } from "./burn.js";
 import { timeStrip, stripTime } from "./strip.js";
 import { buildPanel, panelContext, snapGrid } from "./panels.js";
 import { DAY, timeState, bindTime, selectionLabel, backToNow, windowText } from "./timeaxis.js";
+import { region } from "../paint.js";
 
 // One account as an account scope. Its performance scope is keyed by its id,
 // so prov names the account and its percentiles stay exact.
@@ -18,7 +19,8 @@ const allowanceTime = (id) => timeState("acAllowance:" + id, { defaultWindow: (n
 // The windows an Account page loads: its strip's.
 export function wants(params) {
   const w = stripTime("acStrip:" + params[0]).window;
-  return { usage: w, perf: w };
+  // The strip's first-token figure is a median for its window.
+  return { usage: w, perf: w, percentiles: true };
 }
 
 // "12% a day · Lasts to reset", or the warning when it runs out first.
@@ -89,19 +91,18 @@ export function view(ctx) {
     </div>
     <div class="body">
       ${stateLine}
-      <div class="limits">${limitBlock("Week", lim.week, st, trajectory(allowanceSeries(a.id, true)))}${limitBlock("5 hours", lim.short, st, trajectory(allowanceSeries(a.id, false)))}${planBlock(a)}</div>
+      ${region("ac|limits", `${limitBlock("Week", lim.week, st, trajectory(allowanceSeries(a.id, true)))}${limitBlock("5 hours", lim.short, st, trajectory(allowanceSeries(a.id, false)))}${planBlock(a)}`, "div", `class="limits"`)}
       <div class="activity">
-        <div class="head"><div class="t"><b>Allowance left</b>${aend}</div>${seg([{ id: "week", label: "Week" }, { id: "5h", label: "5 hours" }], long ? "week" : "5h", "data-ac-window", "bare")}</div>
+        <div class="head"><div class="t"><b>Allowance left</b>${region("ac|end", aend, "div", `style="display:contents"`)}</div>${seg([{ id: "week", label: "Week" }, { id: "5h", label: "5 hours" }], long ? "week" : "5h", "data-ac-window", "bare")}</div>
         ${allowance.html}
       </div>
       ${strip.html}
-      <div class="sec last">
+      ${region("ac|sessions", `
         <div class="sech">
           <div class="t"><b>Active sessions</b><span class="muted">Seen in the last 10 minutes</span></div>
           <a class="linkbtn" href="#/sessions">All sessions ${icon("chevronRight", 14)}</a>
         </div>
-        ${sessionTable(active, { withAccount: false, empty: "No sessions on this account in the last 10 minutes." })}
-      </div>
+        ${sessionTable(active, { withAccount: false, empty: "No sessions on this account in the last 10 minutes." })}`, "div", `class="sec last"`)}
     </div>`;
   return {
     html,

@@ -455,6 +455,10 @@ type UsageRange struct {
 	Ends          []time.Time           `json:"ends,omitempty"`
 	Accounts      map[string][]Counters `json:"accounts"`
 	Ranges        []string              `json:"ranges"`
+	// ViewStart and ViewEnd are the window the bucket length was chosen for,
+	// set only when the buckets were padded around it (UsageBetweenPadded).
+	ViewStart *time.Time `json:"view_start,omitempty"`
+	ViewEnd   *time.Time `json:"view_end,omitempty"`
 }
 
 // History is the long view: one entry per day with usage, oldest first, from
