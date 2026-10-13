@@ -105,8 +105,8 @@ function drawer() {
   let body;
   if (st?.phase === "waiting") {
     const privacy = st.prov === "codex" ? "https://chatgpt.com/#settings/DataControls" : "https://claude.ai/settings/data-privacy-controls";
-    body = `<div class="note"><b>Finish signing in in the new tab.</b><span>Sign in as the account you want to add and click Authorize. This page updates by itself when the account is saved.</span><span>Then switch off model training on its <a class="strong" href="${privacy}" target="_blank" rel="noopener">privacy page</a>.</span></div>
-      <div><label class="k">If the page after Authorize does not load, copy its address and paste it here</label>
+    body = `<div class="note"><b>Finish signing in in the new tab.</b><span>Sign in as the account you want to add and click Authorize. On a Mac with the sign-in helper, the tab comes back to the dashboard by itself, and this page updates when the account is saved.</span><span>Then switch off model training on its <a class="strong" href="${privacy}" target="_blank" rel="noopener">privacy page</a>.</span></div>
+      <div><label class="k">If the tab shows an error page after Authorize instead, copy its address and paste it here</label>
       <div class="row gap8"><input class="input grow" data-paste value="${esc(S.ui.addPaste || "")}" placeholder="http://localhost:.../callback?code=..."><button class="btn outline" data-submit>Send</button></div></div>`;
   } else if (st?.phase === "error") {
     body = `<div class="note"><b class="warn">${esc(st.title || "Sign-in did not finish.")}</b><span>${esc(st.msg)}</span></div>`;
