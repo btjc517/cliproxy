@@ -18,9 +18,11 @@ import (
 var claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
 
 const (
-	// meterProbeInterval is how often idle accounts are checked. Accounts that
-	// carry traffic read their meters from responses and are skipped.
-	meterProbeInterval = 10 * time.Minute
+	// meterProbeInterval is how often accounts are checked, so a newly added
+	// account shows its allowance within a minute. Only accounts without a
+	// reading newer than meterProbeMaxAge are probed: those that carry traffic
+	// read their meters from responses, and idle ones every 20 minutes.
+	meterProbeInterval = time.Minute
 	meterProbeFirstRun = time.Minute
 	meterProbeMaxAge   = 20 * time.Minute
 )
