@@ -821,7 +821,8 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 /* Crosshair, hover card and range, drawn by timeaxis.js on every plot */
 .tx-line { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -0.5px; background: var(--fg); pointer-events: none; z-index: 3; }
 .tx-dot { position: absolute; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 999px; box-shadow: 0 0 0 2px var(--panel); pointer-events: none; z-index: 4; }
-.tx-chip { position: absolute; height: 20px; padding: 0 6px; border-radius: 6px; background: var(--fg); color: var(--panel); font-size: 12px; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none; z-index: 5; }
+.tx-chip { position: absolute; height: 20px; padding: 0 6px; border-radius: 6px; background: var(--fg); color: var(--panel); font-size: 12px; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap; display: flex; align-items: center; gap: 5px; pointer-events: none; z-index: 5; }
+.tx-chip > i { width: 6px; height: 6px; border-radius: 2px; flex-shrink: 0; }
 .tcard { position: absolute; z-index: 20; width: 280px; padding: 12px; border-radius: 10px; background: var(--popover); box-shadow: var(--hairline) 0 0 0 1px inset, #00000014 0 8px 16px -4px; display: flex; flex-direction: column; gap: 6px; pointer-events: none; font-size: 12px; font-variant-numeric: tabular-nums; cursor: default; }
 .tcard .h { font-size: 13px; font-weight: 500; }
 .tcard .w { color: var(--error-text); }

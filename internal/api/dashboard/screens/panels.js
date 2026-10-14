@@ -427,8 +427,9 @@ function resetMarks(lines, v, now) {
   }).join("");
 }
 
-// The projection drawn: no vertical steps at resets and nothing along zero,
-// full strength until the account's second reset, faded after it.
+// The projection drawn: a dashed vertical step back up to 100% at each
+// reset, nothing along zero, full strength until the account's second reset
+// (that reset's step included), faded after it.
 export function projectionParts(l, now, end) {
   const pts = projectionPoints(l.tr, now, end, l.period, (t) => t);
   const second = resetsUntil(l.tr, now, end, l.period)[1] ?? Infinity;
@@ -438,8 +439,14 @@ export function projectionParts(l, now, end) {
     if (p.marker || (prev && p.x === prev.x && p.v === 100)) resets.push(p.x);
     const flat = prev && prev.v === 0 && p.v === 0;
     const step = prev && p.x === prev.x;
-    const target = p.x > second || (prev && prev.x >= second) ? faded : strong;
-    if (!prev || flat || step || p.move) target.push(null);
+    const target = step ? (p.x > second ? faded : strong) : p.x > second || (prev && prev.x >= second) ? faded : strong;
+    if (!prev || flat || p.move) target.push(null);
+    else if (step) {
+      // The step starts where the line stopped, even when the stretch
+      // before it ran along zero and was left out.
+      const last = target[target.length - 1];
+      if (!last || last.t !== prev.x || last.v !== prev.v) target.push(null, { t: prev.x, v: prev.v });
+    }
     if (prev && target === faded && strong.length && strong[strong.length - 1] && prev.x <= second && p.x > second && !flat && !step && !p.move) {
       // Split the stretch that crosses the second reset so both halves meet there.
       const vAt = prev.v + ((p.v - prev.v) * (second - prev.x)) / (p.x - prev.x);
@@ -530,9 +537,9 @@ function allowancePanel(ctx, o) {
     if (!vals.length) return null;
     const dead = zones.find((z) => t >= z.t0 && (t < z.t1 || (z.open && t <= z.t1)));
     const warn = dead ? `No ${providerTitle(dead.provider)} allowance left${dead.open ? "" : " until " + resetName(dead.t1, now)}` : "";
-    const top = Math.max(...vals.map((x) => x.val));
     return {
-      chip: Math.round(top) + "%",
+      // One chip per account with allowance left, beside its own line.
+      chips: vals.filter((x) => x.val > 0).map((x) => ({ text: x.val < 1 ? "<1%" : Math.round(x.val) + "%", y: x.val / 100, color: x.l.color })),
       dots: vals.map((x) => ({ y: x.val / 100, color: x.l.color })),
       card: hovered ? card({ title: instant(t, now), warn, rows: vals.map((x) => ({ k: x.l.label, v: Math.round(x.val) + "% left", color: x.l.color })) }) : "",
       cardTop: 32,

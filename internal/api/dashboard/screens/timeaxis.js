@@ -345,7 +345,9 @@ const hintDone = () => { if (!prefs().zoomHintDone) setPref("zoomHintDone", true
 //   defaultWindow () => window for Home and Back to now
 //   setWindow     (window) => void, stores it and redraws
 //   setRange      (range or null) => void, stores it and redraws
-//   probe         (t, plotEl) => {chip, dots: [{y, color}], card, chipTop} or null, per plot
+//   probe         (t, plotEl) => {chip, dots: [{y, color}], card, chipTop} or null, per plot;
+//                 chips: [{text, y, color}] in place of chip puts one chip
+//                 beside each line, at its height
 // }
 // Focus taken by a click shows no ring, even after a redraw restores it;
 // the first key pressed brings the ring back.
@@ -355,6 +357,82 @@ if (typeof document !== "undefined") {
     pointerFocus = false;
     document.querySelectorAll(".ptr").forEach((el) => el.classList.remove("ptr"));
   }, true);
+}
+
+// Where hover chips and the hover card go beside a crosshair at x in a plot
+// w wide and h tall. items: [{y, w}], y the line's height from 0 to 1, or
+// null for a chip on the plot's usual chip row. Chips at line heights stack
+// in columns of as many as fit the height. Every way of placing them (all
+// left of the crosshair, all right, or split across both when neither side
+// holds them) is tried with every card position, and the layout kept is the
+// first that keeps everything inside the plot with the card over no chip;
+// failing that, the one with the fewest such faults. cardW is the card's
+// width, or 0 without one. Returns each chip's {left, top} (top null for the
+// chip row) and the card's left.
+export function placeChips(items, { x, w, h, cardW = 0 }) {
+  const GAP = 22, CH = 20;
+  const lined = items.map((it, i) => ({ ...it, i })).filter((it) => it.y != null).sort((m, n) => n.y - m.y);
+  const per = Math.max(1, Math.floor((h - CH) / GAP) + 1);
+  const cols = [];
+  for (let k = 0; k < lined.length; k += per) cols.push(lined.slice(k, k + per));
+  const tops = cols.map((col) => {
+    const t = col.map((it) => (1 - it.y) * h - CH / 2);
+    for (let i = 0; i < t.length; i++) t[i] = Math.max(t[i], i ? t[i - 1] + GAP : 0);
+    for (let i = t.length - 1; i >= 0; i--) t[i] = Math.min(t[i], i < t.length - 1 ? t[i + 1] - GAP : h - CH);
+    return t.map((v) => Math.max(0, v));
+  });
+  const colW = cols.map((col) => Math.max(...col.map((it) => it.w)));
+  const rowW = Math.max(0, ...items.filter((it) => it.y == null).map((it) => it.w));
+  // sides[k]: which side column k goes on; the chip row goes with column 0.
+  const layout = (sides, rowLeft) => {
+    const at = items.map(() => null);
+    const edge = { l: x - 8, r: x + 8 };
+    cols.forEach((col, k) => {
+      const l = sides[k] === "l";
+      col.forEach((it, i) => { at[it.i] = { left: l ? edge.l - it.w : edge.r, top: tops[k][i] }; });
+      if (l) edge.l -= colW[k] + 4; else edge.r += colW[k] + 4;
+    });
+    items.forEach((it, i) => { if (it.y == null) at[i] = { left: rowLeft ? x - 8 - it.w : x + 8, top: null }; });
+    return at;
+  };
+  const side = (s) => cols.map(() => s);
+  // With a card, chips first try the left so the card can take the right.
+  const plans = cardW ? [[side("l"), true], [side("r"), false]] : [[side("r"), false], [side("l"), true]];
+  // More than one column: every way of putting each column on either side,
+  // up to 8 columns (256 ways); past that, nearest columns each to the side
+  // with more room left.
+  if (cols.length > 1 && cols.length <= 8) {
+    for (let mask = 1; mask < (1 << cols.length) - 1; mask++) {
+      const sides = cols.map((_, k) => (mask >> k) & 1 ? "l" : "r");
+      plans.push([sides, true], [sides, false]);
+    }
+  } else if (cols.length > 8) {
+    const out = [];
+    let l = x - 8, r = w - x - 8;
+    colW.forEach((cw) => { if (l >= r) { out.push("l"); l -= cw + 4; } else { out.push("r"); r -= cw + 4; } });
+    plans.push([out, x - 8 - rowW >= 0]);
+  }
+  const boxes = (at) => at.map((p, i) => ({ a: p.left, b: p.left + items[i].w, t: p.top ?? h - 22 }));
+  const cardAt = (bx) => {
+    if (!cardW) return [null];
+    const outR = Math.max(x + 12, ...bx.filter((q) => q.a >= x).map((q) => q.b + 6));
+    const outL = Math.min(x - 12, ...bx.filter((q) => q.b <= x).map((q) => q.a - 6));
+    return [x + 12, outR, x - 12 - cardW, outL - cardW, w - cardW, 0];
+  };
+  let best = null;
+  plans.forEach(([sides, rowLeft], pi) => {
+    const at = layout(sides, rowLeft), bx = boxes(at);
+    cardAt(bx).forEach((c, ci) => {
+      let faults = bx.filter((q) => q.a < 0 || q.b > w).length;
+      if (c != null) {
+        if (c < 0 || c + cardW > w) faults += 1;
+        faults += bx.filter((q) => q.a < c + cardW && c < q.b).length;
+      }
+      const score = faults * 1000 + ci * 10 + pi;
+      if (!best || score < best.score) best = { score, at, card: c };
+    });
+  });
+  return { at: best.at, card: best.card };
 }
 
 // Plots are any elements with data-tplot; their width is the time axis.
@@ -441,26 +519,38 @@ export function bindTime(root, group) {
         dot.style.cssText = `left:${(f * 100).toFixed(3)}%;top:${((1 - d.y) * 100).toFixed(2)}%;background:${d.color}`;
       }
       const w = p.clientWidth, x = f * w;
-      if (info.chip != null && info.chip !== "") {
+      const withCard = p === over && !!info.card;
+      const chips = info.chips || (info.chip != null && info.chip !== "" ? [{ text: info.chip }] : []);
+      const els = chips.map((c) => {
         const chip = add(document.createElement("div"));
         chip.className = "tx-chip";
-        chip.textContent = info.chip;
-        chip.style.top = info.chipTop != null ? info.chipTop + "px" : `calc(100% - 22px)`;
-        const cw = chip.offsetWidth;
-        chip.style.left = (x + 8 + cw > w ? x - 8 - cw : x + 8) + "px";
-        // A label the chip lands on hides until the crosshair moves on.
+        if (c.color) chip.innerHTML = `<i style="background:${c.color}"></i>${esc(c.text)}`;
+        else chip.textContent = c.text;
+        return { c, chip, cw: chip.offsetWidth };
+      });
+      // The card goes in before the chips are placed, so its width is known.
+      let card = null;
+      if (withCard) {
+        card = add(document.createElement("div"));
+        card.className = "tcard";
+        card.innerHTML = info.card;
+      }
+      const lay = placeChips(els.map((e) => ({ y: e.c.y, w: e.cw })), { x, w, h: p.clientHeight, cardW: card ? card.offsetWidth : 0 });
+      els.forEach((e, i) => {
+        e.chip.style.left = lay.at[i].left + "px";
+        e.chip.style.top = lay.at[i].top != null ? lay.at[i].top + "px" : info.chipTop != null ? info.chipTop + "px" : "calc(100% - 22px)";
+      });
+      // A label a chip lands on hides until the crosshair moves on.
+      for (const { chip } of els) {
         const cr = chip.getBoundingClientRect();
         for (const el of p.querySelectorAll("[data-chip-avoid]")) {
           const r = el.getBoundingClientRect();
           if (r.right > cr.left && r.left < cr.right && r.bottom > cr.top && r.top < cr.bottom) { el.classList.add("under-chip"); hidden.push(el); }
         }
       }
-      if (p === over && info.card) {
-        const card = add(document.createElement("div"));
-        card.className = "tcard";
-        card.innerHTML = info.card;
-        const cw = card.offsetWidth, ch = card.offsetHeight;
-        card.style.left = (x + 12 + cw > w ? Math.max(0, x - 12 - cw) : x + 12) + "px";
+      if (card) {
+        const ch = card.offsetHeight;
+        card.style.left = lay.card + "px";
         // Kept inside the group's root, so a clipping scroll box never cuts it.
         const pr = p.getBoundingClientRect(), rr = root.getBoundingClientRect();
         let top = info.cardTop ?? 12;
