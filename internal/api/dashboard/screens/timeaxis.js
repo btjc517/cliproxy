@@ -359,35 +359,74 @@ if (typeof document !== "undefined") {
   }, true);
 }
 
-// Where hover chips go beside a crosshair at x in a plot w wide and h tall.
-// items: [{y, w}], y the line's height from 0 to 1, or null for a chip at
-// the plot's usual chip row. Chips at line heights stack in columns of as
-// many as fit the height, each column further from the crosshair. They take
-// the side the card leaves free: left when a card fits right. Returns each
-// chip's {left, top} (top null for the chip row), the side, and the chips'
-// outer edge, beyond which a card can sit.
-export const CARD_W = 280;
-export function placeChips(items, { x, w, h, card = false }) {
+// Where hover chips and the hover card go beside a crosshair at x in a plot
+// w wide and h tall. items: [{y, w}], y the line's height from 0 to 1, or
+// null for a chip on the plot's usual chip row. Chips at line heights stack
+// in columns of as many as fit the height. Every way of placing them (all
+// left of the crosshair, all right, or split across both when neither side
+// holds them) is tried with every card position, and the layout kept is the
+// first that keeps everything inside the plot with the card over no chip;
+// failing that, the one with the fewest such faults. cardW is the card's
+// width, or 0 without one. Returns each chip's {left, top} (top null for the
+// chip row) and the card's left.
+export function placeChips(items, { x, w, h, cardW = 0 }) {
   const GAP = 22, CH = 20;
   const lined = items.map((it, i) => ({ ...it, i })).filter((it) => it.y != null).sort((m, n) => n.y - m.y);
   const per = Math.max(1, Math.floor((h - CH) / GAP) + 1);
   const cols = [];
   for (let k = 0; k < lined.length; k += per) cols.push(lined.slice(k, k + per));
-  const colW = cols.map((col) => Math.max(...col.map((it) => it.w)));
-  const span = colW.reduce((a, b) => a + b, 0) + 4 * Math.max(0, cols.length - 1);
-  const need = Math.max(span, ...items.filter((it) => it.y == null).map((it) => it.w), 0);
-  const fitsL = x - 8 - need >= 0, fitsR = x + 8 + need <= w;
-  const left = card ? (x + 12 + CARD_W <= w ? fitsL : !fitsR) : !fitsR;
-  const at = items.map((it) => ({ left: left ? x - 8 - it.w : x + 8, top: null }));
-  let edge = left ? x - 8 : x + 8;
-  cols.forEach((col, k) => {
-    const tops = col.map((it) => (1 - it.y) * h - CH / 2);
-    for (let i = 0; i < tops.length; i++) tops[i] = Math.max(tops[i], i ? tops[i - 1] + GAP : 0);
-    for (let i = tops.length - 1; i >= 0; i--) tops[i] = Math.min(tops[i], i < tops.length - 1 ? tops[i + 1] - GAP : h - CH);
-    col.forEach((it, i) => { at[it.i] = { left: left ? edge - it.w : edge, top: Math.max(0, tops[i]) }; });
-    edge += (left ? -1 : 1) * (colW[k] + 4);
+  const tops = cols.map((col) => {
+    const t = col.map((it) => (1 - it.y) * h - CH / 2);
+    for (let i = 0; i < t.length; i++) t[i] = Math.max(t[i], i ? t[i - 1] + GAP : 0);
+    for (let i = t.length - 1; i >= 0; i--) t[i] = Math.min(t[i], i < t.length - 1 ? t[i + 1] - GAP : h - CH);
+    return t.map((v) => Math.max(0, v));
   });
-  return { at, left, out: left ? x - 8 - need : x + 8 + need };
+  const colW = cols.map((col) => Math.max(...col.map((it) => it.w)));
+  const rowW = Math.max(0, ...items.filter((it) => it.y == null).map((it) => it.w));
+  // sides[k]: which side column k goes on; the chip row goes with column 0.
+  const layout = (sides, rowLeft) => {
+    const at = items.map(() => null);
+    const edge = { l: x - 8, r: x + 8 };
+    cols.forEach((col, k) => {
+      const l = sides[k] === "l";
+      col.forEach((it, i) => { at[it.i] = { left: l ? edge.l - it.w : edge.r, top: tops[k][i] }; });
+      if (l) edge.l -= colW[k] + 4; else edge.r += colW[k] + 4;
+    });
+    items.forEach((it, i) => { if (it.y == null) at[i] = { left: rowLeft ? x - 8 - it.w : x + 8, top: null }; });
+    return at;
+  };
+  const side = (s) => cols.map(() => s);
+  const split = () => {
+    // Nearest columns first, each to the side with more room left.
+    const out = [];
+    let l = x - 8, r = w - x - 8;
+    colW.forEach((cw) => { if (l >= r) { out.push("l"); l -= cw + 4; } else { out.push("r"); r -= cw + 4; } });
+    return out;
+  };
+  // With a card, chips first try the left so the card can take the right.
+  const plans = cardW ? [[side("l"), true], [side("r"), false]] : [[side("r"), false], [side("l"), true]];
+  if (cols.length > 1) plans.push([split(), x - 8 - rowW >= 0]);
+  const boxes = (at) => at.map((p, i) => ({ a: p.left, b: p.left + items[i].w, t: p.top ?? h - 22 }));
+  const cardAt = (bx) => {
+    if (!cardW) return [null];
+    const outR = Math.max(x + 12, ...bx.filter((q) => q.a >= x).map((q) => q.b + 6));
+    const outL = Math.min(x - 12, ...bx.filter((q) => q.b <= x).map((q) => q.a - 6));
+    return [x + 12, outR, x - 12 - cardW, outL - cardW, w - cardW, 0];
+  };
+  let best = null;
+  plans.forEach(([sides, rowLeft], pi) => {
+    const at = layout(sides, rowLeft), bx = boxes(at);
+    cardAt(bx).forEach((c, ci) => {
+      let faults = bx.filter((q) => q.a < 0 || q.b > w).length;
+      if (c != null) {
+        if (c < 0 || c + cardW > w) faults += 1;
+        faults += bx.filter((q) => q.a < c + cardW && c < q.b).length;
+      }
+      const score = faults * 1000 + ci * 10 + pi;
+      if (!best || score < best.score) best = { score, at, card: c };
+    });
+  });
+  return { at: best.at, card: best.card };
 }
 
 // Plots are any elements with data-tplot; their width is the time axis.
@@ -483,12 +522,18 @@ export function bindTime(root, group) {
         else chip.textContent = c.text;
         return { c, chip, cw: chip.offsetWidth };
       });
-      const lay = placeChips(els.map((e) => ({ y: e.c.y, w: e.cw })), { x, w, h: p.clientHeight, card: withCard });
+      // The card goes in before the chips are placed, so its width is known.
+      let card = null;
+      if (withCard) {
+        card = add(document.createElement("div"));
+        card.className = "tcard";
+        card.innerHTML = info.card;
+      }
+      const lay = placeChips(els.map((e) => ({ y: e.c.y, w: e.cw })), { x, w, h: p.clientHeight, cardW: card ? card.offsetWidth : 0 });
       els.forEach((e, i) => {
         e.chip.style.left = lay.at[i].left + "px";
         e.chip.style.top = lay.at[i].top != null ? lay.at[i].top + "px" : info.chipTop != null ? info.chipTop + "px" : "calc(100% - 22px)";
       });
-      const left = lay.left, chipsOut = els.length ? lay.out : null;
       // A label a chip lands on hides until the crosshair moves on.
       for (const { chip } of els) {
         const cr = chip.getBoundingClientRect();
@@ -497,16 +542,9 @@ export function bindTime(root, group) {
           if (r.right > cr.left && r.left < cr.right && r.bottom > cr.top && r.top < cr.bottom) { el.classList.add("under-chip"); hidden.push(el); }
         }
       }
-      if (withCard) {
-        const card = add(document.createElement("div"));
-        card.className = "tcard";
-        card.innerHTML = info.card;
-        const cw = card.offsetWidth, ch = card.offsetHeight;
-        // Right of the crosshair, or of chips there; else left of them; a
-        // plot too narrow for both keeps the card inside it.
-        const rightStart = chipsOut != null && !left ? chipsOut + 6 : x + 12;
-        const leftEnd = chipsOut != null && left ? chipsOut - 6 : x - 12;
-        card.style.left = (rightStart + cw <= w ? rightStart : leftEnd - cw >= 0 ? leftEnd - cw : Math.max(0, w - cw)) + "px";
+      if (card) {
+        const ch = card.offsetHeight;
+        card.style.left = lay.card + "px";
         // Kept inside the group's root, so a clipping scroll box never cuts it.
         const pr = p.getBoundingClientRect(), rr = root.getBoundingClientRect();
         let top = info.cardTop ?? 12;
