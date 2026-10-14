@@ -194,23 +194,41 @@ test('a past selection loads again after five minutes, as usage can be recorded 
   RD.key = ''; RD.summary = null;
 });
 
-test('allowance projections: no steps at resets, nothing along zero, faded after the second reset', () => {
+test('allowance projections: a vertical step at each reset, nothing along zero, faded after the second reset', () => {
   const week = 7 * DAY;
   const tr = { leftNow: 50, rate: 1, reset: now + 20 * HOUR, long: true };
   const l = { tr, period: week };
   const p = projectionParts(l, now, now + 3 * week);
   const all = [...p.strong, ...p.faded].filter(Boolean);
+  const second = tr.reset + week;
+  // The reset is drawn: the line goes straight up from where it ran down to
+  // 100%, in one stretch, at both the first and the second reset.
+  const stepAt = (pts, t) => pts.some((a, i) => a && pts[i + 1] && a.t === t && pts[i + 1].t === t && a.v < 100 && pts[i + 1].v === 100);
+  assert.ok(stepAt(p.strong, tr.reset), 'a step at the first reset');
+  assert.ok(stepAt(p.strong, second), 'a step at the second reset, at full strength');
   for (let i = 1; i < p.strong.length; i++) {
     const a = p.strong[i - 1], c = p.strong[i];
-    if (a && c) assert.notEqual(a.t, c.t, 'no vertical segment');
     if (a && c) assert.ok(!(a.v === 0 && c.v === 0), 'no line along zero');
   }
-  const second = tr.reset + week;
   assert.ok(p.strong.filter(Boolean).every((x) => x.t <= second));
   assert.ok(p.faded.filter(Boolean).every((x) => x.t >= second));
   assert.ok(p.faded.some(Boolean));
   assert.deepEqual(p.resets.slice(0, 2), [tr.reset, second]);
   assert.ok(all.every((x) => x.v >= 0 && x.v <= 100));
+});
+
+test('allowance projections: an account that runs out before its reset steps up from zero', () => {
+  const week = 7 * DAY;
+  // 10% left at 2% an hour: none left after five hours, reset in a day.
+  const tr = { leftNow: 10, rate: 2, reset: now + DAY, long: true };
+  const p = projectionParts({ tr, period: week }, now, now + 2 * DAY);
+  const i = p.strong.findIndex((a, k) => a && p.strong[k + 1] && a.t === tr.reset && p.strong[k + 1].t === tr.reset);
+  assert.ok(i >= 0, 'a step at the reset');
+  assert.deepEqual([p.strong[i].v, p.strong[i + 1].v], [0, 100]);
+  for (let k = 1; k < p.strong.length; k++) {
+    const a = p.strong[k - 1], c = p.strong[k];
+    if (a && c) assert.ok(!(a.v === 0 && c.v === 0), 'no line along zero');
+  }
 });
 
 test('the activity outline traces the edge of the window\'s days', () => {

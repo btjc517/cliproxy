@@ -345,7 +345,9 @@ const hintDone = () => { if (!prefs().zoomHintDone) setPref("zoomHintDone", true
 //   defaultWindow () => window for Home and Back to now
 //   setWindow     (window) => void, stores it and redraws
 //   setRange      (range or null) => void, stores it and redraws
-//   probe         (t, plotEl) => {chip, dots: [{y, color}], card, chipTop} or null, per plot
+//   probe         (t, plotEl) => {chip, dots: [{y, color}], card, chipTop} or null, per plot;
+//                 chips: [{text, y, color}] in place of chip puts one chip
+//                 beside each line, at its height
 // }
 // Focus taken by a click shows no ring, even after a redraw restores it;
 // the first key pressed brings the ring back.
@@ -441,14 +443,33 @@ export function bindTime(root, group) {
         dot.style.cssText = `left:${(f * 100).toFixed(3)}%;top:${((1 - d.y) * 100).toFixed(2)}%;background:${d.color}`;
       }
       const w = p.clientWidth, x = f * w;
-      if (info.chip != null && info.chip !== "") {
+      // The card goes right of the crosshair when it fits; chips beside lines
+      // go on the other side, so the card never covers them.
+      const cardLeft = p === over && info.card ? x + 12 + 280 > w : false;
+      const chips = info.chips || (info.chip != null && info.chip !== "" ? [{ text: info.chip }] : []);
+      const placed = [], shown = [];
+      for (const c of chips) {
         const chip = add(document.createElement("div"));
         chip.className = "tx-chip";
-        chip.textContent = info.chip;
-        chip.style.top = info.chipTop != null ? info.chipTop + "px" : `calc(100% - 22px)`;
+        if (c.color) chip.innerHTML = `<i style="background:${c.color}"></i>${esc(c.text)}`;
+        else chip.textContent = c.text;
         const cw = chip.offsetWidth;
-        chip.style.left = (x + 8 + cw > w ? x - 8 - cw : x + 8) + "px";
-        // A label the chip lands on hides until the crosshair moves on.
+        const wantLeft = info.chips && p === over && info.card ? !cardLeft : false;
+        const fitsLeft = x - 8 - cw >= 0, fitsRight = x + 8 + cw <= w;
+        chip.style.left = ((wantLeft && fitsLeft) || !fitsRight ? x - 8 - cw : x + 8) + "px";
+        shown.push(chip);
+        if (c.y != null) placed.push({ chip, top: (1 - c.y) * p.clientHeight - 10 });
+        else chip.style.top = info.chipTop != null ? info.chipTop + "px" : "calc(100% - 22px)";
+      }
+      // Chips at line heights keep apart: each at least a chip below the one
+      // above, then the stack moves up if it runs past the bottom.
+      placed.sort((m, n) => m.top - n.top);
+      const H = p.clientHeight, GAP = 22;
+      for (let k = 0; k < placed.length; k++) placed[k].top = Math.max(placed[k].top, k ? placed[k - 1].top + GAP : 0);
+      for (let k = placed.length - 1; k >= 0; k--) placed[k].top = Math.min(placed[k].top, k < placed.length - 1 ? placed[k + 1].top - GAP : H - 20);
+      for (const m of placed) m.chip.style.top = Math.max(0, m.top) + "px";
+      // A label a chip lands on hides until the crosshair moves on.
+      for (const chip of shown) {
         const cr = chip.getBoundingClientRect();
         for (const el of p.querySelectorAll("[data-chip-avoid]")) {
           const r = el.getBoundingClientRect();
