@@ -396,16 +396,22 @@ export function placeChips(items, { x, w, h, cardW = 0 }) {
     return at;
   };
   const side = (s) => cols.map(() => s);
-  const split = () => {
-    // Nearest columns first, each to the side with more room left.
+  // With a card, chips first try the left so the card can take the right.
+  const plans = cardW ? [[side("l"), true], [side("r"), false]] : [[side("r"), false], [side("l"), true]];
+  // More than one column: every way of putting each column on either side,
+  // up to 8 columns (256 ways); past that, nearest columns each to the side
+  // with more room left.
+  if (cols.length > 1 && cols.length <= 8) {
+    for (let mask = 1; mask < (1 << cols.length) - 1; mask++) {
+      const sides = cols.map((_, k) => (mask >> k) & 1 ? "l" : "r");
+      plans.push([sides, true], [sides, false]);
+    }
+  } else if (cols.length > 8) {
     const out = [];
     let l = x - 8, r = w - x - 8;
     colW.forEach((cw) => { if (l >= r) { out.push("l"); l -= cw + 4; } else { out.push("r"); r -= cw + 4; } });
-    return out;
-  };
-  // With a card, chips first try the left so the card can take the right.
-  const plans = cardW ? [[side("l"), true], [side("r"), false]] : [[side("r"), false], [side("l"), true]];
-  if (cols.length > 1) plans.push([split(), x - 8 - rowW >= 0]);
+    plans.push([out, x - 8 - rowW >= 0]);
+  }
   const boxes = (at) => at.map((p, i) => ({ a: p.left, b: p.left + items[i].w, t: p.top ?? h - 22 }));
   const cardAt = (bx) => {
     if (!cardW) return [null];

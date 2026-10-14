@@ -224,6 +224,15 @@ test('hover chips: more lines than the plot is tall go into more columns, split 
   }
 });
 
+test('hover chips: nine accounts near the left edge of a small plot leave the card room', () => {
+  const items = Array.from({ length: 9 }, (_, i) => ({ y: i / 9, w: 40 }));
+  const r = placed(items, { x: 50, w: 410, h: 180, cardW: CARD });
+  assert.ok(noneOverlap(r.boxes));
+  assert.ok(inside(r.boxes, 410), 'chips inside the plot');
+  assert.ok(r.card >= 0 && r.card + CARD <= 410, 'card inside the plot');
+  assert.ok(clearOfCard(r), 'no chip under the card');
+});
+
 test('hover chips: a single chip without a card stays right of the crosshair', () => {
   const r = placed([{ y: null, w: 50 }], { x: 400, w: 800, h: 180 });
   assert.deepEqual(r.at[0], { left: 408, top: null });
