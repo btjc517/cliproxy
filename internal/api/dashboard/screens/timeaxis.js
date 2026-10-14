@@ -359,6 +359,37 @@ if (typeof document !== "undefined") {
   }, true);
 }
 
+// Where hover chips go beside a crosshair at x in a plot w wide and h tall.
+// items: [{y, w}], y the line's height from 0 to 1, or null for a chip at
+// the plot's usual chip row. Chips at line heights stack in columns of as
+// many as fit the height, each column further from the crosshair. They take
+// the side the card leaves free: left when a card fits right. Returns each
+// chip's {left, top} (top null for the chip row), the side, and the chips'
+// outer edge, beyond which a card can sit.
+export const CARD_W = 280;
+export function placeChips(items, { x, w, h, card = false }) {
+  const GAP = 22, CH = 20;
+  const lined = items.map((it, i) => ({ ...it, i })).filter((it) => it.y != null).sort((m, n) => n.y - m.y);
+  const per = Math.max(1, Math.floor((h - CH) / GAP) + 1);
+  const cols = [];
+  for (let k = 0; k < lined.length; k += per) cols.push(lined.slice(k, k + per));
+  const colW = cols.map((col) => Math.max(...col.map((it) => it.w)));
+  const span = colW.reduce((a, b) => a + b, 0) + 4 * Math.max(0, cols.length - 1);
+  const need = Math.max(span, ...items.filter((it) => it.y == null).map((it) => it.w), 0);
+  const fitsL = x - 8 - need >= 0, fitsR = x + 8 + need <= w;
+  const left = card ? (x + 12 + CARD_W <= w ? fitsL : !fitsR) : !fitsR;
+  const at = items.map((it) => ({ left: left ? x - 8 - it.w : x + 8, top: null }));
+  let edge = left ? x - 8 : x + 8;
+  cols.forEach((col, k) => {
+    const tops = col.map((it) => (1 - it.y) * h - CH / 2);
+    for (let i = 0; i < tops.length; i++) tops[i] = Math.max(tops[i], i ? tops[i - 1] + GAP : 0);
+    for (let i = tops.length - 1; i >= 0; i--) tops[i] = Math.min(tops[i], i < tops.length - 1 ? tops[i + 1] - GAP : h - CH);
+    col.forEach((it, i) => { at[it.i] = { left: left ? edge - it.w : edge, top: Math.max(0, tops[i]) }; });
+    edge += (left ? -1 : 1) * (colW[k] + 4);
+  });
+  return { at, left, out: left ? x - 8 - need : x + 8 + need };
+}
+
 // Plots are any elements with data-tplot; their width is the time axis.
 // Binding plots that are already bound (a redraw that kept them) updates the
 // controller with the screen's new group instead of binding them again.
@@ -443,45 +474,39 @@ export function bindTime(root, group) {
         dot.style.cssText = `left:${(f * 100).toFixed(3)}%;top:${((1 - d.y) * 100).toFixed(2)}%;background:${d.color}`;
       }
       const w = p.clientWidth, x = f * w;
-      // The card goes right of the crosshair when it fits; chips beside lines
-      // go on the other side, so the card never covers them.
-      const cardLeft = p === over && info.card ? x + 12 + 280 > w : false;
+      const withCard = p === over && !!info.card;
       const chips = info.chips || (info.chip != null && info.chip !== "" ? [{ text: info.chip }] : []);
-      const placed = [], shown = [];
-      for (const c of chips) {
+      const els = chips.map((c) => {
         const chip = add(document.createElement("div"));
         chip.className = "tx-chip";
         if (c.color) chip.innerHTML = `<i style="background:${c.color}"></i>${esc(c.text)}`;
         else chip.textContent = c.text;
-        const cw = chip.offsetWidth;
-        const wantLeft = info.chips && p === over && info.card ? !cardLeft : false;
-        const fitsLeft = x - 8 - cw >= 0, fitsRight = x + 8 + cw <= w;
-        chip.style.left = ((wantLeft && fitsLeft) || !fitsRight ? x - 8 - cw : x + 8) + "px";
-        shown.push(chip);
-        if (c.y != null) placed.push({ chip, top: (1 - c.y) * p.clientHeight - 10 });
-        else chip.style.top = info.chipTop != null ? info.chipTop + "px" : "calc(100% - 22px)";
-      }
-      // Chips at line heights keep apart: each at least a chip below the one
-      // above, then the stack moves up if it runs past the bottom.
-      placed.sort((m, n) => m.top - n.top);
-      const H = p.clientHeight, GAP = 22;
-      for (let k = 0; k < placed.length; k++) placed[k].top = Math.max(placed[k].top, k ? placed[k - 1].top + GAP : 0);
-      for (let k = placed.length - 1; k >= 0; k--) placed[k].top = Math.min(placed[k].top, k < placed.length - 1 ? placed[k + 1].top - GAP : H - 20);
-      for (const m of placed) m.chip.style.top = Math.max(0, m.top) + "px";
+        return { c, chip, cw: chip.offsetWidth };
+      });
+      const lay = placeChips(els.map((e) => ({ y: e.c.y, w: e.cw })), { x, w, h: p.clientHeight, card: withCard });
+      els.forEach((e, i) => {
+        e.chip.style.left = lay.at[i].left + "px";
+        e.chip.style.top = lay.at[i].top != null ? lay.at[i].top + "px" : info.chipTop != null ? info.chipTop + "px" : "calc(100% - 22px)";
+      });
+      const left = lay.left, chipsOut = els.length ? lay.out : null;
       // A label a chip lands on hides until the crosshair moves on.
-      for (const chip of shown) {
+      for (const { chip } of els) {
         const cr = chip.getBoundingClientRect();
         for (const el of p.querySelectorAll("[data-chip-avoid]")) {
           const r = el.getBoundingClientRect();
           if (r.right > cr.left && r.left < cr.right && r.bottom > cr.top && r.top < cr.bottom) { el.classList.add("under-chip"); hidden.push(el); }
         }
       }
-      if (p === over && info.card) {
+      if (withCard) {
         const card = add(document.createElement("div"));
         card.className = "tcard";
         card.innerHTML = info.card;
         const cw = card.offsetWidth, ch = card.offsetHeight;
-        card.style.left = (x + 12 + cw > w ? Math.max(0, x - 12 - cw) : x + 12) + "px";
+        // Right of the crosshair, or of chips there; else left of them; a
+        // plot too narrow for both keeps the card inside it.
+        const rightStart = chipsOut != null && !left ? chipsOut + 6 : x + 12;
+        const leftEnd = chipsOut != null && left ? chipsOut - 6 : x - 12;
+        card.style.left = (rightStart + cw <= w ? rightStart : leftEnd - cw >= 0 ? leftEnd - cw : Math.max(0, w - cw)) + "px";
         // Kept inside the group's root, so a clipping scroll box never cuts it.
         const pr = p.getBoundingClientRect(), rr = root.getBoundingClientRect();
         let top = info.cardTop ?? 12;

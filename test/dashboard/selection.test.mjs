@@ -366,16 +366,16 @@ test('the allowance hover shows a figure for every account with allowance left, 
   const now = Date.now();
   const ser = (util) => ({ long: true, utilization: util, burned: 0.1, burned_since: iso(now - DAY), last_at: iso(now), reset_at: iso(now + 5 * DAY), window_seconds: 7 * 86400, step_seconds: 600, start: iso(now - DAY), used: [] });
   S.data = {
-    accounts: ['a', 'b', 'c', 'd'].map((id) => ({ id, provider: 'claude', email: id + '@x.com' })),
-    // 2%, 36%, 100% and 76% used.
-    allowance: { a: [ser(0.02)], b: [ser(0.36)], c: [ser(1)], d: [ser(0.76)] },
+    accounts: ['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, provider: 'claude', email: id + '@x.com' })),
+    // 2%, 36%, 100%, 76% and 99.7% used.
+    allowance: { a: [ser(0.02)], b: [ser(0.36)], c: [ser(1)], d: [ser(0.76)], e: [ser(0.997)] },
     summary: {},
   };
   const p = buildPanel('allowance', { window: 'week' }, panelContext(ts({ start: now - DAY, end: now + 2 * DAY }), accountScope(), { forecast: true }));
   const info = p.probe(now, null, true);
   assert.equal(info.chip, undefined, 'no single chip');
-  assert.deepEqual(info.chips.map((c) => c.text).sort(), ['24%', '64%', '98%'], 'every account above 0%, the used-up one left out');
-  for (const c of info.chips) {
+  assert.deepEqual(info.chips.map((c) => c.text).sort(), ['24%', '64%', '98%', '<1%'], 'every account above 0%, under 1% too; the used-up one left out');
+  for (const c of info.chips.filter((c) => c.text !== '<1%')) {
     assert.equal(c.y, Number(c.text.replace('%', '')) / 100, 'each chip sits at its own line');
     assert.ok(c.color, 'each chip carries its line colour');
   }

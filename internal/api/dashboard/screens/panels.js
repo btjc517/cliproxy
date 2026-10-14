@@ -539,7 +539,7 @@ function allowancePanel(ctx, o) {
     const warn = dead ? `No ${providerTitle(dead.provider)} allowance left${dead.open ? "" : " until " + resetName(dead.t1, now)}` : "";
     return {
       // One chip per account with allowance left, beside its own line.
-      chips: vals.filter((x) => Math.round(x.val) > 0).map((x) => ({ text: Math.round(x.val) + "%", y: x.val / 100, color: x.l.color })),
+      chips: vals.filter((x) => x.val > 0).map((x) => ({ text: x.val < 1 ? "<1%" : Math.round(x.val) + "%", y: x.val / 100, color: x.l.color })),
       dots: vals.map((x) => ({ y: x.val / 100, color: x.l.color })),
       card: hovered ? card({ title: instant(t, now), warn, rows: vals.map((x) => ({ k: x.l.label, v: Math.round(x.val) + "% left", color: x.l.color })) }) : "",
       cardTop: 32,

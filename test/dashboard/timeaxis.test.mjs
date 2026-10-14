@@ -179,3 +179,42 @@ test('panel labels outside the window header use the same year rule', async () =
     assert.doesNotMatch(src(f), /`\$\{day\(t\)\}/, `${f} names a day without the year rule`);
   }
 });
+
+// Hover chips beside each line: none overlap, none run out of the plot, and
+// the hover card always has room clear of them.
+const overlaps = (a, b) => a.left < b.left + b.w && b.left < a.left + a.w && a.top < b.top + 20 && b.top < a.top + 20;
+const placed = (items, o) => { const r = axis.placeChips(items, o); return { ...r, boxes: r.at.map((p, i) => ({ ...p, w: items[i].w })) }; };
+const noneOverlap = (boxes) => boxes.every((a, i) => boxes.every((b, j) => i >= j || !overlaps(a, b)));
+
+test('hover chips: one per line, at its height, left of the crosshair when the card goes right', () => {
+  const items = [0.98, 0.64, 0.24, 0.63].map((y) => ({ y, w: 44 }));
+  const r = placed(items, { x: 400, w: 800, h: 180, card: true });
+  assert.equal(r.left, true);
+  assert.ok(noneOverlap(r.boxes), 'no two chips overlap');
+  for (const b of r.boxes) {
+    assert.ok(b.left + b.w <= 400 - 8, 'clear of the crosshair and the card on its right');
+    assert.ok(b.top >= 0 && b.top + 20 <= 180, 'inside the plot');
+  }
+  // The lone chip near 24% sits at its line.
+  assert.equal(r.boxes[2].top, (1 - 0.24) * 180 - 10);
+});
+
+test('hover chips: near either edge they and the card share a side without meeting', () => {
+  for (const x of [10, 790]) {
+    const items = [0.9, 0.6, 0.3].map((y) => ({ y, w: 44 }));
+    const r = placed(items, { x, w: 800, h: 180, card: true });
+    for (const b of r.boxes) assert.ok(b.left >= 0 && b.left + b.w <= 800, 'inside the plot at x=' + x);
+    // The card sits beyond the chips' outer edge, as bindTime places it.
+    const cardLeft = r.left ? r.out - 6 - axis.CARD_W : r.out + 6;
+    const card = { left: cardLeft, w: axis.CARD_W };
+    for (const b of r.boxes) assert.ok(b.left + b.w <= card.left || b.left >= card.left + card.w, 'no chip under the card at x=' + x);
+  }
+});
+
+test('hover chips: more lines than the plot is tall go into a second column, still apart', () => {
+  const items = Array.from({ length: 10 }, (_, i) => ({ y: 0.5 + i * 0.001, w: 44 }));
+  const r = placed(items, { x: 400, w: 800, h: 180, card: true });
+  assert.ok(noneOverlap(r.boxes), 'ten chips, none overlapping');
+  assert.equal(new Set(r.boxes.map((b) => b.left)).size, 2, 'two columns');
+  for (const b of r.boxes) assert.ok(b.top >= 0 && b.top + 20 <= 180);
+});
