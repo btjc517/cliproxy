@@ -340,10 +340,17 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
+	threadTrace, hasThreadTrace := helps.NewClaudeThreadTrace(ctx, incomingHeaders, originalPayload, resolveClaudeMCPAliasOptions(ctx).secret)
 	httpResp, err := doClaudeUpstreamRequest(httpClient, httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		if hasThreadTrace {
+			threadTrace.Log(ctx, 0, nil)
+		}
 		return resp, wrapClaudeFastRequestError(fastRequest, 0, err)
+	}
+	if hasThreadTrace && httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+		threadTrace.Log(ctx, httpResp.StatusCode, nil)
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
@@ -370,6 +377,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if hasThreadTrace {
+			threadTrace.Log(ctx, httpResp.StatusCode, b)
+		}
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
