@@ -12,7 +12,7 @@ import (
 // https://developers.openai.com/api/docs/pricing.
 const (
 	pricesAsOf  = "2026-10-06"
-	notModelled = "batch, fast mode, US-only inference, web search fees, 1-hour cache writes"
+	notModelled = "batch, fast mode, US-only inference, web search fees, 1-hour cache writes before 19 Oct 2026"
 	// longContextTokens is the input size, uncached plus cache read plus
 	// cache write, above which one OpenAI request is priced at the long
 	// context rates.
@@ -24,7 +24,7 @@ const (
 
 // tokenPrices are USD per million tokens.
 type tokenPrices struct {
-	input, cacheWrite, cacheRead, output float64
+	input, cacheWrite, cacheWrite1h, cacheRead, output float64
 }
 
 // modelPrice is one model's prices. long applies to a single request whose
@@ -35,18 +35,19 @@ type modelPrice struct {
 }
 
 // claudePrice takes the input, 5-minute cache write, cache read and output
-// prices. Claude 4.6 and later have no long context surcharge.
+// prices. A 1-hour cache write costs twice the input price. Claude 4.6 and
+// later have no long context surcharge.
 func claudePrice(input, cacheWrite, cacheRead, output float64) modelPrice {
-	return modelPrice{standard: tokenPrices{input: input, cacheWrite: cacheWrite, cacheRead: cacheRead, output: output}}
+	return modelPrice{standard: tokenPrices{input: input, cacheWrite: cacheWrite, cacheWrite1h: 2 * input, cacheRead: cacheRead, output: output}}
 }
 
 // openAIPrice takes the input, cached input and output prices, then the same
 // three for long context; zero long prices mean no surcharge. A cache write
 // is priced as input.
 func openAIPrice(input, cached, output, longInput, longCached, longOutput float64) modelPrice {
-	price := modelPrice{standard: tokenPrices{input: input, cacheWrite: input, cacheRead: cached, output: output}}
+	price := modelPrice{standard: tokenPrices{input: input, cacheWrite: input, cacheWrite1h: input, cacheRead: cached, output: output}}
 	if longInput != 0 {
-		price.long = &tokenPrices{input: longInput, cacheWrite: longInput, cacheRead: longCached, output: longOutput}
+		price.long = &tokenPrices{input: longInput, cacheWrite: longInput, cacheWrite1h: longInput, cacheRead: longCached, output: longOutput}
 	}
 	return price
 }
@@ -127,8 +128,10 @@ func (p modelPrice) cost(counters Counters, perRequest bool) float64 {
 	if perRequest && p.long != nil && counters.Input+counters.CacheRead+counters.CacheWrite > longContextTokens {
 		prices = *p.long
 	}
+	oneHour := min(max(counters.CacheWrite1h, 0), counters.CacheWrite)
 	perMillion := float64(counters.Input)*prices.input +
-		float64(counters.CacheWrite)*prices.cacheWrite +
+		float64(counters.CacheWrite-oneHour)*prices.cacheWrite +
+		float64(oneHour)*prices.cacheWrite1h +
 		float64(counters.CacheRead)*prices.cacheRead +
 		float64(counters.Output)*prices.output
 	return roundCost(perMillion / 1e6)
@@ -239,11 +242,13 @@ func priceTotals(totals map[string]map[string]Counters, models map[string]map[st
 				rest.Output -= counters.Output
 				rest.CacheRead -= counters.CacheRead
 				rest.CacheWrite -= counters.CacheWrite
+				rest.CacheWrite1h -= counters.CacheWrite1h
 			}
 			rest.Input = max(rest.Input, 0)
 			rest.Output = max(rest.Output, 0)
 			rest.CacheRead = max(rest.CacheRead, 0)
 			rest.CacheWrite = max(rest.CacheWrite, 0)
+			rest.CacheWrite1h = max(rest.CacheWrite1h, 0)
 			total.APICost = roundCost(total.APICost + costFor("", provider, rest, fallback, false))
 			providers[provider] = total
 		}

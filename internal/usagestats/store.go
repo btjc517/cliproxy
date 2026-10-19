@@ -44,13 +44,16 @@ const (
 // Counters is one bucket of usage for a credential. APICost is what the
 // tokens would have cost at the public API list prices, in USD.
 type Counters struct {
-	Requests   int64   `json:"requests"`
-	Failed     int64   `json:"failed"`
-	Input      int64   `json:"input_tokens"`
-	Output     int64   `json:"output_tokens"`
-	CacheRead  int64   `json:"cache_read_tokens"`
-	CacheWrite int64   `json:"cache_write_tokens"`
-	APICost    float64 `json:"api_cost"`
+	Requests   int64 `json:"requests"`
+	Failed     int64 `json:"failed"`
+	Input      int64 `json:"input_tokens"`
+	Output     int64 `json:"output_tokens"`
+	CacheRead  int64 `json:"cache_read_tokens"`
+	CacheWrite int64 `json:"cache_write_tokens"`
+	// CacheWrite1h is the part of CacheWrite written to the 1-hour cache,
+	// which costs more than the 5-minute cache.
+	CacheWrite1h int64   `json:"cache_write_1h_tokens,omitempty"`
+	APICost      float64 `json:"api_cost"`
 }
 
 func (c *Counters) add(other Counters) {
@@ -60,6 +63,7 @@ func (c *Counters) add(other Counters) {
 	c.Output += other.Output
 	c.CacheRead += other.CacheRead
 	c.CacheWrite += other.CacheWrite
+	c.CacheWrite1h += other.CacheWrite1h
 	c.APICost = roundCost(c.APICost + other.APICost)
 }
 
@@ -418,6 +422,7 @@ func countersFromRecord(record coreusage.Record) Counters {
 		counters.CacheRead = breakdown.Input.CacheReadTokens
 		counters.CacheWrite = breakdown.Input.CacheWriteTokens
 		counters.Output = breakdown.Output.TotalTokens
+		counters.CacheWrite1h = min(max(detail.CacheCreation1hTokens, 0), counters.CacheWrite)
 		return counters
 	}
 	counters.CacheRead = detail.CacheReadTokens
@@ -427,6 +432,7 @@ func countersFromRecord(record coreusage.Record) Counters {
 	counters.CacheWrite = detail.CacheCreationTokens
 	counters.Input = detail.InputTokens
 	counters.Output = detail.OutputTokens
+	counters.CacheWrite1h = min(max(detail.CacheCreation1hTokens, 0), counters.CacheWrite)
 	return counters
 }
 

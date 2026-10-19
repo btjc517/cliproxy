@@ -70,6 +70,9 @@ func TestRequestCostByModel(t *testing.T) {
 			coreusage.Detail{InputTokens: 1000, CacheCreationTokens: 2000, CacheReadTokens: 100_000, OutputTokens: 500}, 0.044},
 		{"claude long context has no surcharge", "claude-b", "claude", "claude-opus-5-5[1m]",
 			coreusage.Detail{InputTokens: 300_000, CacheReadTokens: 50_000, OutputTokens: 1000}, 1.23},
+		{"claude 1-hour cache writes cost twice the input price", "claude-g", "claude", "claude-opus-5-5",
+			coreusage.Detail{InputTokens: 1000, CacheCreationTokens: 21_000, CacheCreation1hTokens: 20_000, CacheCreation5mTokens: 1000,
+				CacheReadTokens: 100_000, OutputTokens: 500}, 0.199},
 		{"openai short, cache write priced as input", "codex-c", "codex", "gpt-6-astra",
 			coreusage.Detail{InputTokens: 10_000, CacheCreationTokens: 1000, CacheReadTokens: 200_000, OutputTokens: 2000}, 0.41},
 		{"openai long", "codex-d", "codex", "gpt-6-astra",
@@ -107,7 +110,7 @@ func TestRequestCostByModel(t *testing.T) {
 		t.Fatalf("history cost today %v, week %v, month %v, lifetime %v; want %v",
 			history.Today.APICost, history.ThisWeek.APICost, history.ThisMonth.APICost, history.Lifetime.APICost, total)
 	}
-	if got, want := history.Days[0].Providers["claude"].APICost, roundCost(0.044+1.23); got != want {
+	if got, want := history.Days[0].Providers["claude"].APICost, roundCost(0.044+1.23+0.199); got != want {
 		t.Fatalf("claude day cost %v, want %v", got, want)
 	}
 }
@@ -347,7 +350,7 @@ func TestFallbackModelIsTopModelOfLast30Days(t *testing.T) {
 
 func TestSummaryPricing(t *testing.T) {
 	clock := &testClock{now: time.Date(2026, 10, 5, 15, 30, 45, 500, time.UTC)}
-	notModelledJSON := `"not_modelled":"batch, fast mode, US-only inference, web search fees, 1-hour cache writes"`
+	notModelledJSON := `"not_modelled":"batch, fast mode, US-only inference, web search fees, 1-hour cache writes before 19 Oct 2026"`
 
 	dir := t.TempDir()
 	writeHistory(t, dir, `{"days":{"2026-10-01":{"claude":{"output_tokens":10}}},`+
