@@ -59,6 +59,27 @@ func StoreClaudeThreadToolNames(caller, messageID string, names map[string]strin
 	claudeThreadToolNames.store(caller, messageID, names)
 }
 
+// ClaudeThreadPreviousAge reports how long ago the response messageID was
+// stored, which is when that response finished. It does not refresh the entry.
+func ClaudeThreadPreviousAge(caller, messageID string) (time.Duration, bool) {
+	return claudeThreadToolNames.age(caller, messageID)
+}
+
+func (c *claudeThreadToolNameCache) age(caller, messageID string) (time.Duration, bool) {
+	if caller == "" || messageID == "" {
+		return 0, false
+	}
+	key := claudeThreadToolNameKey{sha256.Sum256([]byte(caller)), messageID}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	element, ok := c.entries[key]
+	if !ok {
+		return 0, false
+	}
+	stored := element.Value.(claudeThreadToolNameEntry).expires.Add(-c.ttl)
+	return c.now().Sub(stored), true
+}
+
 func (c *claudeThreadToolNameCache) load(caller, messageID string) (map[string]string, bool) {
 	if caller == "" || messageID == "" {
 		return nil, false

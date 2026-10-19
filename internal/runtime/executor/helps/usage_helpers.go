@@ -564,8 +564,27 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	r.once.Do(func() {
+		r.logClaudeCacheUsage(ctx, detail, failed)
 		r.publishAttemptRecord(ctx, r.buildRecord(detail, failed, fail))
 	})
+}
+
+// logClaudeCacheUsage writes one "claude cache" line per Claude request that
+// reported usage, keyed like the "claude thread" line.
+func (r *UsageReporter) logClaudeCacheUsage(ctx context.Context, detail usage.Detail, failed bool) {
+	if r.provider != "claude" || !hasNonZeroTokenUsage(detail) {
+		return
+	}
+	session := ExtractClaudeCodeSessionID(ctx, nil, IncomingHeadersFromContext(ctx))
+	if session == "" {
+		session = r.sessionID
+	}
+	agent := ExtractClaudeCodeAgentID(ctx, IncomingHeadersFromContext(ctx))
+	model := r.ResponseModel()
+	if model == "" {
+		model = r.model
+	}
+	LogWithRequestID(ctx).Info(claudeCacheUsageMessage(session, agent, model, failed, detail))
 }
 
 func normalizeUsageDetailTotal(detail usage.Detail, provider, executorType string) usage.Detail {
@@ -1183,6 +1202,9 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		CachedTokens:        cacheReadTokens,
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
+		// Anthropic splits writes by TTL; the 1h pool costs twice the 5m pool.
+		CacheCreation1hTokens: usageNode.Get("cache_creation.ephemeral_1h_input_tokens").Int(),
+		CacheCreation5mTokens: usageNode.Get("cache_creation.ephemeral_5m_input_tokens").Int(),
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
