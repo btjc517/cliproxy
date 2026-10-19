@@ -12,10 +12,11 @@ export const STRATEGIES = {
   "weighted-round-robin": { a: "Weighted round robin", b: "Takes turns, giving accounts with a higher weight more sessions." },
 };
 
-function statusCell(a, isNext) {
+// why: the scorer's reason when it leaves a ready account out.
+function statusCell(a, isNext, why) {
   const st = status(a);
   if (isNext) return pill("Next");
-  if (st.kind === "ready") return a.priority < 0 ? `<span class="muted">Reserve, used once the others run out</span>` : "";
+  if (st.kind === "ready") return a.priority < 0 ? `<span class="muted">Reserve, used once the others run out</span>` : why ? `<span class="muted">${esc(why)}</span>` : "";
   if (st.kind === "off") return `<span class="muted">Off</span>`;
   if (st.kind === "usedup") {
     const p = plan(a);
@@ -47,7 +48,7 @@ function queueRows(provider) {
         email(a.email),
         w?.reset ? esc(resetLong(st.kind === "usedup" ? st.until || w.reset : w.reset)) : "",
         st.kind === "off" || st.kind === "blocked" || st.kind === "error" ? "" : w ? meterCell(st.kind === "usedup" ? 0 : left(w)) : `<span class="muted">No reading</span>`,
-        statusCell(a, q.next && a.id === q.next.id),
+        statusCell(a, q.next && a.id === q.next.id, q.why[a.id]),
       ],
     });
   });
@@ -71,7 +72,7 @@ function scorer() {
     ? (choices
       ? `Runs next to the live router without changing anything. In the last 24 hours it agreed with the live pick on <b class="strong">${agreed} of ${choices}</b> new sessions.`
       : "Runs next to the live router without changing anything. No choices recorded in the last 24 hours: a choice needs two ready accounts.")
-    : "Places new sessions. The ranking below is what it would do now.";
+    : "Places new sessions. The queue above follows this ranking.";
   const headroom = Object.entries(R.headroom || {});
   if (headroom.length) lead += ` Keeps ${headroom.map(([a, line]) => `${esc(a)} below <b class="strong">${Math.round(line * 100)}%</b> of its 5-hour window`).join(", ")} while another account has room.`;
 
@@ -112,6 +113,14 @@ export function view() {
   const curInfo = STRATEGIES[cur] || { a: cur, b: "" };
   const affinity = !!routing.session_affinity;
   const prime = (routing.prime_after_reset || []).map(providerTitle);
+  // With the scorer live the strategy no longer places sessions, so the page
+  // shows the scorer as the order. In shadow the strategy still places them.
+  const mode = S.data?.router?.mode || "off";
+  const live = mode === "live";
+  const order = live
+    ? `<div class="setrow"><div class="k"><b>Order</b><span>The scorer sends new sessions where allowance would otherwise go unused, and away from busy accounts.</span></div><div class="v">Scorer</div></div>`
+    : `<div class="setrow"><div class="k"><b>Order</b><span>${esc(curInfo.b)}</span></div><div class="v"><button class="btn outline" data-strategy>${esc(curInfo.a)}${icon("chevronUpDown", 14)}</button></div></div>`;
+  const queueNote = live ? "Scorer ranking" : mode === "shadow" ? "Live order, " + curInfo.a.toLowerCase() : "";
 
   const cols = [{ label: "#", w: 40 }, { label: "", w: 16, cls: "ic" }, { label: "Account" }, { label: "Week resets", w: 160 }, { label: "Week left", w: 150 }, { label: "Status", w: 260 }];
   const rows = [...queueRows("claude"), ...queueRows("codex")];
@@ -121,12 +130,12 @@ export function view() {
     <div class="body">
       <div class="setgrp">
         <h3>How new sessions pick an account</h3>
-        <div class="setrow"><div class="k"><b>Order</b><span>${esc(curInfo.b)}</span></div><div class="v"><button class="btn outline" data-strategy>${esc(curInfo.a)}${icon("chevronUpDown", 14)}</button></div></div>
+        ${order}
         <div class="setrow"><div class="k"><b>Keep a session on one account</b><span>The prompt cache belongs to one account. A session moves only when its account runs out.</span></div><div class="v"><button class="toggle ${affinity ? "on" : ""}" data-affinity role="switch" aria-checked="${affinity}" aria-label="Keep a session on one account"></button></div></div>
         ${prime.length ? `<div class="setrow"><div class="k"><b>Start new weeks early</b><span>Sends a first request after a weekly reset so the new week starts at once.</span></div><div class="v">${esc(prime.join(", "))}</div></div>` : ""}
       </div>
-      <div class="sec ${S.data?.router?.mode && S.data.router.mode !== "off" ? "" : "last"}">
-        <div class="sech tall"><div class="t"><b>Queue right now</b></div></div>
+      <div class="sec ${mode !== "off" ? "" : "last"}">
+        <div class="sech tall"><div class="t"><b>Queue right now</b>${queueNote ? `<span class="muted">${esc(queueNote)}</span>` : ""}</div></div>
         ${table(cols, rows, { empty: "No accounts signed in." })}
       </div>
       ${scorer()}
@@ -135,7 +144,8 @@ export function view() {
   return {
     html,
     mount(root) {
-      root.querySelector("[data-strategy]").onclick = (e) => menu(e.currentTarget, strategies.map((id) => ({
+      const pick = root.querySelector("[data-strategy]");
+      if (pick) pick.onclick = (e) => menu(e.currentTarget, strategies.map((id) => ({
         a: (STRATEGIES[id] || { a: id }).a, b: (STRATEGIES[id] || {}).b, on: id === cur,
         run: () => { if (id !== cur) write(() => api("/config/routing/strategy", { method: "PUT", body: JSON.stringify(id) }), "Order set to " + (STRATEGIES[id] || { a: id }).a); },
       })), { width: 320 });

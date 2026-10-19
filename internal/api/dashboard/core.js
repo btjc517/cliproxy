@@ -788,11 +788,23 @@ export function status(acct) {
   return { kind: "ready", text: "Ready" };
 }
 
-// Mirror the live soonest-reset selector: highest priority tier among ready
-// accounts, unobserved accounts first, then the earliest weekly reset. It
-// reads the quota headers, not the router meters, so this does too.
+// The order new sessions take. With the scorer live it places them, so the
+// order is its ranking; scored marks that, and why holds its reason for each
+// account it leaves out. Otherwise mirror the soonest-reset selector: highest
+// priority tier among ready accounts, unobserved accounts first, then the
+// earliest weekly reset. It reads the quota headers, not the router meters,
+// so this does too.
 export function queue(provider) {
   const list = accounts().filter((a) => a.provider === provider);
+  const R = S.data?.router || {};
+  const ranking = R.mode === "live" && (R.rankings || []).find((r) => r.provider === provider);
+  if (ranking) {
+    const byId = new Map(list.map((a) => [a.id, a]));
+    const cands = ranking.candidates || [];
+    const order = cands.filter((c) => !c.excluded && byId.has(c.auth_id)).map((c) => byId.get(c.auth_id));
+    const why = Object.fromEntries(cands.filter((c) => c.excluded).map((c) => [c.auth_id, c.summary || ""]));
+    return { order, rest: list.filter((a) => !order.includes(a)), next: order[0] || null, scored: true, why };
+  }
   const ready = list.filter((a) => status(a).kind === "ready");
   const order = ready.slice().sort((a, b) => {
     if (a.priority !== b.priority) return b.priority - a.priority;
@@ -802,7 +814,7 @@ export function queue(provider) {
     return String(a.id).localeCompare(String(b.id));
   });
   const rest = list.filter((a) => !ready.includes(a));
-  return { order, rest, next: order.find((a) => a.priority >= 0) || order[0] || null };
+  return { order, rest, next: order.find((a) => a.priority >= 0) || order[0] || null, scored: false, why: {} };
 }
 
 export function plan(acct) {
