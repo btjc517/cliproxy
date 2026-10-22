@@ -1642,6 +1642,38 @@ func rawJSONArray(items []string) []byte {
 	return []byte(builder.String())
 }
 
+// claudeStatelessThreadBody is the refusal Claude Code reads as "threads are
+// unsupported": it resends the turn without "thread" and keeps that agent and
+// model stateless for the rest of its session.
+const claudeStatelessThreadBody = `{"type":"error","error":{"type":"invalid_request_error","message":"thread: this proxy accepts stateless requests only; resend the full conversation without thread","details":{"error_code":"thread_unsupported_request"}}}`
+
+// claudeStatelessThreadError is request scoped, so the conductor neither tries
+// another account nor cools this one down.
+type claudeStatelessThreadError struct {
+	statusErr
+}
+
+func (claudeStatelessThreadError) IsRequestScoped() bool { return true }
+
+// claudeStatelessThreadRefusal refuses a native thread request when
+// claude.stateless-threads is on (see config.ClaudeConfig.StatelessThreads).
+// It runs before any upstream call.
+func claudeStatelessThreadRefusal(cfg *config.Config, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+	if cfg == nil || !cfg.Claude.StatelessThreads {
+		return nil
+	}
+	payload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		payload = opts.OriginalRequest
+	}
+	thread := gjson.GetBytes(payload, "thread")
+	if !thread.Exists() {
+		return nil
+	}
+	log.Infof("claude stateless threads: refused a %s thread request", thread.Get("type").String())
+	return claudeStatelessThreadError{statusErr{code: http.StatusBadRequest, msg: claudeStatelessThreadBody}}
+}
+
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
 }

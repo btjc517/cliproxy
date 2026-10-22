@@ -401,6 +401,13 @@ upstream:
     # the entire credential across all sibling models. Default is false.
     model-level-cooling: false
 
+    # When true, refuse native message thread requests (a "thread" field in the body)
+    # with the error Claude Code reads as "threads unsupported", so it resends each turn
+    # as a full conversation. Anthropic keeps a thread's cache apart from full requests
+    # and drops idle threads after about 5 minutes, so every replayed thread re-writes
+    # the whole history; full requests reuse each other's cache. Default is false.
+    stateless-threads: false
+
     # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
     # system prompt replacement), so the original system prompt is passed through to Claude as-is.
     # Credential attributes and explicit per-key cloak modes override this shared default.
