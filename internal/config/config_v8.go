@@ -39,6 +39,7 @@ var v8SharedPaths = []configPath{
 	{"oauth.providers.codex.model-level-cooling", "upstream.codex.model-level-cooling"},
 	{"oauth.providers.codex.response-steering", "upstream.codex.response-steering"},
 	{"oauth.providers.claude.model-level-cooling", "upstream.claude.model-level-cooling"},
+	{"oauth.providers.claude.stateless-threads", "upstream.claude.stateless-threads"},
 	{"oauth.providers.claude.claude-code.disable-cloaking-model-list", "upstream.claude.disable-cloaking-model-list"},
 	{"oauth.providers.claude.disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
 	{"oauth.providers.claude.header-defaults.user-agent", "upstream.claude.header-defaults.user-agent"},

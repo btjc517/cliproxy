@@ -116,6 +116,12 @@ type ClaudeConfig struct {
 	// ModelLevelCooling scopes Claude quota cooldowns to the requested model
 	// rather than cooling down the entire credential across all sibling models.
 	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
+	// StatelessThreads refuses native message thread requests ("thread" in the
+	// body) with the error Claude Code reads as threads being unsupported, so
+	// the client resends each turn as a full conversation. The upstream keeps a
+	// thread's cache apart from full-conversation requests, so every new thread
+	// re-writes the whole history; full requests reuse each other's cache.
+	StatelessThreads bool `yaml:"stateless-threads" json:"stateless-threads"`
 }
 
 // ClaudeHeaderDefaults configures the measured Claude Code software baseline.
