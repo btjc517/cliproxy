@@ -1,7 +1,7 @@
 // Allowance left over the week or the last 5 hours: where it is heading, how
 // fast each account is using it, and when a provider has none left. The
 // allowance panel and the Telemetry table draw from here.
-import { S, clock, weekdayTime, accounts, validTime, warnState, isToday, status } from "../core.js";
+import { S, clock, weekdayTime, accounts, validTime, warnState, isToday, status, limits } from "../core.js";
 
 const HOUR = 3600e3;
 const IDLE_AFTER = 90 * 60e3; // the router's burn lookback: no reading for this long is idle
@@ -20,6 +20,21 @@ export function accountLabels() {
 // The account's weekly (long) or 5-hour series from /dashboard/data, or null.
 export function allowanceSeries(id, long) {
   return (S.data?.allowance?.[id] || []).find((s) => !!s.long === long) || null;
+}
+
+// A short-window refill cannot restore access while the weekly meter is empty.
+// Keep the raw history, but do not promise another usable refill from it.
+export function accountTrajectory(id, long, now = Date.now()) {
+  const tr = trajectory(allowanceSeries(id, long), now);
+  if (!tr || long) return tr;
+  const week = allowanceSeries(id, true);
+  const acct = accounts().find((a) => a.id === id);
+  const limit = !week && acct ? limits(acct).week : null;
+  const used = week ? Number(week.utilization) * 100 : limit?.used;
+  const reset = week ? ms(week.reset_at) : limit?.reset || 0;
+  if (!(used >= 100) || (reset && reset <= now)) return tr;
+  return { ...tr, blockedByWeek: true, weeklyReset: reset, leftNow: 0, usedUp: true,
+    reset: 0, rate: null, runsOut: 0, leftAtReset: null };
 }
 
 // Where a meter is heading. All shares are percent of the allowance.
@@ -76,6 +91,7 @@ export function observedHistoryRate(ser, now = Date.now()) {
 // Allowance left at time t (from now on) at the current rate. It runs down
 // from now, refills to 100% at each reset and runs down again at the same rate.
 export function projectedAt(tr, now, period, t) {
+  if (tr?.blockedByWeek) return t >= now && (!tr.weeklyReset || t < tr.weeklyReset) ? 0 : null;
   if (!tr || !(tr.reset > now) || t < now) return null;
   if (tr.rate == null) {
     if (t < tr.reset) return tr.leftNow === 0 ? 0 : null;
@@ -91,6 +107,7 @@ export function projectedAt(tr, now, period, t) {
 // runs down to 0 at most, and a reset is a vertical step back up to 100%.
 export function projectionPoints(tr, now, end, period, xOf) {
   const pts = [];
+  if (tr.blockedByWeek) return pts;
   if (!(tr.reset > now) || end <= now) return pts;
   if (tr.rate == null) {
     // Exhaustion stays at zero until the known refill. After that, show
@@ -123,6 +140,7 @@ export function projectionPoints(tr, now, end, period, xOf) {
 // The reset times of one account that fall between now and end.
 export function resetsUntil(tr, now, end, period) {
   const out = [];
+  if (tr.blockedByWeek) return out;
   for (let t = tr.reset; t > now && t <= end; t += period) {
     out.push(t);
     if (!(period > 0)) break;
@@ -148,7 +166,7 @@ export function deadZones(providers, long, { now, start, step, n, nowX }) {
   for (const provider of providers) {
     const pool = accounts().filter((a) => a.provider === provider && !["off", "blocked", "error"].includes(status(a).kind)).map((a) => {
       const ser = allowanceSeries(a.id, long);
-      return ser && { ser, tr: trajectory(ser, now), period: (Number(ser.window_seconds) || 0) * 1000 };
+      return ser && { ser, tr: accountTrajectory(a.id, long, now), period: (Number(ser.window_seconds) || 0) * 1000 };
     });
     if (!pool.length || pool.some((m) => !m)) continue;
     const spans = [];
@@ -168,6 +186,7 @@ export function deadZones(providers, long, { now, start, step, n, nowX }) {
     const leftAt = (m, t) => (m.tr.leftNow <= 0 && t < m.tr.reset ? 0 : projectedAt(m.tr, now, m.period, t));
     const cuts = new Set([Math.max(0, nowX), n - 1]);
     for (const m of pool) {
+      if (m.tr.blockedByWeek && m.tr.weeklyReset > now) cuts.add((m.tr.weeklyReset - start) / step);
       for (const q of projectionPoints(m.tr, now, endT, m.period, (t) => (t - start) / step)) cuts.add(q.x);
       for (const t of resetsUntil(m.tr, now, endT, m.period)) cuts.add((t - start) / step);
     }
@@ -194,6 +213,7 @@ export const pctRate = (v) => (v == null ? "–" : v > 0 && v < 1 ? v.toFixed(1)
 
 // The rate a projection uses: a share a day for a weekly meter, an hour for a 5-hour one.
 export function rateText(tr) {
+  if (tr?.blockedByWeek) return "";
   if (!tr || tr.rate == null) return "";
   if (!tr.long && tr.perHour == null && tr.idle) return "Idle";
   return tr.long ? pctRate(tr.rate * 24) + " a day" : pctRate(tr.rate) + " an hour";
@@ -202,6 +222,7 @@ export function rateText(tr) {
 // "Used up", "Runs out Thu 14:00" or "Lasts to reset, about 62% left".
 export function outlook(tr, { short = false } = {}) {
   if (!tr) return `<span class="muted">No reading yet</span>`;
+  if (tr.blockedByWeek) return warnState("Weekly limit used up");
   if (tr.usedUp) return warnState("Used up");
   if (tr.rate == null) return `<span class="muted">Too few readings yet</span>`;
   if (tr.runsOut) return warnState("Runs out " + (isToday(tr.runsOut) ? clock(tr.runsOut) : weekdayTime(tr.runsOut)));
@@ -213,6 +234,10 @@ export function outlook(tr, { short = false } = {}) {
 // A reset is a refill, never negative consumption. Unknown history stays unknown.
 export function allowanceRange(ser, tr, now, from, to) {
   if (!ser || !tr || !(to > from)) return null;
+  if (tr.blockedByWeek) {
+    const held = from >= now && (!tr.weeklyReset || to < tr.weeklyReset);
+    return { used: held ? 0 : null, resets: held ? 0 : null };
+  }
   let used = 0, resets = 0;
   const period = (Number(ser.window_seconds) || 0) * 1000;
   if (from < now) {

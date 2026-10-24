@@ -129,6 +129,7 @@ const fullTime = (t) => `${dayText(t)}, ${clock(t)}`;
 // used-up week, how the next one goes at the same rate.
 function headingFor(l, now) {
   const tr = l.tr;
+  if (tr.blockedByWeek) return warnState("Weekly limit used up");
   if (tr.rate == null && !tr.usedUp) return `<span class="muted">Too few readings yet</span>`;
   let main, sub = "";
   if (tr.usedUp) main = warnState("Used up");

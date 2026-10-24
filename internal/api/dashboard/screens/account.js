@@ -4,7 +4,7 @@ import {
   modeMenu, planMenu, modeTitle, sessions, warnState, seg, accounts,
 } from "../core.js";
 import { sessionTable } from "./common.js";
-import { allowanceSeries, trajectory, outlook, rateText } from "./burn.js";
+import { allowanceSeries, trajectory, accountTrajectory, outlook, rateText } from "./burn.js";
 import { timeStrip, stripTime } from "./strip.js";
 import { buildPanel, panelContext, snapGrid } from "./panels.js";
 import { DAY, timeState, bindTime, selectionLabel, backToNow, windowText } from "./timeaxis.js";
@@ -31,6 +31,9 @@ function burnLine(tr) {
 }
 
 function limitBlock(title, item, st, tr) {
+  if (tr?.blockedByWeek) {
+    return `<div class="lim"><span class="muted">${title}</span><div class="bignum"><span class="v">Unavailable</span></div><div class="bar6"></div><div class="sub">Weekly limit used up</div></div>`;
+  }
   if (!item) {
     return `<div class="lim"><span class="muted">${title}</span><div class="bignum"><span class="v muted">–</span></div><div class="bar6"></div><div class="sub">No reading yet</div></div>`;
   }
@@ -91,7 +94,7 @@ export function view(ctx) {
     </div>
     <div class="body">
       ${stateLine}
-      ${region("ac|limits", `${limitBlock("Week", lim.week, st, trajectory(allowanceSeries(a.id, true)))}${limitBlock("5 hours", lim.short, st, trajectory(allowanceSeries(a.id, false)))}${planBlock(a)}`, "div", `class="limits"`)}
+      ${region("ac|limits", `${limitBlock("Week", lim.week, st, trajectory(allowanceSeries(a.id, true)))}${limitBlock("5 hours", lim.short, st, accountTrajectory(a.id, false))}${planBlock(a)}`, "div", `class="limits"`)}
       <div class="activity">
         <div class="head"><div class="t"><b>Allowance left</b>${region("ac|end", aend, "div", `style="display:contents"`)}</div>${seg([{ id: "week", label: "Week" }, { id: "5h", label: "5 hours" }], long ? "week" : "5h", "data-ac-window", "bare")}</div>
         ${allowance.html}
