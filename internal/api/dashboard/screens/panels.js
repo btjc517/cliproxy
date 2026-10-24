@@ -7,7 +7,7 @@ import {
   costKnown, providerTitle, perfCurrent, dataCurrent, scopeParam,
 } from "../core.js";
 import { accountColor } from "./common.js";
-import { allowanceSeries, trajectory, projectedAt, projectionPoints, resetsUntil, readingAt, deadZones, accountLabels } from "./burn.js";
+import { allowanceSeries, accountTrajectory, projectedAt, projectionPoints, resetsUntil, readingAt, deadZones, accountLabels } from "./burn.js";
 import { model as availModel, available } from "./timeline.js";
 import { EMPTY, addC, usageData, displayBuckets, usageSum, bucketAt, bucketsIn, perfScope, perfCounts, perfAt, historyBefore, spanData, perfFigures, usageFigures, loadRangeData } from "./series.js";
 import { HOUR, DAY, fracOf, plotWidth, addDays, midnight, timeTicks, endText, spanLabel, dateText, dayText } from "./timeaxis.js";
@@ -346,7 +346,7 @@ export function allowanceLines(ids, long, now) {
   return ids.map((id) => {
     const ser = allowanceSeries(id, long);
     if (!ser) return null;
-    const tr = trajectory(ser, now);
+    const tr = accountTrajectory(id, long, now);
     return { id, ser, tr, period: (Number(ser.window_seconds) || 0) * 1000, color: accountColor(id), label: nm[id] || id };
   }).filter(Boolean);
 }
@@ -531,6 +531,8 @@ function allowancePanel(ctx, o) {
       figure = `${used.length} of ${ls.length}`;
       qual = provs.length === 1 ? `${providerTitle(provs[0])} used up` : "used up";
     } else { figure = `${ls.length} of ${ls.length}`; qual = "have allowance"; }
+    const weeklyBlocked = ls.filter((l) => l.tr.blockedByWeek).length;
+    if (weeklyBlocked) qual += ` · ${weeklyBlocked} at weekly limit`;
   }
   const probe = (t, el, hovered) => {
     const vals = ls.map((l) => ({ l, val: leftAt(l, t, now) })).filter((x) => x.val != null);
@@ -541,7 +543,7 @@ function allowancePanel(ctx, o) {
       // One chip per account with allowance left, beside its own line.
       chips: vals.filter((x) => x.val > 0).map((x) => ({ text: x.val < 1 ? "<1%" : Math.round(x.val) + "%", y: x.val / 100, color: x.l.color })),
       dots: vals.map((x) => ({ y: x.val / 100, color: x.l.color })),
-      card: hovered ? card({ title: instant(t, now), warn, rows: vals.map((x) => ({ k: x.l.label, v: Math.round(x.val) + "% left", color: x.l.color })) }) : "",
+      card: hovered ? card({ title: instant(t, now), warn, rows: vals.map((x) => ({ k: x.l.label, v: x.l.tr.blockedByWeek && t >= now ? "Weekly limit used up" : Math.round(x.val) + "% left", color: x.l.color })) }) : "",
       cardTop: 32,
     };
   };
