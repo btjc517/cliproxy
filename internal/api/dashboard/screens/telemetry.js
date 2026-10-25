@@ -120,7 +120,7 @@ export const COLUMNS = {
 };
 const SEL_COLS = { leftAt: { w: 120 }, usedIn: { label: "Used in range", w: 140 }, resetsIn: { label: "Resets in range", w: 510 } };
 
-const cell = (w, html, r = false, cls = "") => `<div class="c ${r ? "r" : ""} ${cls}" style="width:${w}px">${html}</div>`;
+const cell = (w, html, r = false, cls = "", label = "") => `<div class="c ${r ? "r" : ""} ${cls}" style="width:${w}px"${label ? ` data-label="${esc(label)}"` : ""}>${html}</div>`;
 const meter = (pct, color, cls = "") => `<span class="pctcell"><span class="meter ${cls}"><i style="width:${Math.max(0, Math.min(100, pct))}%;background:${color}"></i></span><span class="${pct ? "" : "muted"}">${Math.round(pct)}%</span></span>`;
 const reuseCell = (x) => { const r = cacheReuse(x); return r == null ? `<span class="muted">–</span>` : `<span class="pctcell"><span class="meter reuse"><i style="width:${Math.round(r)}%"></i></span><span class="muted">${Math.round(r)}%</span></span>`; };
 const perSec = (x) => (x ? (x < 10 ? x.toFixed(1) : String(Math.round(x))) + " tokens/s" : "–");
@@ -181,6 +181,7 @@ export function tableHtml(view, ctx) {
   const perfMode = cols.some((c) => PERF_COLS.includes(c) && c !== "requests");
   const perfCols = perfMode ? cols.filter((c) => PERF_COLS.includes(c)) : [];
   const usageCols = cols.filter((c) => USAGE_COLS.includes(c) && !perfCols.includes(c));
+  const compact = hasAllow && !usageCols.length && !perfCols.length;
   const acctW = hasAllow ? 380 : perfCols.length ? 412 : 292;
   // Allowance columns become the selection's columns while a range is set.
   const shownCols = [];
@@ -214,7 +215,7 @@ export function tableHtml(view, ctx) {
       if (used.has(g)) { out += cell(c.w, dash, c.r, c.cls); i++; continue; }
       let w = 0, j = i;
       while (j < shownCols.length && groupOf(shownCols[j]) === g) w += shownCols[j++].w;
-      out += `<div class="c" style="width:${w}px"><span class="span2">${msg}</span></div>`;
+      out += `<div class="c span-cells" style="width:${w}px;grid-column:span ${j - i}"><span class="span2">${msg}</span></div>`;
       used.add(g);
       i = j;
     }
@@ -222,20 +223,21 @@ export function tableHtml(view, ctx) {
   };
 
   const allowCell = (l, c) => {
-    if (!l) return cell(c.w, dash);
-    if (c.id === "shortLeft") return cell(c.w, meter(l.tr.leftNow, l.color));
-    if (c.id === "shortReset") return cell(c.w, l.tr.blockedByWeek ? `<span class="muted">Weekly limit used up</span>` : l.tr.reset > now ? esc(fullTime(l.tr.reset)) : dash);
-    if (c.id === "weekLeft") return cell(c.w, meter(l.tr.usedUp ? 0 : l.tr.leftNow, l.color));
-    if (c.id === "perDay") return cell(c.w, l.tr.rate == null ? dash : esc(pctRate(l.tr.rate * 24)));
-    if (c.id === "heading") return cell(c.w, headingFor(l, now));
-    if (c.id === "nextReset") return cell(c.w, l.tr.reset > now ? esc(fullTime(l.tr.reset)) : dash);
-    if (c.id === "leftAt") { const v = leftAt(l, r.end, now); return cell(c.w, v == null ? dash : meter(v, l.color)); }
-    if (c.id === "usedIn") { const u = allowanceRange(l.ser, l.tr, now, r.start, r.end); return cell(c.w, u?.used == null ? dash : Math.round(u.used) + "%"); }
+    const field = (html) => cell(c.w, html, c.r, c.cls, c.label);
+    if (!l) return field(dash);
+    if (c.id === "shortLeft") return field(meter(l.tr.leftNow, l.color));
+    if (c.id === "shortReset") return field(l.tr.blockedByWeek ? `<span class="muted">Weekly limit used up</span>` : l.tr.reset > now ? esc(fullTime(l.tr.reset)) : dash);
+    if (c.id === "weekLeft") return field(meter(l.tr.usedUp ? 0 : l.tr.leftNow, l.color));
+    if (c.id === "perDay") return field(l.tr.rate == null ? dash : esc(pctRate(l.tr.rate * 24)));
+    if (c.id === "heading") return field(headingFor(l, now));
+    if (c.id === "nextReset") return field(l.tr.reset > now ? esc(fullTime(l.tr.reset)) : dash);
+    if (c.id === "leftAt") { const v = leftAt(l, r.end, now); return field(v == null ? dash : meter(v, l.color)); }
+    if (c.id === "usedIn") { const u = allowanceRange(l.ser, l.tr, now, r.start, r.end); return field(u?.used == null ? dash : Math.round(u.used) + "%"); }
     const list = resetsUntil(l.tr, now, r.end, l.period).filter((t) => t >= r.start);
     // The first few by name, then a count: a long selection holds thousands
     // of five-hour resets, too many to format or read in one cell.
     const named = list.slice(0, 3).map((t) => resetName(t, now)).join(", ") + (list.length > 3 ? `, ${list.length - 3} more` : "");
-    return cell(c.w, list.length ? esc(named) : `<span class="muted">None</span>`);
+    return field(list.length ? esc(named) : `<span class="muted">None</span>`);
   };
   const usageCell = (c, x) => {
     if (!x) return cell(c.w, dash, c.r, c.cls);
@@ -289,7 +291,9 @@ export function tableHtml(view, ctx) {
     }
   }
   if (!sc.shown.length) rows.push(`<div class="empty">No accounts picked.</div>`);
-  return `<div class="ttbl" role="table">${head}${rows.join("")}</div>`;
+  const weights = { weekLeft: .85, shortLeft: .85, shortReset: 1.2, perDay: .75, heading: 2, nextReset: 1.2, leftAt: 1, usedIn: 1, resetsIn: 3 };
+  const grid = compact ? ` style="--table-columns:minmax(0,2.4fr) ${shownCols.map((c) => `minmax(0,${weights[c.id] || 1}fr)`).join(" ")}"` : "";
+  return `<div class="ttbl${compact ? " compact" : ""}" role="table"${grid}>${head}${rows.join("")}</div>`;
 }
 
 // ---------- the page ----------
