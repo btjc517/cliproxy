@@ -928,6 +928,28 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .ttbl .span2 { color: var(--muted-fg); }
 .ttbl .two { display: flex; flex-direction: column; gap: 2px; line-height: 16px; }
 .ttbl .two .muted { font-size: 12px; }
+
+/* Allowance columns share the available width instead of forcing a wide row. */
+.ttbl.compact { container-type: inline-size; overflow-x: visible; }
+.ttbl.compact .tr { display: grid; grid-template-columns: var(--table-columns); gap: 8px; min-width: 0; width: 100%; height: auto; min-height: 48px; padding: 8px 16px; }
+.ttbl.compact .tr.head { min-height: 32px; padding-block: 6px; }
+.ttbl.compact .tr .c { width: auto !important; min-width: 0 !important; overflow-wrap: anywhere; }
+.ttbl.compact .tr .c.acct { gap: 8px; }
+.ttbl.compact .email { white-space: normal; overflow: visible; text-overflow: clip; }
+.ttbl.compact .email b, .ttbl.compact .email span { display: block; }
+.ttbl.compact .state, .ttbl.compact .state .clamp { white-space: normal; overflow: visible; text-overflow: clip; }
+.ttbl.compact .state { align-items: flex-start; }
+.ttbl.compact .state svg { flex-shrink: 0; margin-top: 1px; }
+.ttbl.compact .pctcell { width: 100%; gap: 6px; }
+.ttbl.compact .pctcell > span:last-child { flex-shrink: 0; }
+.ttbl.compact .meter { width: 44px; min-width: 12px; flex: 0 1 44px; }
+@container (max-width: 720px) {
+  .ttbl.compact .tr { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px 16px; padding-block: 12px; border-bottom: 1px solid var(--hairline); }
+  .ttbl.compact .tr.head { display: none; }
+  .ttbl.compact .tr .c.acct, .ttbl.compact .tr .span-cells { grid-column: 1 / -1 !important; }
+  .ttbl.compact .c[data-label] { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+  .ttbl.compact .c[data-label]::before { content: attr(data-label); font-size: 12px; color: var(--muted-fg); }
+}
 .readrow { padding: 16px 24px 20px; font-size: 12px; color: var(--muted-fg); }
 
 /* Display menu, view menu and the new view dialog */
