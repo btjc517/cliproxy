@@ -7,7 +7,7 @@ import { DAY } from "./timeaxis.js";
 
 export const PANEL_TYPES = ["allowance", "available", "tokens", "cost", "requests", "output", "cache", "ttft", "latency", "throughput", "failures", "activity"];
 export const COLUMN_IDS = [
-  "weekLeft", "perDay", "heading", "nextReset",
+  "weekLeft", "shortLeft", "shortReset", "perDay", "heading", "nextReset",
   "tokens", "requests", "input", "cacheWrite", "cacheRead", "output", "cost", "cacheReuse",
   "ttft50", "ttft90", "throughput", "failures", "failovers",
 ];
@@ -19,7 +19,7 @@ export const BUILTINS = [
   {
     id: "allowance", name: "Allowance", window: "around_now", accounts: null, builtin: true,
     panels: [{ type: "allowance", options: { window: "week" } }, { type: "available", options: {} }, { type: "tokens", options: { format: "lines" } }],
-    columns: ["weekLeft", "perDay", "heading", "nextReset"],
+    columns: ["weekLeft", "shortLeft", "shortReset", "perDay", "heading", "nextReset"],
   },
   {
     id: "usage", name: "Usage", window: "last7d", accounts: null, builtin: true,

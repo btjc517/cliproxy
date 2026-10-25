@@ -3,7 +3,7 @@
 // range selection; the table under them sums the same buckets per account.
 import {
   S, esc, fmt, int, ms, money, clock, day, icon, logo, tokens, cacheReuse, apiCost,
-  providerTitle, accountScope, setAccountSelection, warnState,
+  providerTitle, accountScope, setAccountSelection, warnState, status,
 } from "../core.js";
 import { accountColor, readAt } from "./common.js";
 import { accountPicker, bindAccountPicker } from "./account-picker.js";
@@ -92,16 +92,18 @@ const showsPercentiles = (v) => v.panels.some((p) => PCT_PANELS.includes(p.type)
 // ---------- the table ----------
 
 const resetName = (t, now) => (t - now < 6 * DAY ? `${day(t).split(" ")[0]} ${clock(t)}` : `${dayText(t, now)} ${clock(t)}`);
-const ALLOWANCE_COLS = ["weekLeft", "perDay", "heading", "nextReset"];
+const ALLOWANCE_COLS = ["weekLeft", "shortLeft", "shortReset", "perDay", "heading", "nextReset"];
 const USAGE_COLS = ["tokens", "requests", "input", "cacheWrite", "cacheRead", "output", "cost", "cacheReuse"];
 const PERF_COLS = ["requests", "ttft50", "ttft90", "throughput", "failures", "failovers"];
 
 // Column labels and widths from the Paper boards. r: right-aligned.
 export const COLUMNS = {
   weekLeft: { label: "Week left", w: 120 },
+  shortLeft: { label: "5h left", w: 120 },
+  shortReset: { label: "5h resets", w: 190 },
   perDay: { label: "Use per day", w: 140 },
   heading: { label: "Heading for", w: 270 },
-  nextReset: { label: "Next reset", w: 240 },
+  nextReset: { label: "Week resets", w: 240 },
   tokens: { label: "Tokens", w: 100, r: true },
   requests: { label: "Requests", w: 90, r: true },
   input: { label: "New input", w: 104, r: true },
@@ -148,6 +150,23 @@ function acctCell(a, w) {
   return `<div class="c acct" style="min-width:${w}px"><span class="lead"><i class="sq" style="background:${accountColor(a.id)}"></i>${logo(a.provider)}</span><span class="email clamp">${name}</span></div>`;
 }
 
+// Usable, measured allowance first. Unknown readings are not an empty meter.
+// Use a stable tie-break so the server's account order cannot shuffle rows.
+export function allowanceOrder(shown, weeks, shorts) {
+  const rank = (a) => {
+    const w = weeks.get(a.id)?.tr, s = shorts.get(a.id)?.tr;
+    const st = status(a).kind;
+    if (["off", "blocked", "error"].includes(st)) return 4;
+    if (w?.usedUp || s?.blockedByWeek) return 3;
+    if (s?.usedUp || st === "limited" || st === "usedup") return 2;
+    return w?.leftNow > 0 || s?.leftNow > 0 ? 0 : 1;
+  };
+  return [...shown].sort((a, b) => rank(a) - rank(b)
+    || (weeks.get(b.id)?.tr.leftNow ?? -1) - (weeks.get(a.id)?.tr.leftNow ?? -1)
+    || (shorts.get(b.id)?.tr.leftNow ?? -1) - (shorts.get(a.id)?.tr.leftNow ?? -1)
+    || a.id.localeCompare(b.id));
+}
+
 // The table for the view's columns: one row per picked account, with an All
 // accounts row under usage columns and the local logs before per-account data.
 export function tableHtml(view, ctx) {
@@ -176,6 +195,7 @@ export function tableHtml(view, ctx) {
   const sd = ctx.span;
   const sums = usageFigures(sd, sc.ids, now);
   const lines = new Map(allowanceLines(sc.ids, true, now).map((l) => [l.id, l]));
+  const shorts = new Map(allowanceLines(sc.ids, false, now).map((l) => [l.id, l]));
   const deadNow = availability(sc.ids, { start: now - 1, end: now + 30 * DAY }, now).filter((p) => p.at(now) === 0)
     .map((p) => { const back = p.segs.find((s) => s.from > now && s.n > 0)?.from; return [p.provider, `no ${providerTitle(p.provider)} allowance${back ? " until " + resetName(back, now) : ""}`]; });
   const deadText = new Map(deadNow);
@@ -202,6 +222,9 @@ export function tableHtml(view, ctx) {
   };
 
   const allowCell = (l, c) => {
+    if (!l) return cell(c.w, dash);
+    if (c.id === "shortLeft") return cell(c.w, meter(l.tr.leftNow, l.color));
+    if (c.id === "shortReset") return cell(c.w, l.tr.blockedByWeek ? `<span class="muted">Weekly limit used up</span>` : l.tr.reset > now ? esc(fullTime(l.tr.reset)) : dash);
     if (c.id === "weekLeft") return cell(c.w, meter(l.tr.usedUp ? 0 : l.tr.leftNow, l.color));
     if (c.id === "perDay") return cell(c.w, l.tr.rate == null ? dash : esc(pctRate(l.tr.rate * 24)));
     if (c.id === "heading") return cell(c.w, headingFor(l, now));
@@ -238,13 +261,15 @@ export function tableHtml(view, ctx) {
   };
   const perfCell = (c, vals) => cell(c.w, vals ? esc(vals[c.id]) : dash, c.r, c.cls);
 
-  const rows = sc.shown.map((a) => {
+  const ordered = hasAllow ? allowanceOrder(sc.shown, lines, shorts) : sc.shown;
+  const rows = ordered.map((a) => {
     const l = hasAllow ? lines.get(a.id) : null;
+    const short = hasAllow ? shorts.get(a.id) : null;
     const pv = perfCols.length ? perfVals({ some: false, prov: a.id, ids: [a.id] }) : null;
     const msgs = {};
-    if (hasAllow && !l) msgs.allow = "No allowance reading yet";
+    if (hasAllow && !l && !short) msgs.allow = "No allowance reading yet";
     if (pv?.none) { const extra = deadText.get(a.provider); msgs.perf = `No requests${extra ? ", " + esc(extra) : ""}`; }
-    const html = cellsFor(msgs, (c, g) => (g === "allow" ? allowCell(l, c) : g === "perf" ? perfCell(c, pv) : usageCell(c, sums?.per[a.id])));
+    const html = cellsFor(msgs, (c, g) => (g === "allow" ? allowCell(c.id === "shortLeft" || c.id === "shortReset" ? short : l, c) : g === "perf" ? perfCell(c, pv) : usageCell(c, sums?.per[a.id])));
     return `<div class="tr row" data-row-acct="${esc(a.id)}">${acctCell(a, acctW)}${html}</div>`;
   });
   // An All accounts row under usage and performance columns, never under allowance.
