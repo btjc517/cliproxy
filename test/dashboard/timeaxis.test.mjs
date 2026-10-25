@@ -16,6 +16,13 @@ const now = Date.parse('2026-10-08T14:00:00Z');
 const week = { start: now - 7 * DAY, end: now };
 const hours = { bounds: Array.from({ length: 24 * 8 }, (_, i) => week.start + i * HOUR) };
 
+test('selection endpoint labels stay inside the plot and separate when they collide', () => {
+  assert.deepEqual(axis.placeRangeLabels(0, 600, [100, 100], 600), { left: [0, 500], stacked: false });
+  assert.deepEqual(axis.placeRangeLabels(290, 310, [100, 100], 600), { left: [240, 260], stacked: true });
+  assert.deepEqual(axis.placeRangeLabels(-100, 800, [100, 100], 600), { left: [0, 500], stacked: false });
+  assert.equal(axis.placeRangeLabels(0, 60, [90, 90], 120).stacked, true);
+});
+
 test('zoom keeps the time under the pointer where it was', () => {
   for (const anchor of [0, 0.3, 0.5, 0.9, 1]) {
     const z = zoomWindow(week, 0.5, anchor);

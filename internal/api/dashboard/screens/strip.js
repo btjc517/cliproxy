@@ -83,6 +83,7 @@ export function timeStrip({ key, sc }) {
       defaultWindow: ts.defaultWindow,
       setWindow: ts.setWindow,
       setRange: ts.setRange,
+      selection: () => built.selection || "",
       probe: (t, el, hovered) => built.probe?.(t, el, hovered) || null,
     });
     loadSelection(ctx);

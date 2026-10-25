@@ -353,6 +353,10 @@ export function view(ctx) {
         defaultWindow: ts.defaultWindow,
         setWindow: ts.setWindow,
         setRange: ts.setRange,
+        selection(el) {
+          const i = v.panels.findIndex((p) => p.type === el.dataset.panel);
+          return i >= 0 ? built[i].selection || "" : "";
+        },
         probe(t, el, hovered) {
           const i = v.panels.findIndex((p) => p.type === el.dataset.panel);
           return i >= 0 ? built[i].probe?.(t, el, hovered) || null : null;

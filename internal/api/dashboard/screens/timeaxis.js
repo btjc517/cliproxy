@@ -253,6 +253,13 @@ export function rangeText(r) {
   return `${spanLabel(r.start, r.end, { timed: !(len >= DAY && whole(r.start) && whole(r.end)) })}, ${spanText(len)}`;
 }
 
+// Keep both endpoint labels inside the plot. A short selection gets two
+// rows rather than overlapping dates or shortened, ambiguous times.
+export function placeRangeLabels(a, b, widths, width) {
+  const left = [a, b].map((x, i) => clamp(x - widths[i] / 2, 0, Math.max(0, width - widths[i])));
+  return { left, stacked: left[0] + widths[0] + 8 > left[1] };
+}
+
 // ---------- shared plot geometry ----------
 
 // Every plot leaves the same gutters, so time lines up across stacked panels.
@@ -346,6 +353,7 @@ const hintDone = () => { if (!prefs().zoomHintDone) setPref("zoomHintDone", true
 //   setWindow     (window) => void, stores it and redraws
 //   setRange      (range or null) => void, stores it and redraws
 //   probe         (t, plotEl) => {chip, dots: [{y, color}], card, chipTop} or null, per plot;
+//   selection     (plotEl) => card HTML for the committed range
 //                 chips: [{text, y, color}] in place of chip puts one chip
 //                 beside each line, at its height
 // }
@@ -448,6 +456,7 @@ export function bindTime(root, group) {
   }
   let win = group.window, range = group.range ? { ...group.range } : null;
   let held = false, hoverPlot = null, drag = null;
+  let summaryPlot = group.range && group.selection ? plots[0] : null, summary = null;
   // Where the mouse last hovered a plot, so a redraw can show the hover
   // again from the new data without waiting for the pointer to move.
   let pointerAt = null;
@@ -468,13 +477,24 @@ export function bindTime(root, group) {
     p.appendChild(o);
     return o;
   });
+  const labels = plots.map((p) => {
+    const el = document.createElement("div");
+    el.className = "trange-times";
+    el.innerHTML = '<span data-bound="start"></span><span data-bound="end"></span>';
+    p.appendChild(el);
+    return el;
+  });
   const focusRange = overlays[0];
   focusRange.tabIndex = 0;
   focusRange.setAttribute("role", "slider");
   focusRange.dataset.focusKey = group.key + ":range";
   focusRange.classList.toggle("ptr", pointerFocus);
   const drawRange = (r) => {
-    for (const o of overlays) {
+    for (const [i, o] of overlays.entries()) {
+      const p = plots[i], rail = labels[i], frame = p.closest(".tp");
+      rail.hidden = !r || !frame;
+      frame?.classList.toggle("has-range", !!r);
+      frame?.classList.remove("range-stacked");
       if (!r) { o.hidden = true; continue; }
       const a = fracOf(win, r.start), b = fracOf(win, r.end);
       const l = clamp(a, -0.01, 1.01), w = clamp(b, -0.01, 1.01) - l;
@@ -483,10 +503,42 @@ export function bindTime(root, group) {
       o.style.width = (w * 100).toFixed(3) + "%";
       o.classList.toggle("cut-l", a < 0);
       o.classList.toggle("cut-r", b > 1);
+      const ends = [...rail.children];
+      ends.forEach((el, k) => { el.textContent = `${dateText(k ? r.end : r.start)} ${clock(k ? r.end : r.start)}`; });
+      const layout = placeRangeLabels(a * p.clientWidth, b * p.clientWidth, ends.map((el) => el.offsetWidth), p.clientWidth);
+      ends.forEach((el, k) => { el.style.left = layout.left[k] + "px"; el.style.top = k && layout.stacked ? "22px" : "0px"; });
+      frame?.classList.toggle("range-stacked", layout.stacked);
     }
     if (r) focusRange.setAttribute("aria-label", "Selection, " + rangeText(r) + ". Arrow keys move it, Shift with arrows resizes it, Escape clears it.");
   };
   drawRange(range);
+
+  const clearSummary = () => { summary?.remove(); summary = null; };
+  const showSummary = () => {
+    clearSummary();
+    if (!range || !summaryPlot || !group.selection || drag) return;
+    const html = group.selection(summaryPlot);
+    if (!html) return;
+    const p = summaryPlot;
+    summary = document.createElement("div");
+    summary.className = "tcard range-card";
+    summary.setAttribute("role", "status");
+    summary.setAttribute("aria-label", "Selected interval summary");
+    summary.innerHTML = `<button class="range-dismiss" aria-label="Dismiss selection summary">×</button>${html}`;
+    summary.querySelector("button").onclick = () => { summaryPlot = null; clearSummary(); };
+    p.appendChild(summary);
+    const w = p.clientWidth;
+    const ends = labels[plots.indexOf(p)].children;
+    const left = parseFloat(ends[0].style.left) - summary.offsetWidth - 12;
+    const right = parseFloat(ends[1].style.left) + ends[1].offsetWidth + 12;
+    const beside = right + summary.offsetWidth <= w || left >= 0;
+    summary.style.left = clamp(right + summary.offsetWidth <= w ? right : left, 0, Math.max(0, w - summary.offsetWidth)) + "px";
+    // If neither side has room, keep a tall card inside the drawing area
+    // so it cannot hide the endpoint labels below it.
+    if (!beside && p.clientHeight >= 120) summary.style.maxHeight = (p.clientHeight - 16) + "px";
+    summary.style.top = p.clientHeight < 120 ? (-summary.offsetHeight - 12) + "px" : "8px";
+  };
+  showSummary();
 
   // ----- crosshair -----
   let marks = [], hidden = [];
@@ -608,7 +660,7 @@ export function bindTime(root, group) {
     }, { passive: false });
 
     p.addEventListener("pointermove", (e) => {
-      if (drag || pointers.size) return;
+      if (drag || pointers.size || summaryPlot && range) return;
       if (e.pointerType === "touch") return;
       pointerAt = { plot: p, x: e.clientX };
       showHover(timeOf(p, e.clientX), p);
@@ -619,6 +671,7 @@ export function bindTime(root, group) {
       if (e.button !== 0) return;
       if (e.target.closest(".tx-chip, .tcard, a, button")) return;
       clearHover();
+      clearSummary();
       pointerFocus = true;
       for (const el of [...plots, focusRange]) el.classList.add("ptr");
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -710,13 +763,19 @@ export function bindTime(root, group) {
         if (cancelled && d.mode === "pan") commitWindow(d.window);
         return;
       }
-      if (cancelled) { range = group.range; drawRange(range); return; }
+      if (cancelled) { range = group.range; drawRange(range); showSummary(); return; }
       if (!d.moved) {
         // A click outside the selection clears it; a click inside keeps it.
         if (d.mode === "select" || d.mode === "touch") { if (range) { range = null; drawRange(null); group.setRange(null); } }
+        showSummary();
         return;
       }
-      if (d.mode === "select" || d.mode === "move" || d.mode === "resize") group.setRange(range);
+      if (d.mode === "select" || d.mode === "move" || d.mode === "resize") {
+        pointerAt = null;
+        summaryPlot = group.selection ? p : null;
+        group.setRange(range);
+        showSummary();
+      }
     };
     p.addEventListener("pointerup", release);
     p.addEventListener("pointercancel", release);
@@ -742,7 +801,7 @@ export function bindTime(root, group) {
       const dir = e.key === "ArrowLeft" ? -1 : 1;
       next = e.shiftKey ? resizeRange(range, "end", range.end + dir * step, group.grid).range : moveRange(range, dir * step, group.grid);
     } else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); range = null; drawRange(null); group.setRange(null); return; }
-    if (next) { e.preventDefault(); e.stopPropagation(); range = next; drawRange(range); group.setRange(range); }
+    if (next) { e.preventDefault(); e.stopPropagation(); clearHover(); range = next; summaryPlot = group.selection ? plots[0] : null; drawRange(range); group.setRange(range); showSummary(); }
   });
 
   // A redraw that keeps the plots hands the controller the screen's new
@@ -758,7 +817,9 @@ export function bindTime(root, group) {
       if (!frame) win = next.window;
       if (!drag) range = next.range ? { ...next.range } : null;
       drawRange(range);
-      if (hoverPlot && pointerAt && !drag && pointerAt.plot.isConnected) showHover(timeOf(pointerAt.plot, pointerAt.x), pointerAt.plot);
+      if (!range) summaryPlot = null;
+      showSummary();
+      if (!summaryPlot && hoverPlot && pointerAt && !drag && pointerAt.plot.isConnected) showHover(timeOf(pointerAt.plot, pointerAt.x), pointerAt.plot);
     },
   };
   return clearHover;
