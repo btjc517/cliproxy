@@ -7,10 +7,10 @@ import {
   costKnown, providerTitle, perfCurrent, dataCurrent, scopeParam,
 } from "../core.js";
 import { accountColor } from "./common.js";
-import { allowanceSeries, accountTrajectory, projectedAt, projectionPoints, resetsUntil, readingAt, deadZones, accountLabels } from "./burn.js";
+import { allowanceSeries, accountTrajectory, projectedAt, projectionPoints, resetsUntil, readingAt, deadZones, accountLabels, allowanceRange } from "./burn.js";
 import { model as availModel, available } from "./timeline.js";
 import { EMPTY, addC, usageData, displayBuckets, usageSum, bucketAt, bucketsIn, perfScope, perfCounts, perfAt, historyBefore, spanData, perfFigures, usageFigures, loadRangeData } from "./series.js";
-import { HOUR, DAY, fracOf, plotWidth, addDays, midnight, timeTicks, endText, spanLabel, dateText, dayText } from "./timeaxis.js";
+import { HOUR, DAY, fracOf, plotWidth, addDays, midnight, timeTicks, endText, spanLabel, dateText, dayText, rangeText } from "./timeaxis.js";
 import { plot, lines, dot, bars, band, card, legend, yTop } from "./tplot.js";
 import { region } from "../paint.js";
 
@@ -136,7 +136,41 @@ export function snapGrid(ctx) {
 // ctx: panelContext plus labels (this panel draws the time labels).
 export function buildPanel(type, options, ctx) {
   const f = BUILD[type];
-  return f ? f(ctx, options || {}) : { html: "" };
+  const built = f ? f(ctx, options || {}) : { html: "" };
+  if (ctx.range) built.selection = selectionCard(type, options, ctx, built);
+  return built;
+}
+
+// The committed interval uses the same readings and selection totals as
+// the table. It must never reuse the single bucket under the pointer.
+function selectionCard(type, options, ctx, built) {
+  const r = ctx.range, now = ctx.now;
+  const title = rangeText(r);
+  const forecast = r.end > now ? (r.start >= now ? "Forecast at the current rate." : "Includes a forecast after now.") : "Observed readings.";
+  if (type === "allowance") {
+    const long = opt(type, options, "window") === "week";
+    const ls = allowanceLines(ctx.sc.ids, long, now);
+    const pc = (n) => n == null ? "Unknown" : Math.round(n) + "%";
+    const rows = ls.map((l) => {
+      const used = allowanceRange(l.ser, l.tr, now, r.start, r.end);
+      const detail = l.tr.blockedByWeek && r.start >= now && (!l.tr.weeklyReset || r.end < l.tr.weeklyReset)
+        ? "Weekly limit used up"
+        : `${used?.used == null ? "Usage unknown" : Math.round(used.used) + "% used"} · ${used?.resets == null ? "resets unknown" : used.resets + (used.resets === 1 ? " reset" : " resets")}`;
+      return `<div class="range-account"><div class="r"><i style="background:${l.color}"></i><span class="k" title="${esc(l.label)}">${esc(l.label)}</span><span class="v">${pc(leftAt(l, r.start, now))} to ${pc(leftAt(l, r.end, now))}</span></div><div class="f">${esc(detail)}</div></div>`;
+    }).join("");
+    const missing = ctx.sc.ids.length - ls.length;
+    return card({ title, foot: `${long ? "Weekly" : "5-hour"} allowance left, start to end. ${forecast}` }) + rows + (missing ? `<div class="f">${missing} ${missing === 1 ? "account has" : "accounts have"} no allowance readings.</div>` : "");
+  }
+  if (type === "available") {
+    const rows = availability(ctx.sc.ids, r, now, r.end).map((p) => {
+      const counts = p.segs.map((s) => s.n);
+      counts.push(p.at(r.start), p.at(r.end));
+      const min = Math.min(...counts), max = Math.max(...counts);
+      return { k: providerTitle(p.provider), v: `${min === max ? min : min + " to " + max} of ${p.total} available`, lead: `<span class="lg">${logo(p.provider)}</span>` };
+    });
+    return card({ title, rows, foot: `Availability across the interval. ${forecast}` });
+  }
+  return card({ title, rows: [{ k: PANELS[type]?.title || "Selection", v: built.figure && built.figure !== "–" ? built.figure : "No reading yet" }], foot: built.qual || "For the selected interval." });
 }
 
 const BUILD = {

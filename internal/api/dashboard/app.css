@@ -844,6 +844,19 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 .trange-h { position: absolute; top: 0; bottom: 0; width: 8px; left: -4.5px; cursor: ew-resize; pointer-events: auto; touch-action: none; }
 .trange-h[data-edge="end"] { left: auto; right: -4.5px; }
 .trange-h b { position: absolute; top: 50%; left: 1px; width: 6px; height: 20px; margin-top: -10px; border: 1px solid var(--brand); border-radius: 3px; background: var(--panel); }
+.tp.has-range { margin-bottom: 28px; }
+.tp.has-range .tp-x { transform: translateY(28px); }
+.tp.range-stacked { margin-bottom: 50px; }
+.tp.range-stacked .tp-x { transform: translateY(50px); }
+.trange-times { position: absolute; top: calc(100% + 6px); left: 0; right: 0; height: 22px; pointer-events: none; z-index: 6; font-size: 11px; font-variant-numeric: tabular-nums; }
+.trange-times[hidden] { display: none; }
+.trange-times > span { position: absolute; padding: 2px 5px; border-radius: 4px; background: var(--brand-tint); color: var(--fg); white-space: nowrap; }
+.range-card { width: 330px; max-width: 100%; max-height: 360px; overflow: auto; pointer-events: auto; }
+.range-card .h { padding-right: 18px; }
+.range-card .range-account .f { padding: 2px 0 0 16px; }
+.range-card .range-account + .range-account { border-top: 1px solid var(--hairline); padding-top: 6px; }
+.range-dismiss { position: absolute; top: 5px; right: 5px; width: 24px; height: 24px; color: var(--muted-fg); font-size: 18px; border-radius: 4px; }
+.range-dismiss:hover { background: var(--surface-2); color: var(--fg); }
 .zoomhint { position: absolute; right: 8px; bottom: 8px; height: 24px; padding: 0 10px; border-radius: 999px; background: var(--surface-2); color: var(--muted-fg); font-size: 12px; line-height: 24px; white-space: nowrap; pointer-events: none; z-index: 1; }
 .backnow, .dispbtn { height: 24px; display: inline-flex; align-items: center; gap: 4px; padding: 0 6px; border-radius: 6px; font-size: 12px; white-space: nowrap; flex-shrink: 0; }
 .backnow:hover, .dispbtn:hover, .dispbtn.open { background: var(--surface-3); }

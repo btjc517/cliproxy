@@ -114,6 +114,7 @@ export function view(ctx) {
       bindTime(root.querySelector(".activity"), {
         key: ats.key, window: ats.window, range: ats.range, grid: snapGrid(actx), future: true,
         defaultWindow: ats.defaultWindow, setWindow: ats.setWindow, setRange: ats.setRange,
+        selection: () => allowance.selection || "",
         probe: (t, el, hovered) => allowance.probe(t, el, hovered),
       });
       const clear = root.querySelector("[data-ac-clear]");

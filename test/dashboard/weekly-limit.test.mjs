@@ -31,6 +31,20 @@ test('five-hour resets stay visible when weekly allowance remains', () => {
   assert.deepEqual(tr, trajectory(short, now));
   assert.deepEqual(resetsUntil(tr, now, now + 7 * HOUR, 5 * HOUR), [now + HOUR, now + 6 * HOUR]);
 });
+
+test('interval summaries distinguish a weekly block, forecasts and missing readings', () => {
+  setup();
+  const ctx = { window: { start: now - HOUR, end: now + 8 * HOUR }, now,
+    sc: { ids: ['a', 'missing'] }, ticks: [], group: 'test', range: { start: now, end: now + 2 * HOUR } };
+  const panel = buildPanel('allowance', { window: '5h' }, ctx);
+  assert.match(panel.selection, /Weekly limit used up/);
+  assert.match(panel.selection, /Forecast at the current rate/);
+  assert.match(panel.selection, /0% to 0%/);
+  assert.match(panel.selection, /1 account has no allowance readings/);
+  const unknown = buildPanel('allowance', { window: '5h' }, { ...ctx, range: { start: now, end: now + 50 * HOUR } });
+  assert.match(unknown.selection, /Usage unknown/);
+  assert.match(unknown.selection, /Unknown/);
+});
 test('weekly charts are unchanged and a passed weekly reset no longer blocks the short chart', () => {
   const { week } = setup();
   assert.deepEqual(accountTrajectory('a', true, now), trajectory(week, now));
