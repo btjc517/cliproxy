@@ -1024,7 +1024,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		return s.fallback.Pick(ctx, provider, model, opts, defaultRoutingState.withModelAllowance(fallbackAuths, model, now))
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
@@ -1033,7 +1033,22 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	// New and moved sessions skip a credential that has used up an allowance only
+	// this model's family draws on (the weekly Fable allowance).
+	fallbackAuths := defaultRoutingState.withModelAllowance(highestPriorityAuths(available), model, now)
+	// allowanceLeft reports whether a bound credential should keep the session:
+	// it still has the model's own allowance, or no other credential does.
+	allowanceLeft := func(auth *Auth) bool {
+		if _, spent := defaultRoutingState.modelAllowanceSpent(auth.ID, auth.Provider, model, now); !spent {
+			return true
+		}
+		for _, other := range fallbackAuths {
+			if other.ID == auth.ID {
+				return true
+			}
+		}
+		return false
+	}
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1057,8 +1072,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
+		reason := "auth unavailable"
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				if !allowanceLeft(auth) {
+					reason = "auth out of its allowance for this model"
+					break
+				}
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
@@ -1073,7 +1093,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, nil
 		}
 		bind(auth.ID)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		entry.Infof("session-affinity: cache hit but %s, reselected | session=%s from=%s auth=%s provider=%s model=%s", reason, truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
 		return auth, nil
 	}
 
@@ -1081,7 +1101,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
-					if !isSubagent || s.subagentAffinity {
+					if (!isSubagent || s.subagentAffinity) && allowanceLeft(auth) {
 						bind(auth.ID)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)

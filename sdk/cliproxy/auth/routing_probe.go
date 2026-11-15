@@ -24,21 +24,44 @@ func ParseClaudeUsageMeters(body []byte, now time.Time) map[string]*Meter {
 		return nil
 	}
 	meters := make(map[string]*Meter)
+	add := func(claim string, percent float64, resetsAt string) {
+		meter := &Meter{Name: claim, Window: claudeClaimWindow(claim), Utilization: percent / 100, ObservedAt: now, Status: "allowed"}
+		if meter.Utilization >= 1 {
+			meter.Status = "rejected"
+		}
+		if resetAt, errParse := time.Parse(time.RFC3339Nano, strings.TrimSpace(resetsAt)); errParse == nil {
+			meter.ResetAt = resetAt
+		}
+		meters[claim] = meter
+	}
 	for field, claim := range claudeUsageClaims {
 		window := root.Get(field)
 		used := window.Get("utilization")
 		if !window.IsObject() || used.Type != gjson.Number {
 			continue
 		}
-		meter := &Meter{Name: claim, Window: claudeClaimWindow(claim), Utilization: used.Float() / 100, ObservedAt: now, Status: "allowed"}
-		if meter.Utilization >= 1 {
-			meter.Status = "rejected"
-		}
-		if resetAt, errParse := time.Parse(time.RFC3339Nano, strings.TrimSpace(window.Get("resets_at").String())); errParse == nil {
-			meter.ResetAt = resetAt
-		}
-		meters[claim] = meter
+		add(claim, used.Float(), window.Get("resets_at").String())
 	}
+	// Allowances kept for one model, such as the weekly Fable allowance, come
+	// as rows of kind "weekly_scoped" that name the model.
+	rows := root.Get("limits")
+	if rows.IsObject() {
+		rows = rows.Get("limits")
+	}
+	rows.ForEach(func(_, row gjson.Result) bool {
+		used := row.Get("percent")
+		if row.Get("kind").String() != "weekly_scoped" || used.Type != gjson.Number {
+			return true
+		}
+		switch family := claudeModelFamily(row.Get("scope.model.display_name").String()); family {
+		case "":
+		case "fable":
+			add(claudeFableClaim, used.Float(), row.Get("resets_at").String())
+		default:
+			add("7d_"+family, used.Float(), row.Get("resets_at").String())
+		}
+		return true
+	})
 	return meters
 }
 
@@ -59,11 +82,16 @@ func (s *RoutingState) ObserveMeters(authID, provider string, meters map[string]
 		account.Provider = provider
 	}
 	mergeMeters(account, meters, "", now)
+	// A usage report carries the Fable allowance whenever the account has one.
+	account.fableProbeAt = now
 	s.dirty = true
 }
 
-// NeedsMeterReading reports whether an account has no 5h or weekly reading
-// newer than maxAge, so a probe should read its usage.
+// NeedsMeterReading reports whether a probe should read an account's usage:
+// it has no 5h or weekly reading newer than maxAge, or no Fable reading that
+// new. Responses keep the 5h and weekly meters of a busy account fresh, but
+// only a Fable response carries the Fable allowance, so an account serving
+// other models is read once per maxAge to keep its Fable meter known.
 func (s *RoutingState) NeedsMeterReading(authID string, now time.Time, maxAge time.Duration) bool {
 	if s == nil {
 		return false
@@ -74,10 +102,21 @@ func (s *RoutingState) NeedsMeterReading(authID string, now time.Time, maxAge ti
 	if account == nil {
 		return true
 	}
+	fresh := false
 	for _, name := range []string{"5h", "7d"} {
 		if meter := account.Meters[name]; meter != nil && now.Sub(meter.ObservedAt) < maxAge {
-			return false
+			fresh = true
 		}
 	}
+	if !fresh {
+		return true
+	}
+	if meter := account.Meters[claudeFableClaim]; meter != nil && now.Sub(meter.ObservedAt) < maxAge {
+		return false
+	}
+	if !account.fableProbeAt.IsZero() && now.Sub(account.fableProbeAt) < maxAge {
+		return false
+	}
+	account.fableProbeAt = now
 	return true
 }

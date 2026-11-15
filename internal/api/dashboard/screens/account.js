@@ -94,7 +94,7 @@ export function view(ctx) {
     </div>
     <div class="body">
       ${stateLine}
-      ${region("ac|limits", `${limitBlock("Week", lim.week, st, trajectory(allowanceSeries(a.id, true)))}${limitBlock("5 hours", lim.short, st, accountTrajectory(a.id, false))}${planBlock(a)}`, "div", `class="limits"`)}
+      ${region("ac|limits", `${limitBlock("Week", lim.week, st, trajectory(allowanceSeries(a.id, true)))}${limitBlock("5 hours", lim.short, st, accountTrajectory(a.id, false))}${lim.extra.map((m) => limitBlock(esc(m.title), m, st, null)).join("")}${planBlock(a)}`, "div", `class="limits"`)}
       <div class="activity">
         <div class="head"><div class="t"><b>Allowance left</b>${region("ac|end", aend, "div", `style="display:contents"`)}</div>${seg([{ id: "week", label: "Week" }, { id: "5h", label: "5 hours" }], long ? "week" : "5h", "data-ac-window", "bare")}</div>
         ${allowance.html}

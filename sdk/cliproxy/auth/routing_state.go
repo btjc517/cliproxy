@@ -47,6 +47,9 @@ type accountRouting struct {
 	History  map[string][]MeterSample `json:"history,omitempty"`
 	Facts    AccountFacts             `json:"facts"`
 	Health   AccountHealth            `json:"health"`
+	// fableProbeAt is when a usage probe was last asked for to learn the Fable
+	// allowance of an account whose other meters were fresh. Not saved.
+	fableProbeAt time.Time
 }
 
 func (a *accountRouting) clone() *accountRouting {

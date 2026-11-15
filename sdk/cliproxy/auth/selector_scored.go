@@ -226,7 +226,7 @@ func (s *ScoredSelector) assess(auth *Auth, model string, activeSessions int, no
 			if meter.ObservedAt.After(newest) {
 				newest = meter.ObservedAt
 			}
-			if effective.ResetAt.After(now) && (strings.EqualFold(effective.Status, "rejected") || effective.Utilization >= fullMeterUtilization) {
+			if _, spent := meterSpent(*meter, now); spent {
 				candidate.Excluded = true
 				candidate.Summary = capitalize(meterTitle(provider, &effective)) + " used up until " + formatRouteTime(effective.ResetAt, now)
 				return candidate
@@ -351,7 +351,7 @@ func meterTitle(provider string, meter *Meter) string {
 		return meter.Label + " " + base
 	}
 	if strings.EqualFold(provider, "claude") {
-		if family := claudeModelFamily(meter.Name); family != "" {
+		if family := claudeClaimFamily(meter.Name); family != "" {
 			return capitalize(family) + " " + base
 		}
 	}

@@ -73,6 +73,7 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 		state = s.state
 	}
 	available = state.withoutRefused(available, now)
+	available = state.withModelAllowance(available, model, now)
 	if len(available) == 1 {
 		return available[0], nil
 	}
