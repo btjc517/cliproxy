@@ -206,3 +206,51 @@ func TestSessionAffinityMovesFableChatOffSpentAccount(t *testing.T) {
 		t.Fatalf("with every account spent the chat moved to %s, want it kept on %s", got, other)
 	}
 }
+
+// Clients that send no session ID are pinned by matching their conversation.
+// That path moves a Fable chat off a spent account the same way.
+func TestConversationMatchMovesFableChatOffSpentAccount(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &RoundRobinSelector{}, TTL: time.Hour})
+	defer selector.Stop()
+	first := &Auth{ID: "fable-lcp-a", Provider: "claude"}
+	second := &Auth{ID: "fable-lcp-b", Provider: "claude"}
+	t.Cleanup(func() {
+		defaultRoutingState.mu.Lock()
+		delete(defaultRoutingState.accounts, first.ID)
+		delete(defaultRoutingState.accounts, second.ID)
+		defaultRoutingState.mu.Unlock()
+	})
+	const fable = "claude-fable-5-2"
+	pick := func(scope, body string, offered ...*Auth) string {
+		t.Helper()
+		opts := cliproxyexecutor.Options{
+			OriginalRequest: []byte(body),
+			Metadata:        map[string]any{cliproxyexecutor.CallerScopeMetadataKey: scope},
+		}
+		picked, errPick := selector.Pick(context.Background(), "claude", fable, opts, offered)
+		if errPick != nil || picked == nil {
+			t.Fatalf("pick %s: %v, %v", scope, picked, errPick)
+		}
+		if _, matched := opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey].(string); !matched {
+			t.Fatalf("pick %s did not go through conversation matching: %#v", scope, opts.Metadata)
+		}
+		return picked.ID
+	}
+	turn1 := `{"messages":[{"role":"system","content":"fable-lcp-sys"},{"role":"user","content":"first question"}]}`
+	turn2 := `{"messages":[{"role":"system","content":"fable-lcp-sys"},{"role":"user","content":"first question"},{"role":"assistant","content":"an answer"},{"role":"user","content":"second question"}]}`
+	turn3 := `{"messages":[{"role":"system","content":"fable-lcp-sys"},{"role":"user","content":"first question"},{"role":"assistant","content":"an answer"},{"role":"user","content":"second question"},{"role":"assistant","content":"another"},{"role":"user","content":"third question"}]}`
+	if pick("scope-a", turn1, first) != first.ID {
+		t.Fatal("test setup: the chat did not start on the first account")
+	}
+	if got := pick("scope-a", turn2, first, second); got != first.ID {
+		t.Fatalf("the chat moved to %s while its account had Fable allowance", got)
+	}
+	reset := time.Now().Add(72 * time.Hour)
+	setMeter(defaultRoutingState, first.ID, "claude", Meter{Name: claudeFableClaim, Utilization: 1, Status: "rejected", ResetAt: reset})
+	if got := pick("scope-a", turn3, first, second); got != second.ID {
+		t.Fatalf("the Fable chat stayed on %s, want it moved to %s", got, second.ID)
+	}
+	if got := pick("scope-b", `{"messages":[{"role":"system","content":"fable-lcp-other"},{"role":"user","content":"a new chat"}]}`, first, second); got != second.ID {
+		t.Fatalf("a new Fable chat started on %s, want %s", got, second.ID)
+	}
+}
