@@ -317,20 +317,24 @@ func meterSpent(meter Meter, now time.Time) (Meter, bool) {
 
 // modelAllowanceSpent reports whether the credential has used up an allowance
 // that only the requested model's family draws on, such as the weekly Fable
-// allowance, and when that allowance resets. The shared 5-hour and weekly
-// windows are not looked at: the provider's own refusal and the cooldown it
-// starts already move work off a credential that is out of those.
+// allowance or a "7d_opus" week, and when that allowance resets. The shared
+// 5-hour and weekly windows are not looked at: the provider's own refusal and
+// the cooldown it starts already move work off a credential that is out of
+// those.
 func (s *RoutingState) modelAllowanceSpent(authID, provider, model string, now time.Time) (Meter, bool) {
-	if s == nil || claudeModelFamily(model) == "" || !strings.EqualFold(strings.TrimSpace(provider), "claude") {
+	family := claudeModelFamily(model)
+	if s == nil || family == "" || !strings.EqualFold(strings.TrimSpace(provider), "claude") {
 		return Meter{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	account := s.accounts[authID]
+	return familyAllowanceSpent(s.accounts[authID], family, now)
+}
+
+func familyAllowanceSpent(account *accountRouting, family string, now time.Time) (Meter, bool) {
 	if account == nil {
 		return Meter{}, false
 	}
-	family := claudeModelFamily(model)
 	for _, meter := range account.Meters {
 		if meter == nil || claudeClaimFamily(meter.Name) != family {
 			continue
@@ -342,26 +346,51 @@ func (s *RoutingState) modelAllowanceSpent(authID, provider, model string, now t
 	return Meter{}, false
 }
 
-// withModelAllowance drops credentials that have used up an allowance only the
-// requested model's family draws on. When every candidate has, the list is
-// returned unchanged, so routing never fails closed on the router's own data.
-func (s *RoutingState) withModelAllowance(auths []*Auth, model string, now time.Time) []*Auth {
-	if s == nil || len(auths) < 2 || claudeModelFamily(model) == "" {
-		return auths
+// modelAllowanceOpen returns the candidates that can take a session of model
+// from a credential that has used up the model family's own allowance: those
+// that still have that allowance and that the provider has not recently
+// refused. anySpent reports whether any candidate is out of the allowance.
+func (s *RoutingState) modelAllowanceOpen(auths []*Auth, model string, now time.Time) (open []*Auth, anySpent bool) {
+	family := claudeModelFamily(model)
+	if s == nil || family == "" {
+		return nil, false
 	}
-	kept := make([]*Auth, 0, len(auths))
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, candidate := range auths {
 		if candidate == nil {
 			continue
 		}
-		if _, spent := s.modelAllowanceSpent(candidate.ID, candidate.Provider, model, now); !spent {
-			kept = append(kept, candidate)
+		account := s.accounts[candidate.ID]
+		if strings.EqualFold(strings.TrimSpace(candidate.Provider), "claude") {
+			if _, spent := familyAllowanceSpent(account, family, now); spent {
+				anySpent = true
+				continue
+			}
 		}
+		if account != nil {
+			if _, refused := account.Health.refusedReason(now); refused {
+				continue
+			}
+		}
+		open = append(open, candidate)
 	}
-	if len(kept) == 0 || len(kept) == len(auths) {
+	return open, anySpent
+}
+
+// withModelAllowance narrows candidates to the ones modelAllowanceOpen returns
+// when some candidate is out of the model family's own allowance. When none
+// is, or when no candidate could take the work, the list is returned
+// unchanged, so routing never fails closed on the router's own data.
+func (s *RoutingState) withModelAllowance(auths []*Auth, model string, now time.Time) []*Auth {
+	if len(auths) < 2 {
 		return auths
 	}
-	return kept
+	open, anySpent := s.modelAllowanceOpen(auths, model, now)
+	if !anySpent || len(open) == 0 {
+		return auths
+	}
+	return open
 }
 
 // effectiveMeter returns the meter as it stands at now: a window whose reset

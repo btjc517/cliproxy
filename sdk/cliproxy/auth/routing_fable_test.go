@@ -254,3 +254,141 @@ func TestConversationMatchMovesFableChatOffSpentAccount(t *testing.T) {
 		t.Fatalf("a new Fable chat started on %s, want %s", got, second.ID)
 	}
 }
+
+// fableRoutingTestAuths registers cleanup for accounts a test writes into the
+// process-wide routing state.
+func fableRoutingTestAuths(t *testing.T, auths ...*Auth) {
+	t.Helper()
+	t.Cleanup(func() {
+		defaultRoutingState.mu.Lock()
+		for _, auth := range auths {
+			delete(defaultRoutingState.accounts, auth.ID)
+		}
+		defaultRoutingState.mu.Unlock()
+	})
+}
+
+func refuseForTest(authID string) {
+	defaultRoutingState.mu.Lock()
+	defer defaultRoutingState.mu.Unlock()
+	account := defaultRoutingState.accounts[authID]
+	if account == nil {
+		account = &accountRouting{Provider: "claude", Meters: map[string]*Meter{}, History: map[string][]MeterSample{}}
+		defaultRoutingState.accounts[authID] = account
+	}
+	account.Health = AccountHealth{LastFailureAt: time.Now().Add(-time.Minute), LastFailureStatus: http.StatusPaymentRequired}
+}
+
+// An account the provider has just refused cannot take over a Fable chat: with
+// one account nearly out of its Fable week and the other refused, every way a
+// request is routed stays on the account that still answers.
+func TestFableChatDoesNotMoveToRefusedAccount(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &SoonestResetSelector{}, TTL: time.Hour})
+	defer selector.Stop()
+	nearlyOut := &Auth{ID: "fable-refused-a", Provider: "claude"}
+	refused := &Auth{ID: "fable-refused-b", Provider: "claude"}
+	fableRoutingTestAuths(t, nearlyOut, refused)
+	const fable = "claude-fable-5-2"
+	pick := func(opts cliproxyexecutor.Options, offered ...*Auth) string {
+		t.Helper()
+		picked, errPick := selector.Pick(context.Background(), "claude", fable, opts, offered)
+		if errPick != nil || picked == nil {
+			t.Fatalf("pick: %v, %v", picked, errPick)
+		}
+		return picked.ID
+	}
+	session := func(id string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{Headers: map[string][]string{"X-Claude-Code-Session-Id": {id}}, Metadata: make(map[string]any)}
+	}
+	conversation := func(body string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{OriginalRequest: []byte(body), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "refused-scope"}}
+	}
+	turn1 := `{"messages":[{"role":"system","content":"fable-refused-sys"},{"role":"user","content":"first question"}]}`
+	turn2 := `{"messages":[{"role":"system","content":"fable-refused-sys"},{"role":"user","content":"first question"},{"role":"assistant","content":"an answer"},{"role":"user","content":"second question"}]}`
+	if pick(session("refused-chat"), nearlyOut) != nearlyOut.ID || pick(conversation(turn1), nearlyOut) != nearlyOut.ID {
+		t.Fatal("test setup: the chats did not start on the first account")
+	}
+	setMeter(defaultRoutingState, nearlyOut.ID, "claude", Meter{Name: claudeFableClaim, Utilization: 0.985, ResetAt: time.Now().Add(72 * time.Hour)})
+	refuseForTest(refused.ID)
+
+	if got := pick(session("refused-chat"), nearlyOut, refused); got != nearlyOut.ID {
+		t.Fatalf("the pinned chat moved to the refused account %s", got)
+	}
+	if got := pick(conversation(turn2), nearlyOut, refused); got != nearlyOut.ID {
+		t.Fatalf("the conversation-matched chat moved to the refused account %s", got)
+	}
+	if got := pick(session("refused-new-chat"), nearlyOut, refused); got != nearlyOut.ID {
+		t.Fatalf("a new chat started on the refused account %s", got)
+	}
+	if got := pick(cliproxyexecutor.Options{}, nearlyOut, refused); got != nearlyOut.ID {
+		t.Fatalf("a request with no session went to the refused account %s", got)
+	}
+}
+
+// A reserve account takes Fable chats once every rotation account is out of
+// its Fable week, and a chat does not move between accounts that are all out.
+func TestFableChatMovesAcrossPriorityTiersOnlyWhenItHelps(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &RoundRobinSelector{}, TTL: time.Hour})
+	defer selector.Stop()
+	rotation := &Auth{ID: "fable-tier-rotation", Provider: "claude", Attributes: map[string]string{"priority": "0"}}
+	reserve := &Auth{ID: "fable-tier-reserve", Provider: "claude", Attributes: map[string]string{"priority": "-1"}}
+	fableRoutingTestAuths(t, rotation, reserve)
+	const fable = "claude-fable-5-2"
+	pick := func(id string, offered ...*Auth) string {
+		t.Helper()
+		opts := cliproxyexecutor.Options{Headers: map[string][]string{"X-Claude-Code-Session-Id": {id}}, Metadata: make(map[string]any)}
+		picked, errPick := selector.Pick(context.Background(), "claude", fable, opts, offered)
+		if errPick != nil || picked == nil {
+			t.Fatalf("pick %s: %v, %v", id, picked, errPick)
+		}
+		return picked.ID
+	}
+	reset := time.Now().Add(72 * time.Hour)
+	if pick("tier-chat", rotation, reserve) != rotation.ID {
+		t.Fatal("test setup: a new chat must start on the rotation account")
+	}
+	if pick("tier-reserve-chat", reserve) != reserve.ID {
+		t.Fatal("test setup: the second chat did not start on the reserve account")
+	}
+	setMeter(defaultRoutingState, rotation.ID, "claude", Meter{Name: claudeFableClaim, Utilization: 1, Status: "rejected", ResetAt: reset})
+	if got := pick("tier-chat", rotation, reserve); got != reserve.ID {
+		t.Fatalf("the chat stayed on %s, want it moved to the reserve account with Fable left", got)
+	}
+	if got := pick("tier-new-chat", rotation, reserve); got != reserve.ID {
+		t.Fatalf("a new chat started on %s, want the reserve account with Fable left", got)
+	}
+	setMeter(defaultRoutingState, reserve.ID, "claude", Meter{Name: claudeFableClaim, Utilization: 1, Status: "rejected", ResetAt: reset})
+	if got := pick("tier-reserve-chat", rotation, reserve); got != reserve.ID {
+		t.Fatalf("with every account out the chat moved to %s and lost its cache for nothing", got)
+	}
+}
+
+// The same rule covers any week kept for one model family: an Opus chat moves
+// off an account whose Opus week is used up, and a Fable chat there stays.
+func TestOpusChatMovesOffAccountOutOfItsOpusWeek(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &RoundRobinSelector{}, TTL: time.Hour})
+	defer selector.Stop()
+	first := &Auth{ID: "opus-week-a", Provider: "claude"}
+	second := &Auth{ID: "opus-week-b", Provider: "claude"}
+	fableRoutingTestAuths(t, first, second)
+	pick := func(id, model string, offered ...*Auth) string {
+		t.Helper()
+		opts := cliproxyexecutor.Options{Headers: map[string][]string{"X-Claude-Code-Session-Id": {id}}, Metadata: make(map[string]any)}
+		picked, errPick := selector.Pick(context.Background(), "claude", model, opts, offered)
+		if errPick != nil || picked == nil {
+			t.Fatalf("pick %s: %v, %v", id, picked, errPick)
+		}
+		return picked.ID
+	}
+	const fable, opus = "claude-fable-5-2", "claude-opus-5-5"
+	if pick("opus-chat", opus, first) != first.ID || pick("fable-chat", fable, first) != first.ID {
+		t.Fatal("test setup: the chats did not start on the first account")
+	}
+	setMeter(defaultRoutingState, first.ID, "claude", Meter{Name: "7d_opus", Utilization: 1, Status: "rejected", ResetAt: time.Now().Add(72 * time.Hour)})
+	if got := pick("opus-chat", opus, first, second); got != second.ID {
+		t.Fatalf("the Opus chat stayed on %s, want it moved to %s", got, second.ID)
+	}
+	if got := pick("fable-chat", fable, first, second); got != first.ID {
+		t.Fatalf("the Fable chat moved to %s, want it kept on %s", got, first.ID)
+	}
+}
