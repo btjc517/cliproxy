@@ -965,7 +965,9 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // An established binding outranks credential priority: a bound credential that is still
 // available is reused even when a higher-priority credential recovers. Credential priority
 // applies to cold bindings, requests without a session, and genuine bound-credential
-// failover, so the fallback selector only ever receives the highest available priority tier.
+// failover, so the fallback selector receives one priority tier: the highest available one,
+// or, when some credential has used up an allowance kept for the model's family, the highest
+// tier among the credentials that can still take the work (see modelAllowanceRouting).
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -1019,9 +1021,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	// A single availability pass serves both lookups: the bound credential is validated against
-	// every priority tier, while the fallback selector keeps seeing only the highest tier. A
-	// request with no session uses the same candidates as a new session, so one rule decides
-	// which credentials can take work for this model.
+	// every priority tier, while the fallback selector sees one tier, chosen by
+	// modelAllowanceRouting. A request with no session uses the same candidates as a new
+	// session, so one rule decides which credentials can take work for this model.
 	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
