@@ -1018,22 +1018,19 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
-	if primaryID == "" {
-		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
-		if errAvailable != nil {
-			return nil, errAvailable
-		}
-		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, defaultRoutingState.withModelAllowance(fallbackAuths, model, now))
-	}
-
 	// A single availability pass serves both lookups: the bound credential is validated against
-	// every priority tier, while the fallback selector keeps seeing only the highest tier.
+	// every priority tier, while the fallback selector keeps seeing only the highest tier. A
+	// request with no session uses the same candidates as a new session, so one rule decides
+	// which credentials can take work for this model.
 	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
 	fallbackAuths, allowanceLeft := modelAllowanceRouting(available, model, now)
+	if primaryID == "" {
+		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
+		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	}
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey

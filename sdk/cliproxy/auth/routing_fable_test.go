@@ -357,6 +357,13 @@ func TestFableChatMovesAcrossPriorityTiersOnlyWhenItHelps(t *testing.T) {
 	if got := pick("tier-new-chat", rotation, reserve); got != reserve.ID {
 		t.Fatalf("a new chat started on %s, want the reserve account with Fable left", got)
 	}
+	noSession, errPick := selector.Pick(context.Background(), "claude", fable, cliproxyexecutor.Options{}, []*Auth{rotation, reserve})
+	if errPick != nil || noSession == nil {
+		t.Fatalf("pick with no session: %v, %v", noSession, errPick)
+	}
+	if noSession.ID != reserve.ID {
+		t.Fatalf("a request with no session went to %s, want the reserve account with Fable left", noSession.ID)
+	}
 	setMeter(defaultRoutingState, reserve.ID, "claude", Meter{Name: claudeFableClaim, Utilization: 1, Status: "rejected", ResetAt: reset})
 	if got := pick("tier-reserve-chat", rotation, reserve); got != reserve.ID {
 		t.Fatalf("with every account out the chat moved to %s and lost its cache for nothing", got)
