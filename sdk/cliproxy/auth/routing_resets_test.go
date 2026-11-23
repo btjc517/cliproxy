@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -186,6 +187,49 @@ func TestResetAdviceHoldsOnAccountThatIsOff(t *testing.T) {
 	state.SetResetMode("auto")
 	if candidate := state.AutoResetCandidate([]*Auth{a}, routerTestNow); candidate != nil {
 		t.Fatalf("automatic mode would use a reset on an account that is off: %+v", candidate)
+	}
+}
+
+// A reset does not get a refused account working again, so it is not
+// suggested or used automatically while the provider turns the account away.
+func TestResetAdviceHoldsOnAccountTheProviderRefuses(t *testing.T) {
+	state := newTestRoutingState(routerTestNow)
+	a := routerTestAuth("a.json", "claude", "a@example.com")
+	weekSpent(state, a.ID, 4*24*time.Hour)
+	observeTestResets(state, a.ID, resetTestGrant("full"))
+	state.mu.Lock()
+	state.accounts[a.ID].Health = AccountHealth{LastFailureAt: routerTestNow.Add(-time.Minute), LastFailureStatus: http.StatusPaymentRequired}
+	state.mu.Unlock()
+
+	advice := adviceFor(t, state, []*Auth{a}, a.ID, "full")
+	if advice.Action != "hold" || !strings.Contains(advice.Reason, "refusing this account") {
+		t.Fatalf("advice = %+v, want hold: the provider refuses the account", advice)
+	}
+	state.SetResetMode("auto")
+	if candidate := state.AutoResetCandidate([]*Auth{a}, routerTestNow); candidate != nil {
+		t.Fatalf("automatic mode would use a reset on a refused account: %+v", candidate)
+	}
+}
+
+// A fresh list of resets beside an old reading of the limit is not acted on:
+// the limit may have cleared since.
+func TestResetAdviceHoldsOnOldReadingOfTheLimit(t *testing.T) {
+	state := newTestRoutingState(routerTestNow)
+	a := routerTestAuth("codex-a.json", "codex", "a@example.com")
+	old := routerTestNow.Add(-2 * time.Hour)
+	setMeter(state, a.ID, "codex", Meter{Name: "primary", Utilization: 0.1, ResetAt: routerTestNow.Add(2 * time.Hour), Window: fiveHourWindow, ObservedAt: old})
+	setMeter(state, a.ID, "codex", Meter{Name: "secondary", Utilization: 1, Status: "rejected", ResetAt: routerTestNow.Add(3 * 24 * time.Hour), Window: weeklyQuotaWindow, ObservedAt: old})
+	state.ObserveResets(a.ID, "codex", &ResetStatus{ObservedAt: routerTestNow, Grants: []ResetGrant{{
+		ID: "cred", Label: "Full reset", Total: 1, Left: 1, Clears: []string{"primary", "secondary"}, UsableNow: true, EndsAt: routerTestNow.Add(20 * 24 * time.Hour),
+	}}})
+
+	advice := adviceFor(t, state, []*Auth{a}, a.ID, "cred")
+	if advice.Action != "hold" || !strings.Contains(advice.Reason, "No recent reading of the weekly limit") {
+		t.Fatalf("advice = %+v, want hold: the week was last read two hours ago", advice)
+	}
+	state.SetResetMode("auto")
+	if candidate := state.AutoResetCandidate([]*Auth{a}, routerTestNow); candidate != nil {
+		t.Fatalf("automatic mode would use a credit on an old reading: %+v", candidate)
 	}
 }
 

@@ -545,9 +545,12 @@ type resetPool struct {
 type resetAccount struct {
 	auth    *Auth
 	account *accountRouting
-	// usable means the account can take work when it has allowance: on, and
-	// with a recent reading.
+	// usable means the account can take work when it has allowance: on, not
+	// refused by the provider, and with a recent reading.
 	usable bool
+	// refused means the provider is turning the account away outright, which
+	// a reset does not change.
+	refused bool
 	// spent holds the meters that are used up, by name, as they stand now.
 	spent map[string]Meter
 	// meters holds every meter as it stands now.
@@ -587,8 +590,8 @@ func (s *RoutingState) resetViews(auths []*Auth, now time.Time) (map[string][]Re
 					newest = meter.ObservedAt
 				}
 			}
-			_, refused := entry.account.Health.refusedReason(now)
-			entry.usable = !auth.Disabled && !refused && !newest.IsZero() && now.Sub(newest) < staleReadingAge
+			_, entry.refused = entry.account.Health.refusedReason(now)
+			entry.usable = !auth.Disabled && !entry.refused && !newest.IsZero() && now.Sub(newest) < staleReadingAge
 		}
 		byProvider[provider] = append(byProvider[provider], entry)
 	}
@@ -759,6 +762,9 @@ func adviseReset(provider string, entry *resetAccount, grant ResetGrant, status 
 	if entry.auth.Disabled {
 		return ResetAdvice{Action: "hold", Reason: "This account is off, so a reset would add no room" + expiry}
 	}
+	if entry.refused {
+		return ResetAdvice{Action: "hold", Reason: "The provider is refusing this account, so a reset would add no room" + expiry}
+	}
 	if grant.Paused {
 		return ResetAdvice{Action: "hold", Reason: "Paused by the provider" + expiry}
 	}
@@ -789,6 +795,11 @@ func adviseReset(provider string, entry *resetAccount, grant ResetGrant, status 
 	}
 	if !found {
 		return ResetAdvice{Action: "hold", Reason: "No reading yet for the limit this clears" + expiry}
+	}
+	// The advice rests on how full the limit is, so an old reading of it is
+	// not acted on, however fresh the list of resets is.
+	if now.Sub(target.ObservedAt) >= resetReadingMaxAge {
+		return ResetAdvice{Action: "hold", Meter: target.Name, Reason: "No recent reading of the " + resetLimitName(provider, target.Name) + expiry}
 	}
 	advice := ResetAdvice{Meter: target.Name, Gain: target.Utilization}
 	if targetSpent {

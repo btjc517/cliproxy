@@ -170,7 +170,9 @@ func (s *Service) codexResetRequest(ctx context.Context, auth *coreauth.Auth, me
 }
 
 // readCodexUsage reads one Codex account's reset credits and its 5-hour and
-// weekly windows and records both.
+// weekly windows and records both. A failure of either read is returned, so
+// automatic mode never uses a credit on windows it could not read again; the
+// credits that were read stay recorded.
 func (s *Service) readCodexUsage(ctx context.Context, auth *coreauth.Auth) error {
 	credits, errCredits := s.codexResetRequest(ctx, auth, http.MethodGet, "/wham/rate-limit-reset-credits", nil)
 	if errCredits != nil {
@@ -181,9 +183,7 @@ func (s *Service) readCodexUsage(ctx context.Context, auth *coreauth.Auth) error
 	state.ObserveResets(auth.ID, "codex", coreauth.ParseCodexResetStatus(credits, now))
 	usage, errUsage := s.codexResetRequest(ctx, auth, http.MethodGet, "/wham/usage", nil)
 	if errUsage != nil {
-		// The credits are recorded; the windows keep their last reading.
-		log.WithField("auth", auth.ID).Debugf("codex usage read: %v", errUsage)
-		return nil
+		return fmt.Errorf("read usage windows: %w", errUsage)
 	}
 	if meters := coreauth.ParseCodexUsageMeters(usage, now); len(meters) > 0 {
 		state.ObserveMeters(auth.ID, "codex", meters, now)

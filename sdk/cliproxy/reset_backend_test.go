@@ -197,6 +197,27 @@ func TestCodexResetCreditIsReadAndUsed(t *testing.T) {
 	}
 }
 
+// When the credits can be read but the windows cannot, the read fails, so
+// automatic mode does not go on to use a credit; the credits stay listed.
+func TestCodexReadFailsWhenWindowsCannotBeRead(t *testing.T) {
+	_, server := newResetTestServer(t, map[string]string{
+		"GET /wham/rate-limit-reset-credits": `{"credits":[{"id":"cred_only","status":"available","title":"Full reset"}]}`,
+	})
+	previous := codexBackendURL
+	codexBackendURL = server.URL
+	defer func() { codexBackendURL = previous }()
+
+	auth := &coreauth.Auth{ID: "reset-codex-no-usage.json", Provider: "codex", Metadata: map[string]any{"access_token": "codex-token", "account_id": "acct-3"}}
+	service := resetTestService(t, auth)
+	errRead := resetBackend{service: service}.RefreshResets(context.Background(), auth)
+	if errRead == nil || !strings.Contains(errRead.Error(), "read usage windows") {
+		t.Fatalf("RefreshResets err = %v, want the failed window read reported", errRead)
+	}
+	if view := resetView(t, auth); len(view.Resets) != 1 || view.Resets[0].ID != "cred_only" {
+		t.Fatalf("resets = %+v, want the credit still listed", view.Resets)
+	}
+}
+
 // An account the provider will not answer for is asked once per probe age,
 // not every round.
 func TestResetProbeDoesNotHammerAnAccountThatFails(t *testing.T) {
