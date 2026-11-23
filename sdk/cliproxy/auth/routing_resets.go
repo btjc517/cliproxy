@@ -638,14 +638,14 @@ func (s *RoutingState) resetViews(auths []*Auth, now time.Time) (map[string][]Re
 		})
 		// One reset at a time for a shared limit: it changes what the pool can
 		// take, so the next one is judged on the new state.
-		sharedSeen := false
+		sharedFirst := ""
 		for _, suggestion := range providerSuggestions {
 			if isSharedMeter(suggestion.Advice.Meter) && !resetIsExpiring(suggestion.Grant, now) {
-				if sharedSeen {
-					demoteResetView(views[suggestion.AuthID], suggestion.Grant.ID, "The reset on "+providerSuggestions[0].Account+" goes first")
+				if sharedFirst != "" {
+					demoteResetView(views[suggestion.AuthID], suggestion.Grant.ID, "The reset on "+sharedFirst+" goes first")
 					continue
 				}
-				sharedSeen = true
+				sharedFirst = suggestion.Account
 			}
 			suggestions = append(suggestions, suggestion)
 		}
