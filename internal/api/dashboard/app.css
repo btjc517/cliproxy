@@ -631,6 +631,14 @@ a.tr:hover, .tr.click:hover { background: var(--hover); cursor: pointer; }
 
 /* Error and toast */
 .banner { margin: 12px 24px 0; padding: 8px 12px; border-radius: 8px; background: #F99C0014; color: var(--warn-text); font-size: 13px; }
+/* A note that is not a warning: a suggestion to act on. One line. */
+.banner.hint { display: flex; align-items: center; gap: 8px; background: var(--surface-2); color: var(--muted-fg); min-width: 0; }
+.banner.hint b { color: var(--fg); font-weight: 500; }
+.banner.hint:hover { background: var(--surface-3); }
+.banner.hint svg { flex-shrink: 0; }
+/* The advice on a usage reset: a tag, then the reason on the same line. */
+.advice { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tr .c.adv { min-width: 260px; }
 .toast { position: fixed; bottom: 24px; right: 24px; z-index: 50; padding: 10px 14px; border-radius: 10px; background: var(--popover); box-shadow: var(--popover-shadow); font-size: 13px; max-width: 360px; }
 .toast.err { color: var(--error-text); }
 .toast.unsaved { display: flex; align-items: center; gap: 12px; }

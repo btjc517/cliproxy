@@ -387,6 +387,17 @@ type RoutingConfig struct {
 	// Scorer configures the scored selector, which places new sessions by how
 	// much of each account's allowance is at risk of expiring unused.
 	Scorer RoutingScorerConfig `yaml:"scorer,omitempty" json:"scorer,omitempty"`
+
+	// Resets configures the usage resets providers grant to accounts.
+	Resets RoutingResetsConfig `yaml:"resets,omitempty" json:"resets,omitempty"`
+}
+
+// RoutingResetsConfig configures how usage resets are used.
+type RoutingResetsConfig struct {
+	// Mode is "off" (default: resets and advice are shown, a person uses them)
+	// or "auto" (experimental: a reset is used by itself when the advice is to
+	// use it, at most one per provider per 30 minutes).
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 }
 
 // RoutingScorerConfig configures the scored selector.

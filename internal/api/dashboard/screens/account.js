@@ -9,6 +9,7 @@ import { timeStrip, stripTime } from "./strip.js";
 import { buildPanel, panelContext, snapGrid } from "./panels.js";
 import { DAY, timeState, bindTime, selectionLabel, backToNow, windowText } from "./timeaxis.js";
 import { region } from "../paint.js";
+import { resetTable } from "./resets.js";
 
 // One account as an account scope. Its performance scope is keyed by its id,
 // so prov names the account and its percentiles stay exact.
@@ -82,6 +83,7 @@ export function view(ctx) {
   const aend = ats.range ? selectionLabel(ats.range, "data-ac-clear") : ats.moved ? backToNow("data-ac-home") : `<span class="muted">${esc(windowText(ats.window))}</span>`;
   const mine = sessions().filter((s) => (s.auth_ids || []).includes(a.id));
   const active = mine.filter((s) => Date.now() - Date.parse(s.last_seen) < 10 * 60e3);
+  const resets = resetTable([a], { account: true });
   const stateLine = st.kind === "blocked" || st.kind === "error" ? `<div class="banner">${esc(st.text)}${st.detail && st.detail !== st.text ? ": " + esc(st.detail) : ""}</div>` : "";
 
   const html = `
@@ -100,6 +102,7 @@ export function view(ctx) {
         ${allowance.html}
       </div>
       ${strip.html}
+      ${region("ac|resets", resets.html ? `<div class="sec"><div class="sech"><div class="t"><b>Usage resets</b><span class="muted">${resets.count ? resets.count + " unused" : "All used"}</span></div></div>${resets.html}</div>` : "", "div", `style="display:contents"`)}
       ${region("ac|sessions", `
         <div class="sech">
           <div class="t"><b>Active sessions</b><span class="muted">Seen in the last 10 minutes</span></div>
@@ -111,6 +114,7 @@ export function view(ctx) {
     html,
     mount(root) {
       strip.mount(root);
+      resets.mount(root);
       bindTime(root.querySelector(".activity"), {
         key: ats.key, window: ats.window, range: ats.range, grid: snapGrid(actx), future: true,
         defaultWindow: ats.defaultWindow, setWindow: ats.setWindow, setRange: ats.setRange,

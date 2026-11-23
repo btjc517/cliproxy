@@ -47,9 +47,14 @@ type accountRouting struct {
 	History  map[string][]MeterSample `json:"history,omitempty"`
 	Facts    AccountFacts             `json:"facts"`
 	Health   AccountHealth            `json:"health"`
+	// Resets is what the provider last reported about the account's usage
+	// resets. Nil until a reading arrives.
+	Resets *ResetStatus `json:"resets,omitempty"`
 	// fableProbeAt is when a usage probe was last asked for to learn the Fable
 	// allowance of an account whose other meters were fresh. Not saved.
 	fableProbeAt time.Time
+	// resetProbeAt is when the account's resets were last asked for. Not saved.
+	resetProbeAt time.Time
 }
 
 func (a *accountRouting) clone() *accountRouting {
@@ -57,6 +62,11 @@ func (a *accountRouting) clone() *accountRouting {
 		return nil
 	}
 	copyAccount := &accountRouting{Provider: a.Provider, Facts: a.Facts, Health: a.Health}
+	if a.Resets != nil {
+		copyResets := *a.Resets
+		copyResets.Grants = append([]ResetGrant(nil), a.Resets.Grants...)
+		copyAccount.Resets = &copyResets
+	}
 	if len(a.Meters) > 0 {
 		copyAccount.Meters = make(map[string]*Meter, len(a.Meters))
 		for name, meter := range a.Meters {
@@ -92,6 +102,7 @@ type routingStateFile struct {
 	Accounts  map[string]*accountRouting `json:"accounts"`
 	Decisions []ShadowDecision           `json:"decisions,omitempty"`
 	Bindings  []SessionBinding           `json:"bindings,omitempty"`
+	Resets    []ResetEvent               `json:"reset_events,omitempty"`
 }
 
 // RoutingState is the router's memory: every meter each credential reported,
@@ -108,9 +119,16 @@ type RoutingState struct {
 	pendingBindings []SessionBinding
 	scorerMode      string
 	scorerConfig    ScorerConfig
-	dirty           bool
-	nowFunc         func() time.Time
-	loopOnce        sync.Once
+	// resetBackend talks to the providers about usage resets.
+	resetBackend ResetBackend
+	resetMode    string
+	// resetClaims holds the uses of a reset that are in flight or failed
+	// without an answer, by account and grant.
+	resetClaims map[string]*resetClaim
+	resetEvents []ResetEvent
+	dirty       bool
+	nowFunc     func() time.Time
+	loopOnce    sync.Once
 }
 
 var defaultRoutingState = NewRoutingState()
@@ -182,6 +200,7 @@ func (s *RoutingState) Flush() error {
 		Accounts:  s.accounts,
 		Decisions: s.decisions,
 		Bindings:  s.bindingsLocked(),
+		Resets:    s.resetEvents,
 	}
 	data, errMarshal := json.Marshal(state)
 	path := s.path
@@ -223,6 +242,7 @@ func (s *RoutingState) loadLocked() {
 		s.accounts[authID] = account
 	}
 	s.decisions = append(state.Decisions, s.decisions...)
+	s.resetEvents = append(state.Resets, s.resetEvents...)
 	if s.cache != nil {
 		s.cache.Restore(state.Bindings)
 	} else {

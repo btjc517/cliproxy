@@ -40,6 +40,8 @@ type routingRuntimeState struct {
 	// string so the state stays comparable.
 	scorerHeadroom    string
 	scorerMaxSessions int
+	// resetMode is "off" or "auto".
+	resetMode string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -78,6 +80,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	default:
 		state.scorerMode = "off"
 	}
+	state.resetMode = coreauth.NormalizeResetMode(cfg.Routing.Resets.Mode)
 	state.scorerHeadroom = normalizedHeadroom(cfg.Routing.Scorer.Headroom)
 	if cfg.Routing.Scorer.MaxSessionsPerAccount > 0 {
 		state.scorerMaxSessions = cfg.Routing.Scorer.MaxSessionsPerAccount
@@ -107,6 +110,7 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	routing := coreauth.DefaultRoutingState()
 	scorerConfig := coreauth.ScorerConfig{Headroom: parseHeadroom(state.scorerHeadroom), MaxSessions: state.scorerMaxSessions}
 	routing.SetScorer(state.scorerMode, scorerConfig)
+	routing.SetResetMode(state.resetMode)
 	switch state.scorerMode {
 	case "shadow":
 		selector = coreauth.NewShadowSelector(selector, coreauth.NewScoredSelector(scorerConfig, routing), routing)

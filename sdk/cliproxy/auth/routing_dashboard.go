@@ -16,6 +16,12 @@ type RouterView struct {
 	Accounts    map[string]RouterAccountView `json:"accounts"`
 	Rankings    []RouterRanking              `json:"rankings,omitempty"`
 	Shadow      *ShadowSummary               `json:"shadow,omitempty"`
+	// ResetMode is "auto" when resets are used automatically, else "off".
+	ResetMode string `json:"reset_mode"`
+	// ResetSuggestions are the resets worth using now, best first.
+	ResetSuggestions []ResetSuggestion `json:"reset_suggestions,omitempty"`
+	// ResetEvents are the recorded uses of resets, newest first.
+	ResetEvents []ResetEvent `json:"reset_events,omitempty"`
 }
 
 // RouterAccountView is one credential's meters and health.
@@ -26,6 +32,10 @@ type RouterAccountView struct {
 	Refused        string      `json:"refused,omitempty"`
 	ActiveSessions int         `json:"active_sessions"`
 	ObservedAt     time.Time   `json:"observed_at,omitempty"`
+	// Resets are the account's usage resets with advice on each.
+	Resets []ResetGrantView `json:"resets,omitempty"`
+	// ResetsObservedAt is when the resets were last read from the provider.
+	ResetsObservedAt time.Time `json:"resets_observed_at,omitempty"`
 }
 
 // MeterView is one meter as the dashboard draws it.
@@ -63,6 +73,17 @@ func (s *RoutingState) Dashboard(auths []*Auth, now time.Time) RouterView {
 		Accounts:    make(map[string]RouterAccountView),
 	}
 	sessions := s.activeSessions(now)
+	view.ResetMode = ResetModeOff
+	var resets map[string][]ResetGrantView
+	if s != nil {
+		s.mu.Lock()
+		resets, view.ResetSuggestions = s.resetViews(auths, now)
+		view.ResetMode = NormalizeResetMode(s.resetMode)
+		for i := len(s.resetEvents) - 1; i >= 0; i-- {
+			view.ResetEvents = append(view.ResetEvents, s.resetEvents[i])
+		}
+		s.mu.Unlock()
+	}
 	byProvider := make(map[string][]*Auth)
 	for _, auth := range auths {
 		if auth == nil {
@@ -82,6 +103,10 @@ func (s *RoutingState) Dashboard(auths []*Auth, now time.Time) RouterView {
 		}
 		if reason, refused := account.Health.refusedReason(now); refused {
 			accountView.Refused = capitalize(reason)
+		}
+		if account.Resets != nil {
+			accountView.Resets = resets[auth.ID]
+			accountView.ResetsObservedAt = account.Resets.ObservedAt
 		}
 		for _, meter := range account.Meters {
 			effective, wasReset := effectiveMeter(*meter, now)

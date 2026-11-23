@@ -177,6 +177,15 @@ routing:
     # Active sessions at which an account counts as busy.
     max-sessions-per-account: 6
 
+  # Usage resets are one-offs a provider grants an account: a use sets a limit
+  # back to zero before it resets by itself. /dashboard lists each account's
+  # resets, says when one is worth using and has a control to use it.
+  resets:
+    # off (default): a person uses each reset. auto (experimental): a reset is
+    # used by itself when the advice is to use it, after a fresh reading from
+    # the provider, at most one per provider per 30 minutes.
+    mode: "off"
+
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
 

@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -29,6 +28,8 @@ const (
 
 // startClaudeMeterProbe reads the usage of signed-in Claude accounts that have
 // no recent meter reading, so idle accounts show and rank by real allowance.
+// The same round reads each account's usage resets and, in automatic mode,
+// uses one when it is worth it.
 func (s *Service) startClaudeMeterProbe(ctx context.Context) {
 	var running atomic.Bool
 	run := func() {
@@ -39,6 +40,8 @@ func (s *Service) startClaudeMeterProbe(ctx context.Context) {
 		go func() {
 			defer running.Store(false)
 			s.probeClaudeMeters(ctx)
+			s.probeCodexResets(ctx)
+			s.runAutoReset(ctx)
 		}()
 	}
 	go func() {
@@ -68,24 +71,25 @@ func (s *Service) probeClaudeMeters(ctx context.Context) {
 		if auth == nil || auth.Disabled || !strings.EqualFold(auth.Provider, "claude") {
 			continue
 		}
-		token := claudeauth.ReadMetadataString(&auth.Metadata, "access_token")
-		if !strings.Contains(token, "sk-ant-oat") || !state.NeedsMeterReading(auth.ID, time.Now(), meterProbeMaxAge) {
+		if claudeOAuthToken(auth) == "" {
 			continue
 		}
-		body, errProbe := s.fetchClaudeUsage(ctx, auth, token)
-		if errProbe != nil {
-			log.WithField("auth", auth.ID).Debugf("claude usage probe: %v", errProbe)
-			continue
-		}
+		// The same report carries the meters and the reset grants. A busy
+		// account reads its meters from responses, so it is asked here once
+		// per meterProbeMaxAge for its resets.
 		now := time.Now()
-		if meters := coreauth.ParseClaudeUsageMeters(body, now); len(meters) > 0 {
-			state.ObserveMeters(auth.ID, "claude", meters, now)
+		if !state.NeedsMeterReading(auth.ID, now, meterProbeMaxAge) && !state.NeedsResetReading(auth.ID, now, meterProbeMaxAge) {
+			continue
 		}
+		if errProbe := s.readClaudeUsage(ctx, auth); errProbe != nil {
+			log.WithField("auth", auth.ID).Debugf("claude usage probe: %v", errProbe)
+		}
+		state.MarkResetProbe(auth.ID, time.Now())
 	}
 }
 
 func (s *Service) fetchClaudeUsage(ctx context.Context, auth *coreauth.Auth, token string) ([]byte, error) {
-	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, claudeUsageURL, nil)
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, claudeUsageURL+"?"+claudeUsageResetQuery, nil)
 	if errReq != nil {
 		return nil, errReq
 	}

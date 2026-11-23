@@ -9,6 +9,7 @@ import { accountPicker, bindAccountPicker } from "./account-picker.js";
 import { allowanceSeries, trajectory } from "./burn.js";
 import { timeline } from "./timeline.js";
 import { region } from "../paint.js";
+import { suggestionBanner } from "./resets.js";
 
 // A warning when the account's weekly allowance runs out before it resets, at this rate.
 function runningOut(acct) {
@@ -96,6 +97,7 @@ export function view() {
   const html = `
     <div class="bar"><div class="end">${region("ov|read", esc(readAt("Live, read")), "span", `class="muted nowrap"`)}${accountPicker()}</div></div>
     <div class="body">
+      ${region("ov|resets", suggestionBanner(), "div", `style="display:contents"`)}
       ${region("ov|allow", groups ? `<div class="allow">${groups}</div>` : `<div class="empty">No accounts signed in.</div>`, "div", `style="display:contents"`)}
       ${tl.html}
       ${strip.html}

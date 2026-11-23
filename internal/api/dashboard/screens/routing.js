@@ -2,8 +2,9 @@
 // scorer's ranking and shadow comparison when it is on.
 import {
   S, esc, icon, logo, email, pill, warnState, warnIcon, queue, status, limits, signalLimits, left, plan, planDay, planDaysAway,
-  resetLong, clock, names, table, menu, api, write, meterCell, providerTitle,
+  resetLong, clock, names, table, menu, api, write, meterCell, providerTitle, accounts,
 } from "../core.js";
+import { resetTable, resetEvents, resetMode } from "./resets.js";
 
 export const STRATEGIES = {
   "soonest-reset": { a: "Soonest reset first", b: "Uses up the allowance that renews first, so less of it goes to waste." },
@@ -124,6 +125,8 @@ export function view() {
 
   const cols = [{ label: "#", w: 40 }, { label: "", w: 16, cls: "ic" }, { label: "Account" }, { label: "Week resets", w: 160 }, { label: "Week left", w: 150 }, { label: "Status", w: 260 }];
   const rows = [...queueRows("claude"), ...queueRows("codex")];
+  const resets = resetTable(accounts());
+  const auto = resetMode() === "auto";
 
   const html = `
     <div class="bar titled"><span class="title">Routing</span></div>
@@ -134,9 +137,15 @@ export function view() {
         <div class="setrow"><div class="k"><b>Keep a session on one account</b><span>The prompt cache belongs to one account. A session moves only when its account runs out.</span></div><div class="v"><button class="toggle ${affinity ? "on" : ""}" data-affinity role="switch" aria-checked="${affinity}" aria-label="Keep a session on one account"></button></div></div>
         ${prime.length ? `<div class="setrow"><div class="k"><b>Start new weeks early</b><span>Sends a first request after a weekly reset so the new week starts at once.</span></div><div class="v">${esc(prime.join(", "))}</div></div>` : ""}
       </div>
-      <div class="sec ${mode !== "off" ? "" : "last"}">
+      <div class="sec">
         <div class="sech tall"><div class="t"><b>Queue right now</b>${queueNote ? `<span class="muted">${esc(queueNote)}</span>` : ""}</div></div>
         ${table(cols, rows, { empty: "No accounts signed in." })}
+      </div>
+      <div class="sec ${mode !== "off" ? "" : "last"}" id="resets">
+        <div class="sech tall"><div class="t"><b>Usage resets</b><span class="muted">${resets.count ? resets.count + " unused" : "One-off limit resets the providers grant an account"}</span></div></div>
+        <div class="setrow"><div class="k"><b>Use resets automatically</b><span>Experimental. Uses a reset by itself when the advice is to use it, at most one per provider every 30 minutes.</span></div><div class="v"><button class="toggle ${auto ? "on" : ""}" data-reset-auto role="switch" aria-checked="${auto}" aria-label="Use resets automatically"></button></div></div>
+        ${resets.html || `<div class="empty">No account has a usage reset right now.</div>`}
+        ${resetEvents()}
       </div>
       ${scorer()}
     </div>`;
@@ -149,6 +158,8 @@ export function view() {
         a: (STRATEGIES[id] || { a: id }).a, b: (STRATEGIES[id] || {}).b, on: id === cur,
         run: () => { if (id !== cur) write(() => api("/config/routing/strategy", { method: "PUT", body: JSON.stringify(id) }), "Order set to " + (STRATEGIES[id] || { a: id }).a); },
       })), { width: 320 });
+      resets.mount(root);
+      root.querySelector("[data-reset-auto]").onclick = () => write(() => api("/config/routing/resets/mode", { method: "PUT", body: JSON.stringify(auto ? "off" : "auto") }), auto ? "Resets are no longer used automatically" : "Resets are now used automatically");
       root.querySelector("[data-affinity]").onclick = () => write(() => api("/config/routing/session-affinity", { method: "PUT", body: JSON.stringify(!affinity) }), affinity ? "Sessions can now move between accounts" : "Sessions now stay on one account");
     },
   };
