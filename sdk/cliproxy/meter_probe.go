@@ -78,7 +78,12 @@ func (s *Service) probeClaudeMeters(ctx context.Context) {
 		// account reads its meters from responses, so it is asked here once
 		// per meterProbeMaxAge for its resets.
 		now := time.Now()
-		if !state.NeedsMeterReading(auth.ID, now, meterProbeMaxAge) && !state.NeedsResetReading(auth.ID, now, meterProbeMaxAge) {
+		resetAge := meterProbeMaxAge
+		if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+			// A user can refill an account while the old retry deadline is still days away.
+			resetAge = 2 * meterProbeInterval
+		}
+		if !state.NeedsMeterReading(auth.ID, now, meterProbeMaxAge) && !state.NeedsResetReading(auth.ID, now, resetAge) {
 			continue
 		}
 		if errProbe := s.readClaudeUsage(ctx, auth); errProbe != nil {

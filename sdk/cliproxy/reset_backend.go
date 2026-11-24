@@ -92,6 +92,11 @@ func (s *Service) readClaudeUsage(ctx context.Context, auth *coreauth.Auth) erro
 	state := coreauth.DefaultRoutingState()
 	now := time.Now()
 	if meters := coreauth.ParseClaudeUsageMeters(body, now); len(meters) > 0 {
+		if reopened := state.ReopenedClaudeWindows(auth.ID, meters, now); len(reopened) > 0 {
+			if err := s.coreManager.ReconcileClaudeQuota(ctx, auth, reopened, meters); err != nil {
+				return fmt.Errorf("persist recovered Claude allowance: %w", err)
+			}
+		}
 		state.ObserveMeters(auth.ID, "claude", meters, now)
 	}
 	state.ObserveResets(auth.ID, "claude", coreauth.ParseClaudeResetStatus(body, now))

@@ -370,6 +370,11 @@ func mergeMeters(account *accountRouting, meters map[string]*Meter, model string
 			existing = &Meter{Name: name}
 			account.Meters[name] = existing
 		}
+		if !observed.Refill.Deadline.IsZero() {
+			existing.Refill = observed.Refill
+		} else if !existing.Refill.Deadline.After(now) || observed.Utilization >= 1 || observed.Status == "rejected" {
+			existing.Refill = ClaudeWindowRefill{}
+		}
 		existing.Utilization = observed.Utilization
 		if !observed.ResetAt.IsZero() {
 			existing.ResetAt = observed.ResetAt

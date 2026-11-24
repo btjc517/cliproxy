@@ -87,6 +87,41 @@ func (s *RoutingState) ObserveMeters(authID, provider string, meters map[string]
 	s.dirty = true
 }
 
+// ClaudeWindowRefill identifies the old deadline and when the refill was confirmed.
+type ClaudeWindowRefill struct {
+	Deadline   time.Time `json:"deadline"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
+// ReopenedClaudeWindows compares an authoritative usage report with the last
+// recorded readings before the report replaces them.
+func (s *RoutingState) ReopenedClaudeWindows(authID string, meters map[string]*Meter, now time.Time) map[string]ClaudeWindowRefill {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account := s.accounts[authID]
+	if account == nil {
+		return nil
+	}
+	// A provider-confirmed refill before the old deadline can release a local
+	// quota hold. Keep the old deadline because a reset may start a new window.
+	reopened := make(map[string]ClaudeWindowRefill)
+	for name, reading := range meters {
+		old := account.Meters[name]
+		if old == nil || reading == nil || reading.Status != "allowed" || reading.Utilization < 0 || reading.Utilization >= 1 {
+			continue
+		}
+		refill := old.Refill
+		if old.ResetAt.After(now) && (old.Status == "rejected" || old.Utilization >= 1) {
+			refill = ClaudeWindowRefill{Deadline: old.ResetAt, ObservedAt: now}
+		}
+		if refill.Deadline.After(now) {
+			reading.Refill = refill
+			reopened[name] = refill
+		}
+	}
+	return reopened
+}
+
 // NeedsMeterReading reports whether a probe should read an account's usage:
 // it has no 5h or weekly reading newer than maxAge, or no Fable reading that
 // new. Responses keep the 5h and weekly meters of a busy account fresh, but

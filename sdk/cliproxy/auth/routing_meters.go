@@ -23,6 +23,9 @@ type Meter struct {
 	Window time.Duration `json:"window,omitempty"`
 	// Status is the upstream verdict for the window ("allowed", "allowed_warning", "rejected").
 	Status string `json:"status,omitempty"`
+	// Refill records a confirmed early refill until its old deadline. A separate
+	// exhausted window can keep the original hold in place for another probe.
+	Refill ClaudeWindowRefill `json:"early_refill,omitzero"`
 	// Models lists the models whose responses reported this meter.
 	Models []string `json:"models,omitempty"`
 	// ObservedAt is when the meter was last reported.

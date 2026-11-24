@@ -461,6 +461,48 @@ func dedupeStrings(values []string) []string {
 
 // ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
+	return m.resetQuota(ctx, authID, nil)
+}
+
+// ReconcileClaudeQuota releases only holds explained by an early provider refill.
+func (m *Manager) ReconcileClaudeQuota(ctx context.Context, before *Auth, reopened map[string]ClaudeWindowRefill, meters map[string]*Meter) error {
+	if before == nil || len(reopened) == 0 {
+		return nil
+	}
+	_, _, err := m.resetQuota(ctx, before.ID, &claudeQuotaRefill{before, reopened, meters})
+	return err
+}
+
+type claudeQuotaRefill struct {
+	before   *Auth
+	reopened map[string]ClaudeWindowRefill
+	meters   map[string]*Meter
+}
+
+func (r *claudeQuotaRefill) matches(model string, quota QuotaState, retryAt, updatedAt, now time.Time) bool {
+	if !quota.Exceeded || (quota.Reason != "credential_quota" && quota.Reason != "quota") ||
+		!quota.NextRecoverAt.After(now) || retryAt.After(quota.NextRecoverAt) {
+		return false
+	}
+	for _, meter := range r.meters {
+		if meterAppliesToModel("claude", meter, model) && (model != "" || claudeClaimFamily(meter.Name) == "") && meter.Utilization >= 1 {
+			return false
+		}
+	}
+	for name, refill := range r.reopened {
+		// The provider rounds Retry-After and the proxy adds jitter. Match the
+		// recorded window rather than clearing a hold with a different deadline.
+		if updatedAt.After(refill.ObservedAt) || refill.Deadline.Sub(quota.NextRecoverAt).Abs() > time.Minute {
+			continue
+		}
+		if name == "5h" || name == "7d" || (model != "" && claudeClaimFamily(name) != "" && claudeClaimFamily(name) == claudeModelFamily(model)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) resetQuota(ctx context.Context, authID string, refill *claudeQuotaRefill) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -482,6 +524,17 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		return nil, nil, nil
 	}
 
+	if refill != nil && (auth.Generation != refill.before.Generation || !auth.UpdatedAt.Equal(refill.before.UpdatedAt)) {
+		m.mu.Unlock()
+		return nil, nil, errors.New("account changed during usage check, retry with a fresh reading")
+	}
+	if refill != nil && (auth.Provider != "claude" || auth.Disabled || auth.Status == StatusDisabled ||
+		hasUnauthorizedAuthFailure(auth) || isInvalidGrantErrorMessage(auth.StatusMessage) || strings.Contains(auth.StatusMessage, "invalid grant") ||
+		(auth.LastError != nil && (statusCodeFromResult(auth.LastError) != http.StatusTooManyRequests || isCloudflareChallengeResultError(auth.LastError) || isInvalidGrantResultError(auth.LastError)))) {
+		m.mu.Unlock()
+		return nil, nil, nil
+	}
+
 	var cooldownRecordsBefore []CooldownStateRecord
 	trackCooldownState := m.cooldownStore != nil
 	if trackCooldownState {
@@ -492,12 +545,27 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		if strings.TrimSpace(modelKey) == "" {
 			continue
 		}
+		if refill != nil && (state == nil || state.Status == StatusDisabled ||
+			(state.LastError != nil && state.LastError.HTTPStatus != http.StatusTooManyRequests) ||
+			!refill.matches(modelKey, state.Quota, state.NextRetryAfter, state.UpdatedAt, now)) {
+			continue
+		}
 		models = append(models, modelKey)
 		if state != nil {
 			resetModelState(state, now)
 		}
 	}
-	if clearCooldownStateForAuth(auth, now) {
+	if refill != nil {
+		global := auth.Quota.Reason == "credential_quota" && refill.matches("", auth.Quota, auth.NextRetryAfter, auth.UpdatedAt, now)
+		if !global && len(models) == 0 {
+			m.mu.Unlock()
+			return nil, nil, nil
+		}
+		if global || auth.Quota.Reason == "quota" {
+			clearAggregatedAvailability(auth)
+		}
+		updateAggregatedAvailability(auth, now)
+	} else if clearCooldownStateForAuth(auth, now) {
 		if len(models) == 0 {
 			models = append(models, registeredModels...)
 		}
