@@ -486,7 +486,10 @@ func (r *claudeQuotaRefill) matches(model string, quota QuotaState, retryAt, upd
 		!quota.NextRecoverAt.After(now) || retryAt.After(quota.NextRecoverAt) {
 		return false
 	}
-	provider := strings.ToLower(strings.TrimSpace(r.before.Provider))
+	provider := "claude"
+	if r.before != nil && strings.TrimSpace(r.before.Provider) != "" {
+		provider = strings.ToLower(strings.TrimSpace(r.before.Provider))
+	}
 	for _, meter := range r.meters {
 		if meterAppliesToModel(provider, meter, model) && (model != "" || claudeClaimFamily(meter.Name) == "") && meter.Utilization >= 1 {
 			return false
