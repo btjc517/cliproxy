@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -187,6 +188,52 @@ func TestResetAdviceHoldsOnAccountThatIsOff(t *testing.T) {
 	state.SetResetMode("auto")
 	if candidate := state.AutoResetCandidate([]*Auth{a}, routerTestNow); candidate != nil {
 		t.Fatalf("automatic mode would use a reset on an account that is off: %+v", candidate)
+	}
+}
+
+// An account out of both its week and its Fable week, with a reset that clears
+// both: the shared week decides, since it stops every model. Seen live on
+// 24 Nov 2026, where such a reset was judged on Fable alone.
+func TestResetAdviceJudgesFullResetOnTheSharedWeek(t *testing.T) {
+	state := newTestRoutingState(routerTestNow)
+	a, b := routerTestAuth("a.json", "claude", "a@example.com"), routerTestAuth("b.json", "claude", "b@example.com")
+	weekSpent(state, a.ID, 2*24*time.Hour)
+	setMeter(state, a.ID, "claude", Meter{Name: claudeFableClaim, Utilization: 0.98, ResetAt: routerTestNow.Add(5 * 24 * time.Hour), Status: "allowed"})
+	weekSpent(state, b.ID, 3*24*time.Hour)
+	setMeter(state, b.ID, "claude", Meter{Name: claudeFableClaim, Utilization: 0.4, ResetAt: routerTestNow.Add(5 * 24 * time.Hour), Status: "allowed"})
+	grant := resetTestGrant("full")
+	grant.RequiresLimit = false
+	observeTestResets(state, a.ID, grant)
+
+	advice := adviceFor(t, state, []*Auth{a, b}, a.ID, "full")
+	if advice.Meter != "7d" || advice.Action != "use" || !strings.Contains(advice.Reason, "Every account is at a limit. Clears the weekly limit 2d early") {
+		t.Fatalf("advice = %+v, want use, judged on the shared week", advice)
+	}
+}
+
+// A grant or reading without a time leaves the field out of the dashboard
+// data, so the page never shows the year 1.
+func TestResetViewLeavesOutUnsetTimes(t *testing.T) {
+	state := newTestRoutingState(routerTestNow)
+	a := routerTestAuth("a.json", "claude", "a@example.com")
+	weekOpen(state, a.ID, 0.2)
+	grant := resetTestGrant("full")
+	grant.EndsAt = time.Time{}
+	observeTestResets(state, a.ID, grant)
+	b := routerTestAuth("b.json", "claude", "b@example.com")
+	weekOpen(state, b.ID, 0.2)
+	raw, errMarshal := json.Marshal(state.Dashboard([]*Auth{a, b}, routerTestNow).Accounts)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	for _, field := range []string{"ends_at", "starts_at", "cooldown_until"} {
+		if strings.Contains(string(raw), `"`+field+`"`) {
+			t.Fatalf("dashboard data carries an unset %s: %s", field, raw)
+		}
+	}
+	// a has a reading of its resets, b has none.
+	if strings.Count(string(raw), `"resets_observed_at"`) != 1 {
+		t.Fatalf("resets_observed_at must be set for a only: %s", raw)
 	}
 }
 

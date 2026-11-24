@@ -22,8 +22,8 @@ type ResetGrant struct {
 	// Total and Left count the uses the grant came with and has left.
 	Total    int       `json:"total"`
 	Left     int       `json:"left"`
-	StartsAt time.Time `json:"starts_at,omitempty"`
-	EndsAt   time.Time `json:"ends_at,omitempty"`
+	StartsAt time.Time `json:"starts_at,omitzero"`
+	EndsAt   time.Time `json:"ends_at,omitzero"`
 	// Clears names the meters a use sets back to zero ("5h", "7d", "7d_oi",
 	// "primary", "secondary").
 	Clears []string `json:"clears,omitempty"`
@@ -45,7 +45,7 @@ type ResetGrant struct {
 // ResetStatus is what a provider last reported about an account's resets.
 type ResetStatus struct {
 	Grants        []ResetGrant `json:"grants,omitempty"`
-	CooldownUntil time.Time    `json:"cooldown_until,omitempty"`
+	CooldownUntil time.Time    `json:"cooldown_until,omitzero"`
 	ObservedAt    time.Time    `json:"observed_at"`
 }
 
@@ -775,22 +775,31 @@ func adviseReset(provider string, entry *resetAccount, grant ResetGrant, status 
 		return ResetAdvice{Action: "wait", Reason: "The provider allows the next reset " + whenText(status.CooldownUntil, now)}
 	}
 
-	// The limit the advice is about: the used-up one with the latest reset, or
-	// failing that the fullest one.
+	// The limit the advice is about. A used-up shared limit comes first: it
+	// stops every model, so it decides what a reset is worth even when the
+	// reset also clears a model's own week. Then a used-up model week. Among
+	// used-up limits of one kind, the one whose own reset is furthest off;
+	// with none used up, the fullest.
 	var target Meter
-	found, targetSpent := false, false
+	found, targetSpent, targetRank := false, false, 0
 	for _, name := range grant.Clears {
 		meter, ok := entry.meters[name]
 		if !ok {
 			continue
 		}
 		_, spent := entry.spent[name]
-		better := !found ||
-			(spent && !targetSpent) ||
-			(spent == targetSpent && spent && meter.ResetAt.After(target.ResetAt)) ||
-			(spent == targetSpent && !spent && meter.Utilization > target.Utilization)
+		rank := 0
+		switch {
+		case spent && isSharedMeter(name):
+			rank = 2
+		case spent:
+			rank = 1
+		}
+		better := !found || rank > targetRank ||
+			(rank == targetRank && spent && meter.ResetAt.After(target.ResetAt)) ||
+			(rank == targetRank && !spent && meter.Utilization > target.Utilization)
 		if better {
-			target, found, targetSpent = meter, true, spent
+			target, found, targetSpent, targetRank = meter, true, spent, rank
 		}
 	}
 	if !found {

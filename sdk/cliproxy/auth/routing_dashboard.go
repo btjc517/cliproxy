@@ -35,7 +35,7 @@ type RouterAccountView struct {
 	// Resets are the account's usage resets with advice on each.
 	Resets []ResetGrantView `json:"resets,omitempty"`
 	// ResetsObservedAt is when the resets were last read from the provider.
-	ResetsObservedAt time.Time `json:"resets_observed_at,omitempty"`
+	ResetsObservedAt time.Time `json:"resets_observed_at,omitzero"`
 }
 
 // MeterView is one meter as the dashboard draws it.
