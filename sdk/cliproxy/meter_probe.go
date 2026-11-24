@@ -81,7 +81,7 @@ func (s *Service) probeClaudeMeters(ctx context.Context) {
 		resetAge := meterProbeMaxAge
 		if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
 			// A user can refill an account while the old retry deadline is still days away.
-			resetAge = 2 * meterProbeInterval
+			resetAge = heldAccountProbeAge
 		}
 		if !state.NeedsMeterReading(auth.ID, now, meterProbeMaxAge) && !state.NeedsResetReading(auth.ID, now, resetAge) {
 			continue

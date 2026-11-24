@@ -1096,7 +1096,11 @@ func ParseCodexUsageMeters(body []byte, now time.Time) map[string]*Meter {
 			Name:        name,
 			Utilization: math.Max(0, math.Min(1, window.Get("used_percent").Float()/100)),
 			Window:      time.Duration(window.Get("limit_window_seconds").Int()) * time.Second,
+			Status:      "allowed",
 			ObservedAt:  now,
+		}
+		if meter.Utilization >= 1 {
+			meter.Status = "rejected"
 		}
 		if resetAt := window.Get("reset_at").Int(); resetAt > 0 {
 			meter.ResetAt = time.Unix(resetAt, 0)

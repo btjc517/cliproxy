@@ -191,6 +191,13 @@ func (s *Service) readCodexUsage(ctx context.Context, auth *coreauth.Auth) error
 		return fmt.Errorf("read usage windows: %w", errUsage)
 	}
 	if meters := coreauth.ParseCodexUsageMeters(usage, now); len(meters) > 0 {
+		// A reset used at the provider refills the account before the time the
+		// proxy is holding it until. Release that hold, as for Claude.
+		if reopened := state.ReopenedClaudeWindows(auth.ID, meters, now); len(reopened) > 0 {
+			if errReconcile := s.coreManager.ReconcileClaudeQuota(ctx, auth, reopened, meters); errReconcile != nil {
+				return fmt.Errorf("release hold after refill: %w", errReconcile)
+			}
+		}
 		state.ObserveMeters(auth.ID, "codex", meters, now)
 	}
 	return nil
@@ -254,7 +261,14 @@ func (s *Service) probeCodexResets(ctx context.Context) {
 		if token, accountID := codexOAuth(auth); token == "" || accountID == "" {
 			continue
 		}
-		if !state.NeedsResetReading(auth.ID, time.Now(), meterProbeMaxAge) {
+		now := time.Now()
+		resetAge := meterProbeMaxAge
+		if codexAccountHeld(auth, now) {
+			// A reset used at the provider refills an account days before the
+			// time it is held until, so a held account is read more often.
+			resetAge = heldAccountProbeAge
+		}
+		if !state.NeedsResetReading(auth.ID, now, resetAge) {
 			continue
 		}
 		if errRead := s.readCodexUsage(ctx, auth); errRead != nil {
@@ -262,6 +276,24 @@ func (s *Service) probeCodexResets(ctx context.Context) {
 		}
 		state.MarkResetProbe(auth.ID, time.Now())
 	}
+}
+
+// heldAccountProbeAge is how often an account held for a used-up limit is
+// read again, so a refill at the provider is noticed within a few minutes.
+const heldAccountProbeAge = 2 * meterProbeInterval
+
+// codexAccountHeld reports whether the account, or any of its models, is held
+// for a used-up limit. Codex limits are held per model.
+func codexAccountHeld(auth *coreauth.Auth, now time.Time) bool {
+	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+		return true
+	}
+	for _, state := range auth.ModelStates {
+		if state != nil && state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // runAutoReset uses one reset when automatic mode is on and one is worth it.

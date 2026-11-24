@@ -265,3 +265,72 @@ func jsonInt(v int64) string {
 	raw, _ := json.Marshal(v)
 	return string(raw)
 }
+
+// A Codex account held until its weekly reset is released when OpenAI reports
+// the week refilled early, as happens when a reset credit is used at OpenAI
+// and not through the proxy.
+func TestCodexProbeReleasesHoldAfterEarlyRefill(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	deadline := now.Add(3 * 24 * time.Hour)
+	_, server := newResetTestServer(t, map[string]string{
+		"GET /wham/rate-limit-reset-credits": `{"credits":[]}`,
+		"GET /wham/usage": `{"rate_limit":{"primary_window":{"used_percent":2,"limit_window_seconds":18000,"reset_at":` + jsonInt(now.Add(4*time.Hour).Unix()) + `},
+		  "secondary_window":{"used_percent":5,"limit_window_seconds":604800,"reset_at":` + jsonInt(deadline.Unix()) + `}}}`,
+	})
+	previous := codexBackendURL
+	codexBackendURL = server.URL
+	defer func() { codexBackendURL = previous }()
+
+	auth := &coreauth.Auth{ID: "codex-early-refill.json", Provider: "codex", Metadata: map[string]any{"access_token": "codex-token", "account_id": "acct-9"}}
+	service := resetTestService(t, auth)
+	manager := service.coreManager
+	retry := time.Until(deadline)
+	manager.MarkResult(ctx, coreauth.Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-test", RetryAfter: &retry, Error: &coreauth.Error{HTTPStatus: 429, Message: "usage limit reached"}})
+	held, _ := manager.GetByID(auth.ID)
+	if state := held.ModelStates["gpt-test"]; state == nil || !state.Unavailable || !state.Quota.Exceeded {
+		t.Fatalf("setup failed: %+v", held.ModelStates["gpt-test"])
+	}
+	// The proxy last saw a full week.
+	old := now.Add(-30 * time.Minute)
+	coreauth.DefaultRoutingState().ObserveMeters(auth.ID, "codex", map[string]*coreauth.Meter{
+		"secondary": {Name: "secondary", Status: "rejected", Utilization: 1, ResetAt: deadline, Window: 7 * 24 * time.Hour, ObservedAt: old},
+	}, old)
+
+	service.probeCodexResets(ctx)
+
+	got, _ := manager.GetByID(auth.ID)
+	if state := got.ModelStates["gpt-test"]; state.Unavailable || state.Quota.Exceeded {
+		t.Fatalf("the hold stayed after OpenAI reported the week refilled: %+v", state)
+	}
+}
+
+// A Codex week that is still full keeps its hold.
+func TestCodexProbeKeepsHoldWhileWeekIsFull(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	deadline := now.Add(3 * 24 * time.Hour)
+	_, server := newResetTestServer(t, map[string]string{
+		"GET /wham/rate-limit-reset-credits": `{"credits":[]}`,
+		"GET /wham/usage":                    `{"rate_limit":{"secondary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_at":` + jsonInt(deadline.Unix()) + `}}}`,
+	})
+	previous := codexBackendURL
+	codexBackendURL = server.URL
+	defer func() { codexBackendURL = previous }()
+
+	auth := &coreauth.Auth{ID: "codex-still-full.json", Provider: "codex", Metadata: map[string]any{"access_token": "codex-token", "account_id": "acct-10"}}
+	service := resetTestService(t, auth)
+	retry := time.Until(deadline)
+	service.coreManager.MarkResult(ctx, coreauth.Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-test", RetryAfter: &retry, Error: &coreauth.Error{HTTPStatus: 429, Message: "usage limit reached"}})
+	old := now.Add(-30 * time.Minute)
+	coreauth.DefaultRoutingState().ObserveMeters(auth.ID, "codex", map[string]*coreauth.Meter{
+		"secondary": {Name: "secondary", Status: "rejected", Utilization: 1, ResetAt: deadline, Window: 7 * 24 * time.Hour, ObservedAt: old},
+	}, old)
+
+	service.probeCodexResets(ctx)
+
+	got, _ := service.coreManager.GetByID(auth.ID)
+	if state := got.ModelStates["gpt-test"]; !state.Unavailable || !state.Quota.Exceeded {
+		t.Fatalf("the hold was released while the week is still full: %+v", state)
+	}
+}

@@ -464,7 +464,9 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 	return m.resetQuota(ctx, authID, nil)
 }
 
-// ReconcileClaudeQuota releases only holds explained by an early provider refill.
+// ReconcileClaudeQuota releases only holds explained by an early provider
+// refill. It serves Claude and Codex accounts: both hold an account until the
+// reset time of the window that ran out, and both can be refilled before it.
 func (m *Manager) ReconcileClaudeQuota(ctx context.Context, before *Auth, reopened map[string]ClaudeWindowRefill, meters map[string]*Meter) error {
 	if before == nil || len(reopened) == 0 {
 		return nil
@@ -484,8 +486,9 @@ func (r *claudeQuotaRefill) matches(model string, quota QuotaState, retryAt, upd
 		!quota.NextRecoverAt.After(now) || retryAt.After(quota.NextRecoverAt) {
 		return false
 	}
+	provider := strings.ToLower(strings.TrimSpace(r.before.Provider))
 	for _, meter := range r.meters {
-		if meterAppliesToModel("claude", meter, model) && (model != "" || claudeClaimFamily(meter.Name) == "") && meter.Utilization >= 1 {
+		if meterAppliesToModel(provider, meter, model) && (model != "" || claudeClaimFamily(meter.Name) == "") && meter.Utilization >= 1 {
 			return false
 		}
 	}
@@ -495,7 +498,7 @@ func (r *claudeQuotaRefill) matches(model string, quota QuotaState, retryAt, upd
 		if updatedAt.After(refill.ObservedAt) || refill.Deadline.Sub(quota.NextRecoverAt).Abs() > time.Minute {
 			continue
 		}
-		if name == "5h" || name == "7d" || (model != "" && claudeClaimFamily(name) != "" && claudeClaimFamily(name) == claudeModelFamily(model)) {
+		if isSharedMeter(name) || (model != "" && claudeClaimFamily(name) != "" && claudeClaimFamily(name) == claudeModelFamily(model)) {
 			return true
 		}
 	}
@@ -528,7 +531,7 @@ func (m *Manager) resetQuota(ctx context.Context, authID string, refill *claudeQ
 		m.mu.Unlock()
 		return nil, nil, errors.New("account changed during usage check, retry with a fresh reading")
 	}
-	if refill != nil && (auth.Provider != "claude" || auth.Disabled || auth.Status == StatusDisabled ||
+	if refill != nil && ((auth.Provider != "claude" && auth.Provider != "codex") || auth.Disabled || auth.Status == StatusDisabled ||
 		hasUnauthorizedAuthFailure(auth) || isInvalidGrantErrorMessage(auth.StatusMessage) || strings.Contains(auth.StatusMessage, "invalid grant") ||
 		(auth.LastError != nil && (statusCodeFromResult(auth.LastError) != http.StatusTooManyRequests || isCloudflareChallengeResultError(auth.LastError) || isInvalidGrantResultError(auth.LastError)))) {
 		m.mu.Unlock()
