@@ -9,7 +9,7 @@ import { accountPicker, bindAccountPicker } from "./account-picker.js";
 import { allowanceSeries, trajectory } from "./burn.js";
 import { timeline } from "./timeline.js";
 import { region } from "../paint.js";
-import { suggestionBanner } from "./resets.js";
+import { suggestionBanner, resetTag } from "./resets.js";
 
 // A warning when the account's weekly allowance runs out before it resets, at this rate.
 function runningOut(acct) {
@@ -51,6 +51,8 @@ function accountColumn(acct, isNext) {
     end = runningOut(acct) || planEnding(acct, week?.reset);
     l2 += reset(week?.reset);
   }
+  // An account that is out, or nearly, shows that it has a reset to use.
+  if (st.kind !== "off" && st.kind !== "blocked" && st.kind !== "error") l1 += resetTag(acct);
   return `<div class="acctcol"><div class="l1">${l1}${end ? `<span class="end">${end}</span>` : ""}</div><div class="l2">${l2}</div></div>`;
 }
 

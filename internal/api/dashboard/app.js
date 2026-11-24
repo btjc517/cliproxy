@@ -9,6 +9,7 @@ import * as sessions from "./screens/sessions.js";
 import * as session from "./screens/session.js";
 import * as routing from "./screens/routing.js";
 import * as settings from "./screens/settings.js";
+import * as resets from "./screens/resets.js";
 import { V, allViews, loadViews, redirect, viewHref } from "./screens/views.js";
 import { viewMenu, newViewFromSidebar } from "./screens/viewmenus.js";
 
@@ -17,6 +18,7 @@ const NAV = [
   { id: "accounts", href: "#/accounts", label: "Accounts", icon: "accounts" },
   { id: "sessions", href: "#/sessions", label: "Sessions", icon: "sessions" },
   { id: "routing", href: "#/routing", label: "Routing", icon: "routing" },
+  { id: "resets", href: "#/resets", label: "Resets", icon: "reset" },
 ];
 const VIEW_ICON = { allowance: "battery", usage: "usage", performance: "performance" };
 const MORE = `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${[3.5, 8, 12.5].map((x) => `<circle cx="${x}" cy="8" r="1.25" fill="var(--icon)"/>`).join("")}</svg>`;
@@ -37,7 +39,7 @@ function route() {
   if (a === "accounts" && b) return { nav: "accounts", screen: account, params: [b] };
   if (a === "sessions" && b) return { nav: "sessions", screen: session, params: [b] };
   if (a === "telemetry") return { nav: "view:" + (b || ""), screen: telemetry, params: [b || ""] };
-  const map = { accounts, sessions, routing, settings };
+  const map = { accounts, sessions, routing, settings, resets };
   return map[a] ? { nav: a, screen: map[a], params: [] } : { nav: "overview", screen: overview, params: [] };
 }
 

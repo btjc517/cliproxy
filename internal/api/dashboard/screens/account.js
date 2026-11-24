@@ -83,7 +83,7 @@ export function view(ctx) {
   const aend = ats.range ? selectionLabel(ats.range, "data-ac-clear") : ats.moved ? backToNow("data-ac-home") : `<span class="muted">${esc(windowText(ats.window))}</span>`;
   const mine = sessions().filter((s) => (s.auth_ids || []).includes(a.id));
   const active = mine.filter((s) => Date.now() - Date.parse(s.last_seen) < 10 * 60e3);
-  const resets = resetTable([a], { account: true });
+  const resets = resetTable([a], { flat: true });
   const stateLine = st.kind === "blocked" || st.kind === "error" ? `<div class="banner">${esc(st.text)}${st.detail && st.detail !== st.text ? ": " + esc(st.detail) : ""}</div>` : "";
 
   const html = `
@@ -97,12 +97,12 @@ export function view(ctx) {
     <div class="body">
       ${stateLine}
       ${region("ac|limits", `${limitBlock("Week", lim.week, st, trajectory(allowanceSeries(a.id, true)))}${limitBlock("5 hours", lim.short, st, accountTrajectory(a.id, false))}${lim.extra.map((m) => limitBlock(esc(m.title), m, st, null)).join("")}${planBlock(a)}`, "div", `class="limits"`)}
+      ${region("ac|resets", resets.html ? `<div class="sec"><div class="sech"><div class="t"><b>${resets.count === 1 ? "1 reset" : resets.count + " resets"} ready to use</b><span class="muted">Clears a limit before it resets by itself. Each works once.</span></div><a class="linkbtn" href="#/resets">All resets ${icon("chevronRight", 14)}</a></div>${resets.html}</div>` : "", "div", `style="display:contents"`)}
       <div class="activity">
         <div class="head"><div class="t"><b>Allowance left</b>${region("ac|end", aend, "div", `style="display:contents"`)}</div>${seg([{ id: "week", label: "Week" }, { id: "5h", label: "5 hours" }], long ? "week" : "5h", "data-ac-window", "bare")}</div>
         ${allowance.html}
       </div>
       ${strip.html}
-      ${region("ac|resets", resets.html ? `<div class="sec"><div class="sech"><div class="t"><b>Usage resets</b><span class="muted">${resets.count ? resets.count + " unused" : "All used"}</span></div></div>${resets.html}</div>` : "", "div", `style="display:contents"`)}
       ${region("ac|sessions", `
         <div class="sech">
           <div class="t"><b>Active sessions</b><span class="muted">Seen in the last 10 minutes</span></div>

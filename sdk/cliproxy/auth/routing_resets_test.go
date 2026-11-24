@@ -237,6 +237,39 @@ func TestResetViewLeavesOutUnsetTimes(t *testing.T) {
 	}
 }
 
+// The same sort of reset comes with different provider labels and types from
+// account to account, so the dashboard names it by what it clears.
+func TestResetKindIsReadFromWhatItClears(t *testing.T) {
+	for _, tc := range []struct {
+		provider    string
+		clears      []string
+		kind, title string
+	}{
+		{"claude", []string{"7d", "7d_oi"}, "full", "Full reset"},
+		{"claude", []string{"5h", "7d", "7d_oi"}, "full", "Full reset"},
+		{"claude", []string{"7d_oi"}, "model", "Fable reset"},
+		{"claude", []string{"5h", "7d_oi"}, "model", "Fable reset"},
+		{"claude", []string{"7d_opus"}, "model", "Opus reset"},
+		{"claude", []string{"5h"}, "session", "5-hour reset"},
+		{"codex", []string{"primary", "secondary"}, "full", "Full reset"},
+		{"codex", []string{"primary"}, "session", "5-hour reset"},
+		{"claude", nil, "other", "Usage reset"},
+	} {
+		kind, title := resetKind(tc.provider, ResetGrant{Clears: tc.clears})
+		if kind != tc.kind || title != tc.title {
+			t.Fatalf("%s %v: kind %q title %q, want %q %q", tc.provider, tc.clears, kind, title, tc.kind, tc.title)
+		}
+	}
+	state := newTestRoutingState(routerTestNow)
+	a := routerTestAuth("a.json", "claude", "a@example.com")
+	weekOpen(state, a.ID, 0.2)
+	observeTestResets(state, a.ID, resetTestGrant("full"))
+	view := state.Dashboard([]*Auth{a}, routerTestNow).Accounts[a.ID].Resets[0]
+	if view.Kind != "full" || view.Title != "Full reset" {
+		t.Fatalf("dashboard reset = %+v, want it named a full reset", view)
+	}
+}
+
 // A reset does not get a refused account working again, so it is not
 // suggested or used automatically while the provider turns the account away.
 func TestResetAdviceHoldsOnAccountTheProviderRefuses(t *testing.T) {

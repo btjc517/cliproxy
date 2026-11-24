@@ -512,6 +512,15 @@ type ResetAdvice struct {
 // ResetGrantView is one reset with its advice, as the dashboard draws it.
 type ResetGrantView struct {
 	ResetGrant
+	// Kind is what sort of reset this is, by what it clears: "full" (the
+	// shared week, with whatever else), "model" (one model's own week) or
+	// "session" (the 5-hour window alone). Providers label the same sort of
+	// reset differently from account to account, so the kind is read from the
+	// limits it clears.
+	Kind string `json:"kind"`
+	// Title names the reset in two words: "Full reset", "Fable reset",
+	// "5-hour reset".
+	Title string `json:"title"`
 	// ClearsTitles names the cleared limits in plain words.
 	ClearsTitles []string    `json:"clears_titles,omitempty"`
 	Advice       ResetAdvice `json:"advice"`
@@ -626,6 +635,7 @@ func (s *RoutingState) resetViews(auths []*Auth, now time.Time) (map[string][]Re
 					}
 				}
 				view := ResetGrantView{ResetGrant: grant, Advice: advice}
+				view.Kind, view.Title = resetKind(provider, grant)
 				for _, name := range grant.Clears {
 					view.ClearsTitles = append(view.ClearsTitles, resetMeterTitle(provider, name))
 				}
@@ -657,6 +667,29 @@ func (s *RoutingState) resetViews(auths []*Auth, now time.Time) (map[string][]Re
 		return suggestions[i].Advice.Gain*suggestions[i].Advice.EarlyHours > suggestions[j].Advice.Gain*suggestions[j].Advice.EarlyHours
 	})
 	return views, suggestions
+}
+
+// resetKind sorts a reset by the limits it clears and names it.
+func resetKind(provider string, grant ResetGrant) (kind, title string) {
+	family, short := "", false
+	for _, name := range grant.Clears {
+		meter := &Meter{Name: name}
+		switch {
+		case isSharedMeter(name) && meterIsLong(meter):
+			return "full", "Full reset"
+		case meterIsShort(meter):
+			short = true
+		case family == "" && strings.EqualFold(provider, "claude"):
+			family = claudeClaimFamily(name)
+		}
+	}
+	switch {
+	case family != "":
+		return "model", capitalize(family) + " reset"
+	case short:
+		return "session", "5-hour reset"
+	}
+	return "other", "Usage reset"
 }
 
 func demoteResetView(views []ResetGrantView, grantID, reason string) {
