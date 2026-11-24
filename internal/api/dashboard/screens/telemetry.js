@@ -3,7 +3,7 @@
 // range selection; the table under them sums the same buckets per account.
 import {
   S, esc, fmt, int, ms, money, clock, day, icon, logo, tokens, cacheReuse, apiCost,
-  providerTitle, accountScope, setAccountSelection, warnState, status,
+  providerTitle, accountScope, setAccountSelection, warnState, status, plan, planDay,
 } from "../core.js";
 import { accountColor, readAt } from "./common.js";
 import { accountPicker, bindAccountPicker } from "./account-picker.js";
@@ -14,6 +14,7 @@ import { DAY, timeState, forgetTime, bindTime, windowText, selectionLabel, backT
 import { V, COLUMN_IDS, findView, defaultId, sameView, viewWindow, hasForecast, loadViews, changedFields } from "./views.js";
 import { openDisplay, displayOpen, startRename, renameBox, mountRename, setDefaultView, saveDraft, newViewDialog, viewMenu } from "./viewmenus.js";
 import { region, kept } from "../paint.js";
+import { resetTable, resetTag, suggestions } from "./resets.js";
 
 const KEY = "tv";
 const copy = (v) => JSON.parse(JSON.stringify(v));
@@ -95,6 +96,8 @@ const resetName = (t, now) => (t - now < 6 * DAY ? `${day(t).split(" ")[0]} ${cl
 const ALLOWANCE_COLS = ["weekLeft", "shortLeft", "shortReset", "perDay", "heading", "nextReset"];
 const USAGE_COLS = ["tokens", "requests", "input", "cacheWrite", "cacheRead", "output", "cost", "cacheReuse"];
 const PERF_COLS = ["requests", "ttft50", "ttft90", "throughput", "failures", "failovers"];
+// Facts about the account itself, the same whatever window or range is set.
+const PLAN_COLS = ["nextBill", "resets"];
 
 // Column labels and widths from the Paper boards. r: right-aligned.
 export const COLUMNS = {
@@ -104,6 +107,8 @@ export const COLUMNS = {
   perDay: { label: "Use per day", w: 140 },
   heading: { label: "Heading for", w: 270 },
   nextReset: { label: "Week resets", w: 240 },
+  nextBill: { label: "Next bill", w: 170 },
+  resets: { label: "Resets", w: 110 },
   tokens: { label: "Tokens", w: 100, r: true },
   requests: { label: "Requests", w: 90, r: true },
   input: { label: "New input", w: 104, r: true },
@@ -126,6 +131,22 @@ const reuseCell = (x) => { const r = cacheReuse(x); return r == null ? `<span cl
 const perSec = (x) => (x ? (x < 10 ? x.toFixed(1) : String(Math.round(x))) + " tokens/s" : "–");
 
 const fullTime = (t) => `${dayText(t)}, ${clock(t)}`;
+
+// Where a next bill time comes from, for its tooltip.
+const BILL_SOURCE = {
+  plan_start: "Worked out from when the plan started. It bills each month at the same day and time.",
+  token: "Worked out from the paid-until time in the sign-in. It bills each month at the same day and time.",
+  manual: "The renewal date set on the account.",
+};
+// When the account's plan bills next: to the minute when the provider gives a
+// time, the day alone for a date set by hand, and the end date for a plan
+// that does not renew.
+function nextBillHtml(a) {
+  const p = plan(a);
+  if (p.ends) return warnState("Ends " + planDay(p.ends), "sm");
+  const text = p.nextBill ? fullTime(p.nextBill) : p.renews ? planDay(p.renews) : "";
+  return text ? `<span title="${esc(BILL_SOURCE[p.source] || "")}">${esc(text)}</span>` : "";
+}
 
 // Where an account's week is heading, and under it what follows: after a
 // used-up week, how the next one goes at the same rate.
@@ -201,7 +222,7 @@ export function tableHtml(view, ctx) {
     .map((p) => { const back = p.segs.find((s) => s.from > now && s.n > 0)?.from; return [p.provider, `no ${providerTitle(p.provider)} allowance${back ? " until " + resetName(back, now) : ""}`]; });
   const deadText = new Map(deadNow);
   const dash = `<span class="muted">–</span>`;
-  const groupOf = (c) => (c.sel || ALLOWANCE_COLS.includes(c.id) ? "allow" : perfCols.includes(c.id) ? "perf" : "usage");
+  const groupOf = (c) => (c.sel || ALLOWANCE_COLS.includes(c.id) ? "allow" : PLAN_COLS.includes(c.id) ? "plan" : perfCols.includes(c.id) ? "perf" : "usage");
 
   // A row's cells, one per column in column order. msgs maps a group to a
   // message that replaces its values ("No requests"): it fills the group's
@@ -239,6 +260,8 @@ export function tableHtml(view, ctx) {
     const named = list.slice(0, 3).map((t) => resetName(t, now)).join(", ") + (list.length > 3 ? `, ${list.length - 3} more` : "");
     return field(list.length ? esc(named) : `<span class="muted">None</span>`);
   };
+  // a: the row's account, or null on a row that sums accounts.
+  const planCell = (a, c) => cell(c.w, (a && (c.id === "resets" ? resetTag(a) : nextBillHtml(a))) || dash, c.r, c.cls, c.label);
   const usageCell = (c, x) => {
     if (!x) return cell(c.w, dash, c.r, c.cls);
     if (c.id === "cacheReuse") return cell(c.w, reuseCell(x));
@@ -271,13 +294,13 @@ export function tableHtml(view, ctx) {
     const msgs = {};
     if (hasAllow && !l && !short) msgs.allow = "No allowance reading yet";
     if (pv?.none) { const extra = deadText.get(a.provider); msgs.perf = `No requests${extra ? ", " + esc(extra) : ""}`; }
-    const html = cellsFor(msgs, (c, g) => (g === "allow" ? allowCell(c.id === "shortLeft" || c.id === "shortReset" ? short : l, c) : g === "perf" ? perfCell(c, pv) : usageCell(c, sums?.per[a.id])));
+    const html = cellsFor(msgs, (c, g) => (g === "allow" ? allowCell(c.id === "shortLeft" || c.id === "shortReset" ? short : l, c) : g === "plan" ? planCell(a, c) : g === "perf" ? perfCell(c, pv) : usageCell(c, sums?.per[a.id])));
     return `<div class="tr row" data-row-acct="${esc(a.id)}">${acctCell(a, acctW)}${html}</div>`;
   });
   // An All accounts row under usage and performance columns, never under allowance.
   if (!hasAllow && sc.shown.length > 1) {
     const pv = perfCols.length ? perfVals(sc) : null;
-    const cells = cellsFor(pv?.none ? { perf: "No requests" } : {}, (c, g) => (g === "perf" ? perfCell(c, pv) : usageCell(c, sums?.sum)));
+    const cells = cellsFor(pv?.none ? { perf: "No requests" } : {}, (c, g) => (g === "plan" ? planCell(null, c) : g === "perf" ? perfCell(c, pv) : usageCell(c, sums?.sum)));
     rows.push(`<div class="tr total"><div class="c acct" style="min-width:${acctW}px">All accounts</div>${cells}</div>`);
   }
   // Earlier history only makes sense for the usage columns.
@@ -287,13 +310,27 @@ export function tableHtml(view, ctx) {
     if (sums.first > from + 60e3 && !sc.some) {
       const provs = sc.prov === "all" ? null : [sc.prov];
       const early = historyBefore(sums.first, from, provs, sd.to);
-      if (early) rows.push(`<div class="tr earlier"><div class="c acct" style="min-width:${acctW}px">Earlier, from local logs</div>${shownCols.map((c) => usageCell(c, early)).join("")}</div>`);
+      if (early) rows.push(`<div class="tr earlier"><div class="c acct" style="min-width:${acctW}px">Earlier, from local logs</div>${shownCols.map((c) => (groupOf(c) === "plan" ? planCell(null, c) : usageCell(c, early))).join("")}</div>`);
     }
   }
   if (!sc.shown.length) rows.push(`<div class="empty">No accounts picked.</div>`);
-  const weights = { weekLeft: .85, shortLeft: .85, shortReset: 1.2, perDay: .75, heading: 2, nextReset: 1.2, leftAt: 1, usedIn: 1, resetsIn: 3 };
+  const weights = { weekLeft: .85, shortLeft: .85, shortReset: 1.2, perDay: .75, heading: 2, nextReset: 1.2, nextBill: 1.2, resets: .8, leftAt: 1, usedIn: 1, resetsIn: 3 };
   const grid = compact ? ` style="--table-columns:minmax(0,2.4fr) ${shownCols.map((c) => `minmax(0,${weights[c.id] || 1}fr)`).join(" ")}"` : "";
   return `<div class="ttbl${compact ? " compact" : ""}" role="table"${grid}>${head}${rows.join("")}</div>`;
+}
+
+// The unused resets of the picked accounts under a table that shows the
+// Resets column: what each clears, the advice on it and a button that uses it.
+// Returns {html, mount}.
+export function resetsSection(view, sc) {
+  if (!view.columns.includes("resets")) return { html: "", mount() {} };
+  const tbl = resetTable(sc.shown);
+  const shown = new Set(sc.shown.map((a) => a.id));
+  const use = suggestions().filter((s) => shown.has(s.auth_id)).length;
+  const title = tbl.count ? `${tbl.count === 1 ? "1 reset" : tbl.count + " resets"} ready to use` : "No resets to use right now";
+  const sub = !tbl.count ? "New ones show here within 20 minutes of a provider granting them." : use ? `${use} worth using now. Each works once.` : "None needs using right now. Each works once.";
+  const html = `<div class="sec last"><div class="sech"><div class="t"><b>${esc(title)}</b><span class="muted clamp">${esc(sub)}</span></div><a class="linkbtn" href="#/resets">All resets ${icon("chevronRight", 14)}</a></div>${tbl.html}</div>`;
+  return { html, mount: tbl.mount };
 }
 
 // ---------- the page ----------
@@ -320,6 +357,7 @@ export function view(ctx) {
   const firstAxis = axisIdx[0], lastAxis = axisIdx[axisIdx.length - 1];
   const built = v.panels.map((p, i) => buildPanel(p.type, p.options, { ...base, labels: i === lastAxis, hint: i === firstAxis ? zoomHint() : "" }));
   const panels = v.panels.map((p, i) => panelHtml(p.type, i, built[i], p.options)).join("");
+  const resets = resetsSection(v, sc);
   const isDefault = defaultId(V.store) === v.id;
   const name = renameBox(v.id) ?? `<span class="vname" data-rename tabindex="0" role="button" title="Rename this view">${esc(v.name)}</span>`;
   const html = `
@@ -335,6 +373,7 @@ export function view(ctx) {
     <div class="body tele" data-tele>
       ${panels || `<div class="empty">This view has no panels. Add some from Display.</div>`}
       ${region("tv|table", kept("tv|table", () => tableHtml(v, base)))}
+      ${region("tv|resets", resets.html, "div", `style="display:contents"`)}
       ${region("tv|read", esc(readAt()), "div", `class="readrow"`)}
     </div>`;
 
@@ -363,6 +402,7 @@ export function view(ctx) {
         },
       });
       built.forEach((b) => b.mount?.(root, setWindow));
+      resets.mount(root);
       tele.querySelectorAll("[data-opt]").forEach((b) => {
         b.onclick = () => edit(v.id, (d) => { const p = d.panels[Number(b.dataset.opt)]; if (p) p.options = { ...p.options, [b.dataset.key]: b.dataset.val }; });
       });

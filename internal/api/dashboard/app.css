@@ -372,6 +372,7 @@ svg { display: block; flex-shrink: 0; }
 .sech.tall { height: auto; padding-top: 28px; padding-bottom: 12px; }
 .sech .t { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .sech .t b { font-size: 13px; font-weight: 500; white-space: nowrap; }
+.sech > .linkbtn { white-space: nowrap; flex-shrink: 0; }
 .tblwrap { overflow-x: auto; }
 .tbl { min-width: max-content; width: 100%; }
 .tr { display: flex; align-items: center; gap: 16px; height: 48px; padding: 0 24px; border-bottom: 1px solid var(--row-line); font-size: 13px; }

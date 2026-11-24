@@ -82,27 +82,49 @@ func numberValue(value any) (float64, bool) {
 	}
 }
 
-// dashboardAccountPlan returns the credential's plan name and renewal and end
-// dates. Manual dates from the auth file win over the Codex id_token claim.
-func dashboardAccountPlan(auth *coreauth.Auth, location *time.Location) gin.H {
-	plan := gin.H{"type": "", "renews_on": "", "ends_on": "", "source": ""}
+// dashboardAccountPlan returns the credential's plan name, its renewal and end
+// dates and the time of its next bill. Manual dates from the auth file win
+// over what the provider reports: the Codex id_token's paid-until time, or the
+// start of a Claude subscription in facts. Both bill each month at the same
+// day and time, so a time that has passed is carried forward to the next one.
+// A manual date has no time of day, so it gives no next_bill_at.
+func dashboardAccountPlan(auth *coreauth.Auth, facts *coreauth.PlanFacts, now time.Time) gin.H {
+	plan := gin.H{"type": "", "renews_on": "", "ends_on": "", "source": "", "next_bill_at": ""}
 	if auth == nil {
 		return plan
 	}
+	location := now.Location()
 	claims := extractCodexIDTokenClaims(auth)
 	if planType, _ := claims["plan_type"].(string); planType != "" {
 		plan["type"] = planType
 	} else if planType := metadataString(auth, "plan_type"); planType != "" {
 		plan["type"] = planType
 	}
-	if renews := metadataPlanDate(auth, "plan_renews_on"); renews != "" {
-		plan["renews_on"] = renews
-		plan["source"] = "manual"
-	} else if renews := claimLocalDate(claims["chatgpt_subscription_active_until"], location); renews != "" {
-		plan["renews_on"] = renews
-		plan["source"] = "token"
-	}
 	plan["ends_on"] = metadataPlanDate(auth, "plan_ends_on")
+	free := strings.EqualFold(fmt.Sprint(plan["type"]), "free")
+	paidUntil, paidUntilDate := claimTime(claims["chatgpt_subscription_active_until"])
+	var anchor time.Time
+	switch {
+	case metadataPlanDate(auth, "plan_renews_on") != "":
+		plan["renews_on"] = metadataPlanDate(auth, "plan_renews_on")
+		plan["source"] = "manual"
+	case paidUntilDate != "":
+		plan["renews_on"] = paidUntilDate
+		plan["source"] = "token"
+	case !paidUntil.IsZero() && !free:
+		anchor = paidUntil
+		plan["source"] = "token"
+	case facts != nil && facts.Active() && strings.EqualFold(auth.Provider, "claude"):
+		anchor = facts.StartedAt
+		plan["source"] = "plan_start"
+	}
+	if next := coreauth.NextMonthlyBill(anchor, now); !next.IsZero() {
+		plan["renews_on"] = next.In(location).Format(planDateLayout)
+		// A plan that ends does not bill again.
+		if plan["ends_on"] == "" {
+			plan["next_bill_at"] = next.UTC().Format(time.RFC3339)
+		}
+	}
 	return plan
 }
 
@@ -145,32 +167,28 @@ func validatePlanDateValue(field string, value any) error {
 	return fmt.Errorf("%s must be a YYYY-MM-DD date or null", field)
 }
 
-// claimLocalDate turns the chatgpt_subscription_active_until claim, a
-// timestamp string or Unix seconds, into a local YYYY-MM-DD date.
-func claimLocalDate(value any, location *time.Location) string {
-	if location == nil {
-		location = time.Local
-	}
-	var at time.Time
+// claimTime reads the chatgpt_subscription_active_until claim: a timestamp
+// string or Unix seconds gives the time, and a bare YYYY-MM-DD gives the date
+// alone, which has no time of day to bill at.
+func claimTime(value any) (at time.Time, dateOnly string) {
 	switch typed := value.(type) {
 	case string:
 		text := strings.TrimSpace(typed)
 		if parsed, errParse := time.Parse(time.RFC3339, text); errParse == nil {
-			at = parsed
-		} else if parsed, errDate := parsePlanDate(text); errDate == nil {
-			return parsed.Format(planDateLayout)
-		} else if seconds, errNumber := strconv.ParseFloat(text, 64); errNumber == nil {
-			at = unixTime(seconds)
+			return parsed, ""
+		}
+		if parsed, errDate := parsePlanDate(text); errDate == nil {
+			return time.Time{}, parsed.Format(planDateLayout)
+		}
+		if seconds, errNumber := strconv.ParseFloat(text, 64); errNumber == nil {
+			return unixTime(seconds), ""
 		}
 	default:
 		if seconds, ok := numberValue(typed); ok {
-			at = unixTime(seconds)
+			return unixTime(seconds), ""
 		}
 	}
-	if at.IsZero() {
-		return ""
-	}
-	return at.In(location).Format(planDateLayout)
+	return time.Time{}, ""
 }
 
 func unixTime(seconds float64) time.Time {

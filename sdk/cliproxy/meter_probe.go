@@ -40,6 +40,7 @@ func (s *Service) startClaudeMeterProbe(ctx context.Context) {
 		go func() {
 			defer running.Store(false)
 			s.probeClaudeMeters(ctx)
+			s.probeClaudePlans(ctx)
 			s.probeCodexResets(ctx)
 			s.runAutoReset(ctx)
 		}()
@@ -94,7 +95,13 @@ func (s *Service) probeClaudeMeters(ctx context.Context) {
 }
 
 func (s *Service) fetchClaudeUsage(ctx context.Context, auth *coreauth.Auth, token string) ([]byte, error) {
-	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, claudeUsageURL+"?"+claudeUsageResetQuery, nil)
+	return s.fetchClaudeOAuth(ctx, auth, token, claudeUsageURL+"?"+claudeUsageResetQuery)
+}
+
+// fetchClaudeOAuth reads one of the endpoints a Claude subscription sign-in
+// can call for its own account.
+func (s *Service) fetchClaudeOAuth(ctx context.Context, auth *coreauth.Auth, token, endpoint string) ([]byte, error) {
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if errReq != nil {
 		return nil, errReq
 	}
@@ -107,7 +114,7 @@ func (s *Service) fetchClaudeUsage(ctx context.Context, auth *coreauth.Auth, tok
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
-			log.Debugf("claude usage probe: close body: %v", errClose)
+			log.Debugf("claude account probe: close body: %v", errClose)
 		}
 	}()
 	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -123,5 +130,5 @@ func (s *Service) fetchClaudeUsage(ctx context.Context, auth *coreauth.Auth, tok
 type usageProbeStatusError struct{ status int }
 
 func (e *usageProbeStatusError) Error() string {
-	return "usage endpoint returned " + http.StatusText(e.status)
+	return "the provider answered " + http.StatusText(e.status)
 }

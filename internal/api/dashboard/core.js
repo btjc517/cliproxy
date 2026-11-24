@@ -821,7 +821,9 @@ export function plan(acct) {
   const p = acct.plan || {};
   const ends = p.ends_on || "";
   const renews = p.renews_on || "";
-  return { type: p.type || "", renews, ends, source: p.source || "" };
+  // nextBill: when the plan bills next, to the minute, or 0 when only the day
+  // is known (a date set by hand) or the plan does not bill again.
+  return { type: p.type || "", renews, ends, source: p.source || "", nextBill: Date.parse(p.next_bill_at || "") || 0 };
 }
 
 export const tokens = (u) => (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0);
@@ -1086,7 +1088,7 @@ export function planMenu(anchor, acct, extra = []) {
   menu(anchor, [
     ...extra,
     ...(extra.length ? ["sep"] : []),
-    field("plan_renews_on", "Plan renews on", p.source === "manual" ? p.renews : "", p.source === "token" && p.renews ? "From the sign-in token: " + planDay(p.renews) + ". Set a date to override it." : "The day the subscription bills again."),
+    field("plan_renews_on", "Plan renews on", p.source === "manual" ? p.renews : "", p.source === "token" && p.renews ? "From the sign-in token: " + planDay(p.renews) + ". Set a date to override it." : p.source === "plan_start" && p.renews ? "Worked out from when the plan started: " + planDay(p.renews) + ". Set a date to override it." : "The day the subscription bills again."),
     field("plan_ends_on", "Plan ends on", p.ends, "Set this when you have cancelled. Leave empty while it renews."),
   ], { width: 280 });
 }

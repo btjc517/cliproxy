@@ -200,7 +200,11 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 				}
 			}
 			account["mode"] = dashboardAccountMode(entry)
-			account["plan"] = dashboardAccountPlan(auth, now.Location())
+			var planFacts *coreauth.PlanFacts
+			if facts, ok := coreauth.DefaultRoutingState().Plan(auth.ID); ok {
+				planFacts = &facts
+			}
+			account["plan"] = dashboardAccountPlan(auth, planFacts, now)
 			accounts = append(accounts, account)
 		}
 	}

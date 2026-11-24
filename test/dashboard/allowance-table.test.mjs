@@ -66,3 +66,57 @@ test('usage tables keep their existing row order', () => {
   fixture();
   assert.deepEqual(order(render(['tokens'])), S.data.accounts.map(a => a.id));
 });
+test('allowance defaults include the next bill and resets columns and they survive saving', () => {
+  const v = BUILTINS.find(v => v.id === 'allowance');
+  assert.ok(v.columns.includes('nextBill'));
+  assert.ok(v.columns.includes('resets'));
+  assert.deepEqual(cleanView(v).columns, v.columns);
+});
+test('each account shows when its plan bills next, to the minute when the time is known', () => {
+  fixture();
+  const bill = now + 3 * 24 * HOUR;
+  const by = Object.fromEntries(S.data.accounts.map(a => [a.id, a]));
+  by['ready-low'].plan = { renews_on: '2026-11-27', source: 'plan_start', next_bill_at: iso(bill) };
+  by['ready-high'].plan = { renews_on: '2026-12-05', source: 'manual', next_bill_at: '' };
+  by.resting.plan = { renews_on: '2026-11-27', ends_on: '2026-12-01', source: 'plan_start', next_bill_at: '' };
+  const html = render([...columns, 'nextBill']);
+  assert.match(html, />Next bill</);
+  assert.ok(row(html, 'ready-low').includes(clock(bill)));
+  assert.match(html, /Worked out from when the plan started/);
+  assert.match(row(html, 'ready-high'), /5 Dec/);
+  assert.match(row(html, 'resting'), /Ends .*1 Dec/);
+  assert.ok(!row(html, 'resting').includes('27 Nov'));
+  assert.match(row(html, 'weekly'), /–\s*$/);
+  // The bill column stays while a range swaps the allowance columns.
+  const ranged = tableHtml({ columns: [...columns, 'nextBill'] }, panelContext({ key: 'allowance-test',
+    window: { start: now - HOUR, end: now + 3 * HOUR }, range: { start: now - HOUR, end: now + HOUR } }, accountScope()));
+  assert.match(ranged, />Next bill</);
+  assert.ok(row(ranged, 'ready-low').includes(clock(bill)));
+  // An account with no reading keeps its message in the allowance columns only.
+  by.unknown.plan = { renews_on: '2026-11-27', source: 'plan_start', next_bill_at: iso(bill) };
+  const again = render([...columns, 'nextBill']);
+  assert.match(row(again, 'unknown'), /No allowance reading yet/);
+  assert.ok(row(again, 'unknown').includes(clock(bill)));
+});
+test('accounts with unused resets are tagged, and the list under the table offers them', async () => {
+  fixture();
+  const grant = (id, action) => ({ id, label: id, title: 'Full reset', kind: 'full', left: 1, total: 1, usable_now: true,
+    clears_titles: ['week', '5-hour window'], advice: { action, reason: action === 'use' ? 'The week is used up.' : 'Plenty of week left.' } });
+  S.data.router = { accounts: { weekly: { resets: [grant('g1', 'use')] }, 'ready-high': { resets: [grant('g2', 'hold')] } },
+    reset_suggestions: [{ auth_id: 'weekly', grant: { id: 'g1' }, advice: { action: 'use', reason: 'The week is used up.' } }] };
+  const html = render([...columns, 'resets']);
+  assert.match(html, />Resets</);
+  assert.match(row(html, 'weekly'), /Use reset/);
+  assert.match(row(html, 'ready-high'), /1 reset/);
+  assert.match(row(html, 'ready-low'), /–\s*$/);
+  const { resetsSection } = await import('../../internal/api/dashboard/screens/telemetry.js');
+  const section = resetsSection({ columns: [...columns, 'resets'] }, accountScope());
+  assert.match(section.html, /2 resets ready to use/);
+  assert.match(section.html, /1 worth using now/);
+  assert.equal((section.html.match(/data-reset-use=/g) || []).length, 2);
+  assert.match(section.html, /The week is used up\./);
+  // Without the column the page does not list resets.
+  assert.equal(resetsSection({ columns }, accountScope()).html, '');
+  S.data.router = {};
+  assert.match(resetsSection({ columns: ['resets'] }, accountScope()).html, /No resets to use right now/);
+});

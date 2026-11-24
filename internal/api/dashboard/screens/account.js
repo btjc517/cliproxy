@@ -1,6 +1,6 @@
 // Account details: limits and plan, the last 24 hours, its active sessions.
 import {
-  S, esc, icon, logo, accountById, status, limits, left, plan, planDay, planDaysAway, inDays, resetLong,
+  S, esc, icon, logo, accountById, status, limits, left, plan, planDay, planDaysAway, inDays, resetLong, clock,
   modeMenu, planMenu, modeTitle, sessions, warnState, seg, accounts,
 } from "../core.js";
 import { sessionTable } from "./common.js";
@@ -58,7 +58,7 @@ function planBlock(a) {
     sub = warnState(inDays(planDaysAway(p.ends)) + ", no renewal", "sm");
   } else if (p.renews) {
     main = `<span class="v">${esc(planDay(p.renews))}</span><span class="u">renews</span>`;
-    sub = esc(inDays(planDaysAway(p.renews))) + (p.source === "token" ? " · from sign-in" : "");
+    sub = esc(inDays(planDaysAway(p.renews)) + (p.nextBill ? " at " + clock(p.nextBill) : "")) + (p.source === "token" ? " · from sign-in" : p.source === "plan_start" ? " · from plan start" : "");
   } else {
     main = `<span class="v muted">–</span>`;
     sub = `<button class="linkbtn" data-plan>Set renewal date</button>`;

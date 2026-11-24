@@ -74,29 +74,78 @@ func TestDashboardAccountPlan(t *testing.T) {
 		}),
 	}}
 
-	plan := dashboardAccountPlan(codexAuth, london)
-	if plan["type"] != "pro" || plan["renews_on"] != "2026-10-18" || plan["source"] != "token" || plan["ends_on"] != "" {
+	before := time.Date(2026, 10, 1, 9, 0, 0, 0, london)
+
+	plan := dashboardAccountPlan(codexAuth, nil, before)
+	if plan["type"] != "pro" || plan["renews_on"] != "2026-10-18" || plan["source"] != "token" || plan["ends_on"] != "" || plan["next_bill_at"] != "2026-10-17T23:30:00Z" {
 		t.Fatalf("token plan = %v", plan)
 	}
 
-	codexAuth.Metadata["plan_renews_on"] = "2026-11-01"
+	// A sign-in token is not rewritten each month. Once its paid-until time
+	// has passed, the next bill is a month on at the same time.
+	after := time.Date(2026, 11, 24, 12, 0, 0, 0, london)
+	plan = dashboardAccountPlan(codexAuth, nil, after)
+	if plan["renews_on"] != "2026-12-17" || plan["next_bill_at"] != "2026-12-17T23:30:00Z" || plan["source"] != "token" {
+		t.Fatalf("token plan after its paid-until time = %v", plan)
+	}
+
 	codexAuth.Metadata["plan_ends_on"] = "2026-12-01"
-	plan = dashboardAccountPlan(codexAuth, london)
-	if plan["renews_on"] != "2026-11-01" || plan["source"] != "manual" || plan["ends_on"] != "2026-12-01" {
+	plan = dashboardAccountPlan(codexAuth, nil, before)
+	if plan["ends_on"] != "2026-12-01" || plan["next_bill_at"] != "" {
+		t.Fatalf("a plan that ends must not show a next bill: %v", plan)
+	}
+
+	codexAuth.Metadata["plan_renews_on"] = "2026-11-01"
+	plan = dashboardAccountPlan(codexAuth, nil, before)
+	if plan["renews_on"] != "2026-11-01" || plan["source"] != "manual" || plan["ends_on"] != "2026-12-01" || plan["next_bill_at"] != "" {
 		t.Fatalf("manual plan = %v", plan)
 	}
 
 	unixAuth := &coreauth.Auth{Provider: "codex", Metadata: map[string]any{
 		"id_token": unsignedCodexIDToken(t, map[string]any{"chatgpt_subscription_active_until": until.Unix()}),
 	}}
-	if plan = dashboardAccountPlan(unixAuth, london); plan["renews_on"] != "2026-10-18" || plan["type"] != "" {
+	if plan = dashboardAccountPlan(unixAuth, nil, before); plan["renews_on"] != "2026-10-18" || plan["type"] != "" || plan["next_bill_at"] != "2026-10-17T23:30:00Z" {
 		t.Fatalf("unix seconds plan = %v", plan)
 	}
 
+	dateAuth := &coreauth.Auth{Provider: "codex", Metadata: map[string]any{
+		"id_token": unsignedCodexIDToken(t, map[string]any{"chatgpt_subscription_active_until": "2026-10-18"}),
+	}}
+	if plan = dashboardAccountPlan(dateAuth, nil, before); plan["renews_on"] != "2026-10-18" || plan["source"] != "token" || plan["next_bill_at"] != "" {
+		t.Fatalf("date-only claim = %v", plan)
+	}
+
+	freeAuth := &coreauth.Auth{Provider: "codex", Metadata: map[string]any{
+		"id_token": unsignedCodexIDToken(t, map[string]any{
+			"chatgpt_plan_type":                 "free",
+			"chatgpt_subscription_active_until": until.Format(time.RFC3339),
+		}),
+	}}
+	if plan = dashboardAccountPlan(freeAuth, nil, before); plan["renews_on"] != "" || plan["next_bill_at"] != "" || plan["source"] != "" {
+		t.Fatalf("a free plan has no bill: %v", plan)
+	}
+
 	claudeAuth := &coreauth.Auth{Provider: "claude", Metadata: map[string]any{"email": "x@example.com"}}
-	plan = dashboardAccountPlan(claudeAuth, london)
-	if plan["type"] != "" || plan["renews_on"] != "" || plan["source"] != "" || plan["ends_on"] != "" {
+	plan = dashboardAccountPlan(claudeAuth, nil, before)
+	if plan["type"] != "" || plan["renews_on"] != "" || plan["source"] != "" || plan["ends_on"] != "" || plan["next_bill_at"] != "" {
 		t.Fatalf("claude plan = %v, want all empty", plan)
+	}
+
+	// A Claude subscription bills each month at the time it started.
+	started := time.Date(2026, 10, 27, 14, 57, 2, 0, time.UTC)
+	facts := &coreauth.PlanFacts{StartedAt: started, Status: "active", ObservedAt: after}
+	plan = dashboardAccountPlan(claudeAuth, facts, after)
+	if plan["renews_on"] != "2026-11-27" || plan["next_bill_at"] != "2026-11-27T14:57:02Z" || plan["source"] != "plan_start" {
+		t.Fatalf("claude plan from its start = %v", plan)
+	}
+	facts.Status = "canceled"
+	if plan = dashboardAccountPlan(claudeAuth, facts, after); plan["next_bill_at"] != "" || plan["renews_on"] != "" || plan["source"] != "" {
+		t.Fatalf("a cancelled claude plan has no next bill: %v", plan)
+	}
+	facts.Status = "active"
+	claudeAuth.Metadata["plan_renews_on"] = "2026-12-05"
+	if plan = dashboardAccountPlan(claudeAuth, facts, after); plan["renews_on"] != "2026-12-05" || plan["source"] != "manual" || plan["next_bill_at"] != "" {
+		t.Fatalf("a manual date wins over the plan start: %v", plan)
 	}
 }
 

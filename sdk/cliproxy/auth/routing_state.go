@@ -55,6 +55,10 @@ type accountRouting struct {
 	fableProbeAt time.Time
 	// resetProbeAt is when the account's resets were last asked for. Not saved.
 	resetProbeAt time.Time
+	// Plan is what the provider reported about the account's subscription.
+	Plan *PlanFacts `json:"plan,omitempty"`
+	// planProbeAt is when the subscription was last asked for. Not saved.
+	planProbeAt time.Time
 }
 
 func (a *accountRouting) clone() *accountRouting {
@@ -62,6 +66,10 @@ func (a *accountRouting) clone() *accountRouting {
 		return nil
 	}
 	copyAccount := &accountRouting{Provider: a.Provider, Facts: a.Facts, Health: a.Health}
+	if a.Plan != nil {
+		copyPlan := *a.Plan
+		copyAccount.Plan = &copyPlan
+	}
 	if a.Resets != nil {
 		copyResets := *a.Resets
 		copyResets.Grants = append([]ResetGrant(nil), a.Resets.Grants...)
