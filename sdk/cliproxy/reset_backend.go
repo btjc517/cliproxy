@@ -92,11 +92,7 @@ func (s *Service) readClaudeUsage(ctx context.Context, auth *coreauth.Auth) erro
 	state := coreauth.DefaultRoutingState()
 	now := time.Now()
 	if meters := coreauth.ParseClaudeUsageMeters(body, now); len(meters) > 0 {
-		if reopened := state.ReopenedClaudeWindows(auth.ID, meters, now); len(reopened) > 0 {
-			if err := s.coreManager.ReconcileClaudeQuota(ctx, auth, reopened, meters); err != nil {
-				return fmt.Errorf("persist recovered Claude allowance: %w", err)
-			}
-		}
+		s.releaseRefilledHold(ctx, auth, meters, now)
 		state.ObserveMeters(auth.ID, "claude", meters, now)
 	}
 	state.ObserveResets(auth.ID, "claude", coreauth.ParseClaudeResetStatus(body, now))
@@ -139,6 +135,38 @@ func (s *Service) claimClaudeReset(ctx context.Context, auth *coreauth.Auth, gra
 		return true
 	})
 	return result, nil
+}
+
+// releaseRefilledHold releases the hold on an account whose usage report
+// shows a window refilled before the time the proxy holds it until, as happens
+// when a reset is used at the provider.
+//
+// A request that finishes on the account while the report is being fetched
+// changes the account, and the release is refused for a snapshot that is out
+// of date. It is tried again with the account as it stands now. If that is
+// refused too, the report is still recorded by the caller: the meters keep
+// the refill, so the next read releases the hold.
+func (s *Service) releaseRefilledHold(ctx context.Context, auth *coreauth.Auth, meters map[string]*coreauth.Meter, now time.Time) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	reopened := coreauth.DefaultRoutingState().ReopenedClaudeWindows(auth.ID, meters, now)
+	if len(reopened) == 0 {
+		return
+	}
+	current := auth
+	var errReconcile error
+	for attempt := 0; attempt < 2; attempt++ {
+		if errReconcile = s.coreManager.ReconcileClaudeQuota(ctx, current, reopened, meters); errReconcile == nil {
+			return
+		}
+		fresh, ok := s.coreManager.GetByID(auth.ID)
+		if !ok || fresh == nil {
+			break
+		}
+		current = fresh
+	}
+	log.WithField("auth", auth.ID).Debugf("usage read: hold not released, left for the next read: %v", errReconcile)
 }
 
 func codexOAuth(auth *coreauth.Auth) (token, accountID string) {
@@ -191,13 +219,7 @@ func (s *Service) readCodexUsage(ctx context.Context, auth *coreauth.Auth) error
 		return fmt.Errorf("read usage windows: %w", errUsage)
 	}
 	if meters := coreauth.ParseCodexUsageMeters(usage, now); len(meters) > 0 {
-		// A reset used at the provider refills the account before the time the
-		// proxy is holding it until. Release that hold, as for Claude.
-		if reopened := state.ReopenedClaudeWindows(auth.ID, meters, now); len(reopened) > 0 {
-			if errReconcile := s.coreManager.ReconcileClaudeQuota(ctx, auth, reopened, meters); errReconcile != nil {
-				return fmt.Errorf("release hold after refill: %w", errReconcile)
-			}
-		}
+		s.releaseRefilledHold(ctx, auth, meters, now)
 		state.ObserveMeters(auth.ID, "codex", meters, now)
 	}
 	return nil

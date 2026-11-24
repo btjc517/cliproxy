@@ -334,3 +334,54 @@ func TestCodexProbeKeepsHoldWhileWeekIsFull(t *testing.T) {
 		t.Fatalf("the hold was released while the week is still full: %+v", state)
 	}
 }
+
+// A request that finishes on the account while its usage is being read makes
+// the reader's copy of the account out of date. The read still records what
+// the provider reported and still releases the hold, using the account as it
+// stands now.
+func TestUsageReadWithOutOfDateAccountStillRecordsAndReleases(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	deadline := now.Add(5 * 24 * time.Hour)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"seven_day":{"utilization":20,"resets_at":"` + deadline.UTC().Format(time.RFC3339) + `"},
+		  "cedar_ember":{"eligible":true,"grants":[{"id":"full-after-race","label":"One full limit reset","resets_total":1,"resets_left":1,"clears":["seven_day"],"usable_now":true}]}}`))
+	}))
+	defer server.Close()
+	previous := claudeUsageURL
+	claudeUsageURL = server.URL
+	defer func() { claudeUsageURL = previous }()
+
+	auth := &coreauth.Auth{ID: "usage-read-race.json", Provider: "claude", Metadata: map[string]any{"access_token": "sk-ant-oat01-race"}}
+	service := resetTestService(t, auth)
+	manager := service.coreManager
+	retry := time.Until(deadline) + 5*time.Second
+	manager.MarkResult(ctx, coreauth.Result{AuthID: auth.ID, Provider: "claude", Model: "claude-fable-5-2", CredentialScope: true, RetryAfter: &retry, Error: &coreauth.Error{HTTPStatus: 429, Message: "weekly quota"}})
+	old := now.Add(-30 * time.Minute)
+	coreauth.DefaultRoutingState().ObserveMeters(auth.ID, "claude", map[string]*coreauth.Meter{
+		"7d": {Name: "7d", Status: "rejected", Utilization: 1, ResetAt: deadline, ObservedAt: old},
+	}, old)
+	held, _ := manager.GetByID(auth.ID)
+	if !held.Unavailable {
+		t.Fatalf("setup failed: %+v", held.Quota)
+	}
+	// The reader holds a copy from before something else changed the account.
+	outOfDate := held.Clone()
+	outOfDate.Generation--
+	outOfDate.UpdatedAt = outOfDate.UpdatedAt.Add(-time.Second)
+
+	if errRead := service.readClaudeUsage(ctx, outOfDate); errRead != nil {
+		t.Fatalf("readClaudeUsage: %v", errRead)
+	}
+	view := resetView(t, auth)
+	if len(view.Resets) != 1 || view.Resets[0].ID != "full-after-race" {
+		t.Fatalf("resets = %+v, want the provider's report recorded", view.Resets)
+	}
+	if len(view.Meters) != 1 || view.Meters[0].Utilization != 0.2 {
+		t.Fatalf("meters = %+v, want the provider's reading recorded", view.Meters)
+	}
+	got, _ := manager.GetByID(auth.ID)
+	if got.Unavailable || got.Quota.Exceeded {
+		t.Fatalf("the hold stayed: %+v", got.Quota)
+	}
+}
