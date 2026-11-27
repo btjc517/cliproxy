@@ -285,7 +285,7 @@ func (s *Service) probeCodexResets(ctx context.Context) {
 		}
 		now := time.Now()
 		resetAge := meterProbeMaxAge
-		if codexAccountHeld(auth, now) {
+		if hasActiveQuotaHold(auth, now) {
 			// A reset used at the provider refills an account days before the
 			// time it is held until, so a held account is read more often.
 			resetAge = heldAccountProbeAge
@@ -304,9 +304,9 @@ func (s *Service) probeCodexResets(ctx context.Context) {
 // read again, so a refill at the provider is noticed within a few minutes.
 const heldAccountProbeAge = 2 * meterProbeInterval
 
-// codexAccountHeld reports whether the account, or any of its models, is held
-// for a used-up limit. Codex limits are held per model.
-func codexAccountHeld(auth *coreauth.Auth, now time.Time) bool {
+// hasActiveQuotaHold reports whether the account, or any of its models, is held
+// for a used-up limit.
+func hasActiveQuotaHold(auth *coreauth.Auth, now time.Time) bool {
 	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
 		return true
 	}

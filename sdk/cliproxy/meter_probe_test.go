@@ -94,3 +94,54 @@ func TestClaudeProbeReleasesEarlyWeeklyReset(t *testing.T) {
 		t.Fatal("fresh provider reading left the old weekly hold in place")
 	}
 }
+
+// A model can stay in cooldown while its account serves other models. Its
+// weekly usage reading is still fresh by the ordinary twenty-minute cadence.
+func TestClaudeProbePicksUpResetDuringModelOnlyHold(t *testing.T) {
+	ctx := context.Background()
+	m := coreauth.NewManager(nil, nil, nil)
+	id := "claude-model-only-refill.json"
+	const model = "claude-fable-5-2"
+	now := time.Now()
+	deadline := now.Add(96 * time.Hour)
+	held := &coreauth.ModelState{Unavailable: true, NextRetryAfter: deadline, UpdatedAt: now,
+		Quota:     coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline},
+		LastError: &coreauth.Error{HTTPStatus: http.StatusTooManyRequests}}
+	_, err := m.Register(ctx, &coreauth.Auth{ID: id, Provider: "claude", Metadata: map[string]any{"access_token": "sk-ant-oat-test"},
+		ModelStates: map[string]*coreauth.ModelState{model: held, "claude-sonnet-5-5": {}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := m.GetByID(id)
+	if a.Quota.Exceeded {
+		t.Fatal("fixture has an account-wide hold")
+	}
+
+	state := coreauth.DefaultRoutingState()
+	old := now.Add(-5 * time.Minute)
+	state.ObserveMeters(id, "claude", map[string]*coreauth.Meter{
+		"7d":    {Name: "7d", Status: "rejected", Utilization: 1, ResetAt: deadline, ObservedAt: old},
+		"7d_oi": {Name: "7d_oi", Status: "allowed", Utilization: .79, ResetAt: deadline, ObservedAt: old},
+	}, old)
+	state.MarkResetProbe(id, old)
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		fmt.Fprintf(w, `{"seven_day":{"utilization":0,"resets_at":%q},"limits":[{"kind":"weekly_scoped","scope":{"model":{"display_name":"Fable"}},"percent":0,"resets_at":%q}]}`, deadline.Format(time.RFC3339Nano), deadline.Format(time.RFC3339Nano))
+	}))
+	defer server.Close()
+	previous := claudeUsageURL
+	claudeUsageURL = server.URL
+	defer func() { claudeUsageURL = previous }()
+	s := &Service{cfg: &config.Config{}, coreManager: m}
+	s.probeClaudeMeters(ctx)
+	refreshed, _ := m.GetByID(id)
+	if calls != 1 || refreshed.ModelStates[model].Quota.Exceeded {
+		t.Fatalf("provider reads = %d, model held = %v", calls, refreshed.ModelStates[model].Quota.Exceeded)
+	}
+	s.probeClaudeMeters(ctx)
+	if calls != 1 {
+		t.Fatalf("duplicated usage probe after refill: %d", calls)
+	}
+}
