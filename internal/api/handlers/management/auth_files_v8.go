@@ -1,6 +1,8 @@
 package management
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -95,23 +97,56 @@ func (h *Handler) bindReauthRecord(id string, record *coreauth.Auth) error {
 			sameWorkspace = true
 		}
 	}
-	// Older files may have only the generated filename to identify their workspace.
-	if !sameWorkspace && !strings.EqualFold(filepath.Base(target.FileName), record.FileName) {
+	// Older files may lack the workspace field. Their filename must then carry
+	// the hash of the workspace the provider just verified.
+	if !sameWorkspace && !namedForVerifiedWorkspace(target.FileName, record) {
 		return errors.New("The provider could not confirm the original workspace. Check the account and try again.")
 	}
-	fileName := target.FileName
-	if path := target.Attributes["path"]; path != "" {
-		relative, err := filepath.Rel(h.cfg.AuthDir, path)
-		if err != nil || !filepath.IsLocal(relative) {
-			return errors.New("The selected credential is outside the accounts directory.")
-		}
-		fileName = relative
-	}
-	if !filepath.IsLocal(fileName) {
+	if h.cfg == nil || h.cfg.AuthDir == "" {
 		return errors.New("The selected credential has no local account file.")
 	}
-	record.ID, record.FileName = target.ID, fileName
+	path := target.Attributes["path"]
+	if path == "" {
+		if !exactName(target.FileName) {
+			return errors.New("The selected credential has no local account file.")
+		}
+		path = filepath.Join(h.cfg.AuthDir, target.FileName)
+	}
+	relative, err := filepath.Rel(h.cfg.AuthDir, path)
+	if err != nil || !filepath.IsLocal(relative) {
+		return errors.New("The selected credential is outside the accounts directory.")
+	}
+	// Stores trim and clean names. Refuse any name they would change, so the
+	// save cannot land on a different file.
+	if !exactName(path) || !exactName(relative) {
+		return errors.New("The selected credential has no local account file.")
+	}
+	record.ID, record.FileName = target.ID, relative
+	record.Attributes = map[string]string{"path": path}
 	return nil
+}
+
+// exactName reports whether trimming or cleaning would leave name unchanged.
+func exactName(name string) bool {
+	return name != "" && name == strings.TrimSpace(name) && name == filepath.Clean(name)
+}
+
+// namedForVerifiedWorkspace reports whether fileName is the name the sign-in
+// produced and carries the hash of the workspace the provider returned.
+// Email-only names never match.
+func namedForVerifiedWorkspace(fileName string, record *coreauth.Auth) bool {
+	key, prefix := "organization_uuid", "claude-"
+	if record.Provider == "codex" {
+		key, prefix = "account_id", "codex-"
+	}
+	workspace, _ := record.Metadata[key].(string)
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return false
+	}
+	digest := sha256.Sum256([]byte(workspace))
+	name := strings.ToLower(filepath.Base(fileName))
+	return strings.EqualFold(name, record.FileName) && strings.HasPrefix(name, prefix+hex.EncodeToString(digest[:])[:8]+"-")
 }
 
 // ImportOAuthV8 dispatches credential import using the provider query parameter.

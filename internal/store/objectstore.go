@@ -527,16 +527,25 @@ func (s *ObjectTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, err
 		return "", fmt.Errorf("object store: auth is nil")
 	}
 	if auth.Attributes != nil {
-		if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
+		path, errPath := untrimmedAuthName(auth.Attributes["path"])
+		if errPath != nil {
+			return "", fmt.Errorf("object store: path %w", errPath)
+		}
+		if path != "" {
 			if filepath.IsAbs(path) {
 				return path, nil
 			}
 			return filepath.Join(s.authDir, path), nil
 		}
 	}
-	fileName := strings.TrimSpace(auth.FileName)
+	fileName, errName := untrimmedAuthName(auth.FileName)
+	if errName != nil {
+		return "", fmt.Errorf("object store: file name %w", errName)
+	}
 	if fileName == "" {
-		fileName = strings.TrimSpace(auth.ID)
+		if fileName, errName = untrimmedAuthName(auth.ID); errName != nil {
+			return "", fmt.Errorf("object store: id %w", errName)
+		}
 	}
 	if fileName == "" {
 		return "", fmt.Errorf("object store: auth %s missing filename", auth.ID)

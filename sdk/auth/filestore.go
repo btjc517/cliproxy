@@ -419,11 +419,19 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
 	if auth.Attributes != nil {
-		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
+		p, errPath := untrimmedAuthName(auth.Attributes["path"])
+		if errPath != nil {
+			return "", fmt.Errorf("auth filestore: path %w", errPath)
+		}
+		if p != "" {
 			return p, nil
 		}
 	}
-	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+	fileName, errName := untrimmedAuthName(auth.FileName)
+	if errName != nil {
+		return "", fmt.Errorf("auth filestore: file name %w", errName)
+	}
+	if fileName != "" {
 		if filepath.IsAbs(fileName) {
 			return fileName, nil
 		}
@@ -443,6 +451,16 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
 	return filepath.Join(dir, auth.ID), nil
+}
+
+// untrimmedAuthName returns the trimmed name, or an error when trimming would
+// change a non-blank name and point the save at a different file.
+func untrimmedAuthName(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed != "" && trimmed != name {
+		return "", fmt.Errorf("%q has leading or trailing spaces", name)
+	}
+	return trimmed, nil
 }
 
 func (s *FileTokenStore) labelFor(metadata map[string]any) string {

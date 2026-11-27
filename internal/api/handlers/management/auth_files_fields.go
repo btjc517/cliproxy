@@ -976,6 +976,13 @@ func (h *Handler) persistTokenRecord(ctx context.Context, record *coreauth.Auth,
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
 	}
+	// A sign-in again writes only to the exact path bindReauthRecord checked.
+	boundPath := ""
+	if reauth {
+		if boundPath = record.Attributes["path"]; boundPath == "" {
+			return "", fmt.Errorf("sign-in again is not bound to a selected file")
+		}
+	}
 	h.mergeExistingAuthFileMetadata(record)
 	store := h.tokenStoreWithBaseDir()
 	if store == nil {
@@ -997,6 +1004,9 @@ func (h *Handler) persistTokenRecord(ctx context.Context, record *coreauth.Auth,
 		if err := h.postAuthHook(ctx, record); err != nil {
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
+	}
+	if reauth && record.Attributes["path"] != boundPath {
+		return "", fmt.Errorf("sign-in again changed the selected file")
 	}
 	savedPath, errSave := store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if errSave != nil {
