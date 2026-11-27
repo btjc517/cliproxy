@@ -200,6 +200,7 @@ func (h *Handler) GetDashboardData(c *gin.Context) {
 				}
 			}
 			account["mode"] = dashboardAccountMode(entry)
+			account["can_reauthenticate"] = canReauthenticate(auth)
 			var planFacts *coreauth.PlanFacts
 			if facts, ok := coreauth.DefaultRoutingState().Plan(auth.ID); ok {
 				planFacts = &facts

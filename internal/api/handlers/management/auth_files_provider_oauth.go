@@ -35,6 +35,7 @@ type codexOAuthService interface {
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
+	targetID := c.GetString("reauth_id")
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
@@ -177,7 +178,11 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if errGuard := guardOAuthSessionPendingForSave(state, "anthropic"); errGuard != nil {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errTarget := h.bindReauthRecord(targetID, record); errTarget != nil {
+			SetOAuthSessionError(state, errTarget.Error())
+			return
+		}
+		savedPath, errSave := h.persistTokenRecord(ctx, record, targetID != "")
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -196,6 +201,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
+	targetID := c.GetString("reauth_id")
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
@@ -339,7 +345,11 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errTarget := h.bindReauthRecord(targetID, record); errTarget != nil {
+			SetOAuthSessionError(state, errTarget.Error())
+			return
+		}
+		savedPath, errSave := h.persistTokenRecord(ctx, record, targetID != "")
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)

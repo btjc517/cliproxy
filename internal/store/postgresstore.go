@@ -599,11 +599,19 @@ func (s *PostgresStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error)
 		return "", fmt.Errorf("postgres store: auth is nil")
 	}
 	if auth.Attributes != nil {
-		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
+		p, errPath := untrimmedAuthName(auth.Attributes["path"])
+		if errPath != nil {
+			return "", fmt.Errorf("postgres store: path %w", errPath)
+		}
+		if p != "" {
 			return p, nil
 		}
 	}
-	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+	fileName, errName := untrimmedAuthName(auth.FileName)
+	if errName != nil {
+		return "", fmt.Errorf("postgres store: file name %w", errName)
+	}
+	if fileName != "" {
 		if filepath.IsAbs(fileName) {
 			return fileName, nil
 		}

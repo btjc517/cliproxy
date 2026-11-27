@@ -770,6 +770,11 @@ export function names() {
 //   kind: ready | off | usedup | limited | blocked | error
 export function status(acct) {
   if (acct.disabled || acct.mode === "off") return { kind: "off", text: "Off" };
+  const msg = String(acct.status_message || "");
+  const failed = String(acct.status || "").toLowerCase() === "error";
+  if (failed && /401|403|unauthor|invalid[ _-]grant|refresh|sign|login|expired|revoked/i.test(msg)) {
+    return { kind: "blocked", text: "Sign-in blocked", detail: msg };
+  }
   const r = S.data?.router?.accounts?.[acct.id];
   if (r?.refused) return { kind: "error", text: r.refused + ", skipped for new sessions", detail: r.refused };
   const retry = validTime(acct.next_retry_after) ? Date.parse(acct.next_retry_after) : 0;
@@ -778,11 +783,7 @@ export function status(acct) {
     const weekGone = (lim.week && left(lim.week) <= 0) || retry - Date.now() > 6 * 3600e3;
     return weekGone ? { kind: "usedup", text: "Used up", until: retry } : { kind: "limited", text: "Resting until " + clock(retry), until: retry };
   }
-  const msg = String(acct.status_message || "");
-  if (String(acct.status || "").toLowerCase() === "error") {
-    if (/401|403|unauthor|invalid_grant|refresh|sign|login|expired|revoked/i.test(msg)) return { kind: "blocked", text: "Sign-in blocked", detail: msg };
-    return { kind: "error", text: msg ? "Error" : "Error", detail: msg };
-  }
+  if (failed) return { kind: "error", text: "Error", detail: msg };
   if (acct.unavailable) return { kind: "limited", text: "Unavailable" };
   if (lim.week && left(lim.week) <= 0) return { kind: "usedup", text: "Used up" };
   return { kind: "ready", text: "Ready" };

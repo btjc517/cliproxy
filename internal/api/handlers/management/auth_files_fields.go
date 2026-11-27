@@ -969,25 +969,44 @@ func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
 }
 
 func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
+	return h.persistTokenRecord(ctx, record, false)
+}
+
+func (h *Handler) persistTokenRecord(ctx context.Context, record *coreauth.Auth, reauth bool) (string, error) {
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
+	}
+	// A sign-in again writes only to the exact path bindReauthRecord checked.
+	boundPath := ""
+	if reauth {
+		if boundPath = record.Attributes["path"]; boundPath == "" {
+			return "", fmt.Errorf("sign-in again is not bound to a selected file")
+		}
 	}
 	h.mergeExistingAuthFileMetadata(record)
 	store := h.tokenStoreWithBaseDir()
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
-	legacyClaudeCredential, errLegacy := claudeauth.FindMatchingLegacyCredential(ctx, store, record)
-	if errLegacy != nil {
-		return "", errLegacy
+	var legacyClaudeCredential *coreauth.Auth
+	if !reauth {
+		var errLegacy error
+		legacyClaudeCredential, errLegacy = claudeauth.FindMatchingLegacyCredential(ctx, store, record)
+		if errLegacy != nil {
+			return "", errLegacy
+		}
+		if legacyClaudeCredential != nil {
+			coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
+		}
 	}
-	if legacyClaudeCredential != nil {
-		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
-	}
+
 	if h.postAuthHook != nil {
 		if err := h.postAuthHook(ctx, record); err != nil {
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
+	}
+	if reauth && record.Attributes["path"] != boundPath {
+		return "", fmt.Errorf("sign-in again changed the selected file")
 	}
 	savedPath, errSave := store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if errSave != nil {
@@ -1008,9 +1027,13 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if h.postAuthPersistHook != nil {
 		persistedRecord := record
 		if data, errRead := os.ReadFile(savedPath); errRead == nil && len(data) > 0 {
+			authDir := filepath.Dir(savedPath)
+			if reauth {
+				authDir = h.cfg.AuthDir
+			}
 			auths, errSynthesize := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
 				Config:           h.cfg,
-				AuthDir:          filepath.Dir(savedPath),
+				AuthDir:          authDir,
 				Now:              time.Now(),
 				IDGenerator:      synthesizer.NewStableIDGenerator(),
 				PluginAuthParser: h.pluginHost,
@@ -1019,7 +1042,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 				return savedPath, fmt.Errorf("synthesize persisted auth failed: %w", errSynthesize)
 			}
 			for _, auth := range auths {
-				if auth != nil && (auth.ID == record.ID || len(auths) == 1) {
+				if auth != nil && (auth.ID == record.ID || (!reauth && len(auths) == 1)) {
 					persistedRecord = auth
 					break
 				}
